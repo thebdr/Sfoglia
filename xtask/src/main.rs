@@ -1,8 +1,9 @@
 //! Repository tasks.
 //!
-//! `cargo run -p xtask -- formats [--check]` renders `FORMATS.md`, the user-facing
-//! format checklist, from the format clauses of `.zen/contract.md` (C-002). With
-//! `--check` it only compares and exits non-zero when the committed file is stale.
+//! `cargo run -p xtask -- formats [--check]` renders two files from the format-family
+//! clauses of `.zen/contract.md`: `FORMATS.md`, the user-facing checklist (C-002), and
+//! `src/generated/families.rs`, the extension table the application routes by (C-004).
+//! With `--check` it only compares and exits non-zero when a committed file is stale.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -34,38 +35,49 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// The two outputs, as (path relative to the repository root, renderer).
+const OUTPUTS: [(&str, fn(&str) -> Result<String, String>); 2] = [
+    ("FORMATS.md", render_formats),
+    ("src/generated/families.rs", render_families_rs),
+];
+
 fn formats(root: &Path, check: bool) -> Result<(), String> {
     let contract_path = root.join(".zen").join("contract.md");
-    let output_path = root.join("FORMATS.md");
     let contract = std::fs::read_to_string(&contract_path)
         .map_err(|e| format!("cannot read {}: {e}", contract_path.display()))?;
-    let rendered = render_formats(&contract)?;
-    if check {
-        let committed = std::fs::read_to_string(&output_path)
-            .map_err(|e| format!("cannot read {}: {e}", output_path.display()))?;
-        if committed.replace("\r\n", "\n") == rendered {
-            Ok(())
+    for (relative, render) in OUTPUTS {
+        let output_path = root.join(relative);
+        let rendered = render(&contract)?;
+        if check {
+            let committed = std::fs::read_to_string(&output_path)
+                .map_err(|e| format!("cannot read {}: {e}", output_path.display()))?;
+            if committed.replace("\r\n", "\n") != rendered {
+                return Err(format!(
+                    "{} is stale: run `cargo run -p xtask -- formats`",
+                    output_path.display()
+                ));
+            }
         } else {
-            Err(format!(
-                "{} is stale: run `cargo run -p xtask -- formats`",
-                output_path.display()
-            ))
+            if let Some(dir) = output_path.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+            std::fs::write(&output_path, &rendered)
+                .map_err(|e| format!("cannot write {}: {e}", output_path.display()))?;
+            println!("wrote {}", output_path.display());
         }
-    } else {
-        std::fs::write(&output_path, &rendered)
-            .map_err(|e| format!("cannot write {}: {e}", output_path.display()))?;
-        println!("wrote {}", output_path.display());
-        Ok(())
     }
+    Ok(())
 }
 
-/// One contract clause, as far as the checklist needs it.
+/// One contract clause, as far as the generators need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Clause {
     id: String,
     title: String,
     date: String,
     source: String,
+    family: String,
     description: String,
     status: String,
 }
@@ -90,6 +102,7 @@ fn parse_clauses(contract: &str) -> Vec<Clause> {
                         title: title.trim().to_string(),
                         date: String::new(),
                         source: String::new(),
+                        family: String::new(),
                         description: String::new(),
                         status: String::new(),
                     });
@@ -109,6 +122,7 @@ fn parse_clauses(contract: &str) -> Vec<Clause> {
                 match name {
                     "Date" => clause.date = value.to_string(),
                     "Source" => clause.source = value.to_string(),
+                    "Family" => clause.family = value.to_string(),
                     "Description" => clause.description = value.to_string(),
                     "Status" => clause.status = value.to_string(),
                     _ => {}
@@ -170,6 +184,27 @@ fn extensions(description: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(seen)
+}
+
+/// A family slug: lowercase words joined by single dashes, such as `camera-raw`.
+fn is_family_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.split('-').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// `camera-raw` becomes `CameraRaw`; `pdf-xps` becomes `PdfXps`.
+fn camel_case(slug: &str) -> String {
+    slug.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 fn read_flag(clause: &Clause) -> &'static str {
@@ -284,19 +319,27 @@ fn find_date(text: &str) -> Option<&str> {
         .find(|candidate| is_date(candidate))
 }
 
-/// A format family: a clause whose description enumerates extensions.
+/// A format family: a clause whose description enumerates extensions. It must carry a
+/// `Family:` slug, which names it in the generated code.
 struct Family {
     clause: Clause,
     extensions: Vec<String>,
 }
 
 fn families(contract: &str) -> Result<Vec<Family>, String> {
-    let mut out = Vec::new();
+    let mut out: Vec<Family> = Vec::new();
     for clause in parse_clauses(contract) {
         let extensions = extensions(&clause.description).map_err(|e| format!("{}: {e}", clause.id))?;
-        if !extensions.is_empty() {
-            out.push(Family { clause, extensions });
+        if extensions.is_empty() {
+            continue;
         }
+        if !is_family_slug(&clause.family) {
+            return Err(format!("{}: missing or malformed Family slug {:?}", clause.id, clause.family));
+        }
+        if out.iter().any(|f| f.clause.family == clause.family) {
+            return Err(format!("{}: Family slug {:?} is used twice", clause.id, clause.family));
+        }
+        out.push(Family { clause, extensions });
     }
     Ok(out)
 }
@@ -338,6 +381,73 @@ fn render_formats(contract: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// The Rust extension table: one `Family` variant per family clause, in contract order,
+/// and every extension mapped to the families that list it, sorted by extension.
+fn render_families_rs(contract: &str) -> Result<String, String> {
+    let families = families(contract)?;
+    if families.is_empty() {
+        return Err("the contract names no format family".to_string());
+    }
+    let variants: Vec<String> = families.iter().map(|f| camel_case(&f.clause.family)).collect();
+
+    let mut table: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (family, variant) in families.iter().zip(&variants) {
+        for ext in &family.extensions {
+            match table.iter_mut().find(|(e, _)| e == ext) {
+                Some((_, owners)) => owners.push(variant),
+                None => table.push((ext, vec![variant])),
+            }
+        }
+    }
+    table.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut out = String::new();
+    out.push_str("//! Generated from `.zen/contract.md` by `cargo run -p xtask -- formats`. Do not edit.\n");
+    out.push_str("//! One variant per format-family clause, in contract order; every extension the\n");
+    out.push_str("//! families enumerate, sorted, with its owners in contract order.\n\n");
+    out.push_str("/// A format family, as named by a clause of the contract.\n");
+    out.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n");
+    out.push_str("pub enum Family {\n");
+    for (family, variant) in families.iter().zip(&variants) {
+        out.push_str(&format!("    /// {} ({}).\n    {},\n", family.clause.title, family.clause.id, variant));
+    }
+    out.push_str("}\n\n");
+    out.push_str("impl Family {\n");
+    out.push_str("    /// Every family, in contract order.\n");
+    out.push_str("    pub const ALL: &[Family] = &[\n");
+    for variant in &variants {
+        out.push_str(&format!("        Family::{variant},\n"));
+    }
+    out.push_str("    ];\n\n");
+    out.push_str("    /// The slug the contract names the family by.\n");
+    out.push_str("    pub fn slug(self) -> &'static str {\n        match self {\n");
+    for (family, variant) in families.iter().zip(&variants) {
+        out.push_str(&format!("            Family::{variant} => \"{}\",\n", family.clause.family));
+    }
+    out.push_str("        }\n    }\n\n");
+    out.push_str("    /// The clause's title.\n");
+    out.push_str("    pub fn title(self) -> &'static str {\n        match self {\n");
+    for (family, variant) in families.iter().zip(&variants) {
+        out.push_str(&format!("            Family::{variant} => \"{}\",\n", family.clause.title.replace('"', "\\\"")));
+    }
+    out.push_str("        }\n    }\n\n");
+    out.push_str("    /// The clause that defines the family (a P- clause until its viewer is verified).\n");
+    out.push_str("    pub fn clause(self) -> &'static str {\n        match self {\n");
+    for (family, variant) in families.iter().zip(&variants) {
+        out.push_str(&format!("            Family::{variant} => \"{}\",\n", family.clause.id));
+    }
+    out.push_str("        }\n    }\n}\n\n");
+    out.push_str("/// Extension (lower case, no leading dot) to the families that list it, in contract order;\n");
+    out.push_str("/// sorted by extension so it can be searched with `binary_search_by_key`.\n");
+    out.push_str("pub static EXTENSIONS: &[(&str, &[Family])] = &[\n");
+    for (ext, owners) in &table {
+        let owners: Vec<String> = owners.iter().map(|v| format!("Family::{v}")).collect();
+        out.push_str(&format!("    (\"{ext}\", &[{}]),\n", owners.join(", ")));
+    }
+    out.push_str("];\n");
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +458,7 @@ mod tests {
 ## C-007: Word-processing documents
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#text-documents)
+- **Family:** word-processing
 - **Description:** Extensions: docx, odt, txt. Read: structure. Write: txt now; docx is a later extension.
 - **Verification:** automated → docx_fixture
 - **Status:** verified (2026-10-14)
@@ -355,6 +466,7 @@ mod tests {
 ## C-008: PDF viewing
 - **Date:** 2026-10-14
 - **Source:** discovery
+- **Family:** pdf-xps
 - **Description:** Extensions: pdf. Pages render. Write: out of scope.
 - **Verification:** manual: look
 - **Status:** pending verification
@@ -371,13 +483,15 @@ mod tests {
 ### P-014: Email messages
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#email)
+- **Family:** email
 - **Description:** Extensions: eml, msg, dat (winmail.dat), eml, tar.gz. Headers show. Write: out of scope.
 - **Proposed verification:** automated: headers
 
 ### P-021: Archives
 - **Date:** 2026-10-20
 - **Source:** ingest (issue-42#archives)
-- **Description:** Extensions: 7z, zip. Read: list. Write: create and update entries for 7z and zip.
+- **Family:** archives
+- **Description:** Extensions: 7z, zip, tar.gz, dat. Read: list. Write: create and update entries for 7z and zip.
 - **Proposed verification:** automated: round trip
 
 ### P-030: Not a format family
@@ -407,7 +521,9 @@ mod tests {
         assert_eq!(ids, ["C-007", "C-008", "C-009", "P-014", "P-021", "P-030"]);
         assert_eq!(clauses[0].title, "Word-processing documents");
         assert_eq!(clauses[0].date, "2026-10-14");
+        assert_eq!(clauses[0].family, "word-processing");
         assert_eq!(clauses[0].status, "verified (2026-10-14)");
+        assert_eq!(clauses[2].family, "");
         assert_eq!(clauses[3].source, "ingest (user-request-2026-10-13#email)");
         assert_eq!(clauses[4].date, "2026-10-20");
         assert_eq!(clauses[5].status, "");
@@ -468,13 +584,42 @@ mod tests {
             extensions("Extensions: dat (a (b))."),
             Err("not an extension list entry: \"dat (a (b))\"".to_string())
         );
-        assert!(render_formats("## C-001: Bad\n- **Description:** Extensions: pdf and xps.\n").is_err());
+        assert!(render_formats("## C-001: Bad\n- **Family:** bad\n- **Description:** Extensions: pdf and xps.\n").is_err());
         assert!(is_extension_token("tar.bz2"));
         assert!(is_extension_token("dvr-ms"));
         assert!(is_extension_token("3fr"));
         assert!(!is_extension_token(""));
         assert!(!is_extension_token(".hidden"));
         assert!(!is_extension_token("a b"));
+    }
+
+    #[test]
+    fn a_family_needs_one_well_formed_slug() {
+        let no_slug = "## C-001: Images\n- **Description:** Extensions: png.\n";
+        assert_eq!(
+            families(no_slug).err(),
+            Some("C-001: missing or malformed Family slug \"\"".to_string())
+        );
+        let bad_slug = "## C-001: Images\n- **Family:** Camera Raw\n- **Description:** Extensions: png.\n";
+        assert_eq!(
+            families(bad_slug).err(),
+            Some("C-001: missing or malformed Family slug \"Camera Raw\"".to_string())
+        );
+        let twice = "## C-001: A\n- **Family:** images\n- **Description:** Extensions: png.\n\
+                     ## C-002: B\n- **Family:** images\n- **Description:** Extensions: jpg.\n";
+        assert_eq!(
+            families(twice).err(),
+            Some("C-002: Family slug \"images\" is used twice".to_string())
+        );
+        for slug in ["text", "camera-raw", "pdf-xps", "mp3-audio"] {
+            assert!(is_family_slug(slug), "{slug}");
+        }
+        for slug in ["", "-", "camera--raw", "Camera", "camera raw", "camera_raw", "raw-"] {
+            assert!(!is_family_slug(slug), "{slug}");
+        }
+        assert_eq!(camel_case("camera-raw"), "CameraRaw");
+        assert_eq!(camel_case("pdf-xps"), "PdfXps");
+        assert_eq!(camel_case("text"), "Text");
     }
 
     #[test]
@@ -573,22 +718,122 @@ Generated from `.zen/contract.md` by `cargo run -p xtask -- formats`. Do not edi
 
 Legend: **done** = proven by a verified clause. **in progress** = clause exists, not yet verified. **planned** = pending clause. **later** = a later extension of the clause. **no** = out of scope.
 
-4 families, 10 extensions.
+4 families, 12 extensions.
 
 | Family | Clause | Read | Write | Requested | Extensions |
 |---|---|---|---|---|---|
 | Word-processing documents | C-007 | done | done | user request 2026-10-13 | docx, odt, txt |
 | PDF viewing | C-008 | in progress | no | discovery 2026-10-14 | pdf |
 | Email messages | P-014 | planned | no | user request 2026-10-13 | eml, msg, dat, tar.gz |
-| Archives | P-021 | planned | planned | issue 42 2026-10-20 | 7z, zip |
+| Archives | P-021 | planned | planned | issue 42 2026-10-20 | 7z, zip, tar.gz, dat |
 ";
         assert_eq!(render_formats(FIXTURE).unwrap(), expected);
-        assert!(render_formats("## C-001: Bad\n- **Description:** Extensions: pdf.\n").is_err());
+        assert!(render_formats("## C-001: Bad\n- **Family:** bad\n- **Description:** Extensions: pdf.\n").is_err());
+    }
+
+    #[test]
+    fn renders_the_expected_rust_table_for_the_fixture() {
+        let expected = "\
+//! Generated from `.zen/contract.md` by `cargo run -p xtask -- formats`. Do not edit.
+//! One variant per format-family clause, in contract order; every extension the
+//! families enumerate, sorted, with its owners in contract order.
+
+/// A format family, as named by a clause of the contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// Word-processing documents (C-007).
+    WordProcessing,
+    /// PDF viewing (C-008).
+    PdfXps,
+    /// Email messages (P-014).
+    Email,
+    /// Archives (P-021).
+    Archives,
+}
+
+impl Family {
+    /// Every family, in contract order.
+    pub const ALL: &[Family] = &[
+        Family::WordProcessing,
+        Family::PdfXps,
+        Family::Email,
+        Family::Archives,
+    ];
+
+    /// The slug the contract names the family by.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Family::WordProcessing => \"word-processing\",
+            Family::PdfXps => \"pdf-xps\",
+            Family::Email => \"email\",
+            Family::Archives => \"archives\",
+        }
+    }
+
+    /// The clause's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Family::WordProcessing => \"Word-processing documents\",
+            Family::PdfXps => \"PDF viewing\",
+            Family::Email => \"Email messages\",
+            Family::Archives => \"Archives\",
+        }
+    }
+
+    /// The clause that defines the family (a P- clause until its viewer is verified).
+    pub fn clause(self) -> &'static str {
+        match self {
+            Family::WordProcessing => \"C-007\",
+            Family::PdfXps => \"C-008\",
+            Family::Email => \"P-014\",
+            Family::Archives => \"P-021\",
+        }
+    }
+}
+
+/// Extension (lower case, no leading dot) to the families that list it, in contract order;
+/// sorted by extension so it can be searched with `binary_search_by_key`.
+pub static EXTENSIONS: &[(&str, &[Family])] = &[
+    (\"7z\", &[Family::Archives]),
+    (\"dat\", &[Family::Email, Family::Archives]),
+    (\"docx\", &[Family::WordProcessing]),
+    (\"eml\", &[Family::Email]),
+    (\"msg\", &[Family::Email]),
+    (\"odt\", &[Family::WordProcessing]),
+    (\"pdf\", &[Family::PdfXps]),
+    (\"tar.gz\", &[Family::Email, Family::Archives]),
+    (\"txt\", &[Family::WordProcessing]),
+    (\"zip\", &[Family::Archives]),
+];
+";
+        assert_eq!(render_families_rs(FIXTURE).unwrap(), expected);
+        assert!(render_families_rs("# Contract Items\n").is_err());
     }
 
     #[test]
     fn committed_checklist_matches_the_committed_contract() {
-        formats(&repo_root(), true).expect("FORMATS.md is up to date with .zen/contract.md");
+        formats(&repo_root(), true).expect("FORMATS.md and src/generated/families.rs are up to date");
+    }
+
+    #[test]
+    fn generated_family_table_matches_the_committed_contract() {
+        let root = repo_root();
+        let contract = std::fs::read_to_string(root.join(".zen/contract.md")).unwrap();
+        let committed = std::fs::read_to_string(root.join("src/generated/families.rs"))
+            .expect("src/generated/families.rs exists")
+            .replace("\r\n", "\n");
+        assert_eq!(committed, render_families_rs(&contract).unwrap());
+        // Every family slug in the contract has a variant, and the table is sorted.
+        let families = families(&contract).unwrap();
+        for family in &families {
+            assert!(committed.contains(&format!("    {},\n", camel_case(&family.clause.family))));
+        }
+        let keys: Vec<&str> = committed
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("(\""))
+            .filter_map(|l| l.split('"').next())
+            .collect();
+        assert!(keys.windows(2).all(|w| w[0] < w[1]), "extension table sorted");
     }
 
     #[test]

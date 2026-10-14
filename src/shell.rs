@@ -1,36 +1,17 @@
 //! The application shell: the native window every viewer lives in (C-001).
 
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    Bounds, Context, IntoElement, Render, Role, SharedString, TestSupportExt, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, point, px, size,
+    Bounds, IntoElement, Role, SharedString, TestSupportExt, TitlebarOptions, WindowBounds,
+    WindowOptions, div, point, px, size,
 };
 
 /// The name shown in the window title and, until a file is open, in the window body.
 pub const APP_NAME: &str = "Sfoglia";
 
-/// Root view of the main window.
-pub struct Shell;
-
-impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("shell")
-            .flex()
-            .flex_col()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(title(APP_NAME))
-    }
-}
-
 /// A one-line label whose accessibility name is the very string it renders, so a
 /// headless test that reads the name reads what is drawn.
-fn title(text: impl Into<SharedString>) -> impl IntoElement {
+pub(crate) fn title(text: impl Into<SharedString>) -> impl IntoElement {
     let text = text.into();
     div()
         .id("shell-title")

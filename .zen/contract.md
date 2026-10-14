@@ -23,6 +23,14 @@
 - **Evidence:** .zen/evidence/C-003.md
 - **Status:** verified
 
+## C-004: Open a file and route it to the right viewer
+- **Date:** 2026-10-14
+- **Source:** ingest (user-request-2026-10-13#core)
+- **Description:** A file reaches Sfoglia from the command line (every argument is a path to open), from the Open dialog (Ctrl+O, several files at once), or by dropping it onto the window. Each file is identified first by its extension, looked up in the extension table generated from this contract's family clauses, and then by its content: a definitive signature at the start of the file (PNG, JPEG, GIF, PDF, ZIP, 7z, gzip, and the other signatures in the detection table) overrides a misleading extension, an extension listed by several families is settled by content and otherwise by contract order, and a file with no known extension is text when its bytes decode as text and binary otherwise. The file is then routed to the viewer of its family; text without a family goes to the text viewer, anything binary that no viewer claims goes to the hex viewer, never to an error; an empty file is text. Until a family's viewer exists, its tab shows the file's name, path, size, detected family and the clause that will bring the viewer; a path that cannot be read still opens a tab, which states the error. Each open file is a tab in the centre of a dockable layout, several at once; opening a file that is already open activates its tab instead of adding one. The extension table and the checklist come from the same clauses, so the application and `FORMATS.md` cannot disagree, and a stale table fails `cargo test`.
+- **Verification:** automated → every_family_extension_routes_to_its_family, a_definitive_signature_overrides_a_misleading_extension, unknown_extension_is_settled_by_content, shared_extensions_are_settled_by_content_then_contract_order, empty_and_text_files_go_to_text_and_unknown_binary_to_hex, generated_family_table_matches_the_committed_contract, opening_files_adds_tabs_and_reopening_activates_the_existing_tab | exact family and viewer per fixture, exact tab list and active tab in the headless window; manual: the real app launched with two paths on Windows and on Linux shows two tabs, the Open dialog driven on Linux adds a third, and a file dropped on the window by a person opens a tab.
+- **Evidence:** .zen/evidence/C-004.md
+- **Status:** pending verification
+
 ## Pending Contract Deltas
 
 ### P-027: Release artifacts for Windows and Linux
@@ -31,16 +39,11 @@
 - **Description:** A tagged release produces installable artifacts for both platforms: a Windows zip or installer and a Linux AppImage or tarball, built by the same continuous-integration workflow that tests every commit (C-003).
 - **Proposed verification:** TBD
 
-### P-001: Open a file and route it to the right viewer
-- **Date:** 2026-10-14
-- **Source:** ingest (user-request-2026-10-13#core)
-- **Description:** A file opened from the command line, from a file dialog, or by drag and drop is identified first by extension and then by content (magic bytes, text-versus-binary sniff) and routed to the most specific viewer that claims it. Several files are open at once in tabs inside a dockable layout. A file nobody claims falls back to the hex view (P-005), never to an error.
-- **Proposed verification:** automated: a table of sample files (one per family, plus a renamed one and an unknown one) maps to the expected viewer id; a renamed `.txt` holding PNG bytes routes to the image viewer.
-
 ### P-002: Source and text viewing with syntax highlighting
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#core)
-- **Description:** Any text file opens with line numbers, virtualized rendering that stays smooth at hundreds of thousands of lines, encoding detection (UTF-8 with or without BOM, UTF-16 LE/BE, Latin-1 fallback) and line-ending detection shown in the status bar. Source files are syntax-highlighted according to their language, in a light and a dark theme. Languages come from the highlighting engine's grammar set; an unknown language still renders as plain text.
+- **Family:** text
+- **Description:** Extensions: txt, log, text. Any text file, whatever its extension, opens with line numbers, virtualized rendering that stays smooth at hundreds of thousands of lines, encoding detection (UTF-8 with or without BOM, UTF-16 LE/BE, Latin-1 fallback) and line-ending detection shown in the status bar. Source files are syntax-highlighted according to their language, in a light and a dark theme. Languages come from the highlighting engine's grammar set; an unknown language still renders as plain text.
 - **Proposed verification:** automated: encoding and line-ending detection asserts exact results on fixture files (empty file, BOM-only file, mixed endings, invalid UTF-8); highlighting asserts the exact token spans and styles for a small Rust and a small JSON fixture.
 
 ### P-003: Custom highlighting rules with regex and priority
@@ -64,12 +67,14 @@
 ### P-007: Word-processing documents
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#text-documents)
-- **Description:** Extensions: doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, txt, wps. Read: docx, dotx, docm, dotm, odt, ott, rtf and epub are rendered natively from their structure (headings, paragraphs, lists, tables, embedded images, links); a fidelity view converts through LibreOffice headless to PDF when LibreOffice is installed (P-026). Legacy doc, dot and wps open only through the LibreOffice path. txt is P-002 and P-004. Write: txt now; basic docx text editing is a later extension.
+- **Family:** word-processing
+- **Description:** Extensions: doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps. Read: docx, dotx, docm, dotm, odt, ott, rtf and epub are rendered natively from their structure (headings, paragraphs, lists, tables, embedded images, links); a fidelity view converts through LibreOffice headless to PDF when LibreOffice is installed (P-026). Legacy doc, dot and wps open only through the LibreOffice path. Plain txt belongs to P-002 and P-004. Write: basic docx text editing is a later extension.
 - **Proposed verification:** automated: structural extraction asserts exact paragraph and table text for fixtures of each native format; manual: visual check of a fixture with images and nested lists.
 
 ### P-008: PDF and XPS viewing
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#pdf-xps)
+- **Family:** pdf-xps
 - **Description:** Extensions: pdf, oxps, xps. PDF pages render crisply at any zoom with continuous scrolling, page thumbnails, outline (bookmarks), text selection and copy, text search with hit navigation, and rotation. oxps and xps open through conversion. Write for PDF is out of scope; form filling and annotation are later extensions.
 - **Proposed verification:** automated: page count, page sizes, extracted text and search hit positions assert exact values on fixtures (single page, 100 pages, encrypted without password, malformed); manual: rendering review at 50 %, 100 % and 400 %.
 
@@ -82,84 +87,98 @@
 ### P-010: Spreadsheets and delimited tables
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#spreadsheets)
+- **Family:** spreadsheets
 - **Description:** Extensions: csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm. csv and tsv open in a grid with virtual rows, delimiter, quoting and encoding detection, sortable and resizable columns, header toggle and cell search; the raw text stays editable (P-004). Excel files show every sheet with cell values, number and date formatting, merged cells and column widths; formulas show their cached value. Write: edits made in the grid save back as csv or tsv; xlsx cell edits are a later extension.
 - **Proposed verification:** automated: exact cell values and types for fixtures (quoted commas, embedded newlines, UTF-16 csv, xlsx with dates and merged cells, legacy xls); grid sort asserts exact row order.
 
 ### P-011: Presentations
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#presentations)
+- **Family:** presentations
 - **Description:** Extensions: odp, pot, potm, potx, pps, ppsx, ppt, pptm, pptx. Read: slide-by-slide navigation with slide text, images and speaker notes extracted natively for pptx, potx, pptm, potm, ppsx and odp; faithful rendering through the LibreOffice path (P-026); legacy ppt, pot and pps through LibreOffice only. Write: out of scope.
 - **Proposed verification:** automated: slide count, per-slide text and notes assert exact values on fixtures; manual: the fidelity view matches LibreOffice output.
 
 ### P-012: Visio diagrams
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#visio)
+- **Family:** visio
 - **Description:** Extensions: vdw, vdx, vsd, vsdm, vsdx, vss, vssx, vst, vstm, vstx, vsx, vtx. Read: the XML-based formats (vsdx, vstx, vssx, vsdm, vstm, vdx, vsx, vtx) render natively on a 2D canvas with pages, shapes, connectors, text and layers, with pan and zoom; the binary vsd, vss, vst and vdw open through the LibreOffice path (Visio 2003 and later). Write: out of scope.
 - **Proposed verification:** automated: page count, shape count and shape text per page assert exact values on fixtures; manual: a reference diagram renders with correct geometry and connectors.
 
 ### P-013: Microsoft Project files
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#project)
+- **Family:** project
 - **Description:** Extensions: mpp, mpt, mpx. Read: task list with name, start, finish, duration and dependencies, and a simple Gantt view. mpx is a documented text format and comes first; mpp and mpt are binary and depend on an external converter. Lowest priority of the backlog; kept so the checklist shows it as planned rather than forgotten.
 - **Proposed verification:** automated: exact task rows for an mpx fixture.
 
 ### P-014: Email messages
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#email)
+- **Family:** email
 - **Description:** Extensions: eml, emlx, msg, oft, dat (winmail.dat). The message shows headers (from, to, cc, date, subject), the body as text or rendered HTML (P-015), and the attachment list; an attachment opens inside Sfoglia without touching the disk, or is saved. msg and oft are parsed from the compound-file container; winmail.dat is unpacked as TNEF. Write: out of scope.
 - **Proposed verification:** automated: exact header values, body text and attachment names and sizes for fixtures of each format, including nested message attachments and non-ASCII subjects.
 
 ### P-015: Web pages
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#web)
+- **Family:** web
 - **Description:** Extensions: html, htm, xhtml, mht, mhtml. A native structural renderer shows headings, paragraphs, lists, tables, links, inline images and code blocks without scripts. A full-fidelity view uses an embedded webview where the platform allows it (Windows, Linux on X11); mhtml is unpacked from its MIME parts first. Write: the raw source is editable as text (P-004).
 - **Proposed verification:** automated: the structural renderer asserts the exact block tree for fixtures (nested tables, entities, broken markup); mhtml part extraction asserts exact part names and types.
 
 ### P-016: CAD drawings
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#cad)
+- **Family:** cad
 - **Description:** Extensions: dwg, dxf. dxf is read and written: entities (line, polyline, lwpolyline, arc, circle, ellipse, text, mtext, insert with blocks, hatch outline, dimensions as geometry), layers with visibility and colour, pan, zoom and fit, and a layer panel. dwg opens through an external converter to dxf when one is present; native dwg reading is a later extension. Write: dxf round-trip preserving untouched entities where the format allows.
 - **Proposed verification:** automated: entity counts per layer and exact coordinates for fixtures of DXF R12 and R2018; a read, write, read round trip asserts an identical entity set.
 
 ### P-017: Images
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#images)
+- **Family:** images
 - **Description:** Extensions: aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, gif, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm. Raster images show with zoom, fit, pan, rotation, a checkerboard behind transparency, animation playback (gif, apng) and metadata (dimensions, colour depth, EXIF). SVG renders as vectors. Fonts (ttf, dfont) show a specimen. Formats without a maintained decoder (aai, cin, pcd, pes, sfw, jxr, cdg, txd, xface) stay listed as not supported until a decoder exists. Write: save-as between raster formats.
 - **Proposed verification:** automated: decode asserts exact dimensions and a pixel checksum per supported extension fixture; a save-as round trip asserts identical pixels for lossless targets.
 
 ### P-018: Camera RAW images
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#camera-raw)
+- **Family:** camera-raw
 - **Description:** Extensions: 3fr, ari, arw, bay, cr2, cr3, crw, dcr, dng, erf, fff, iiq, kc2, kdc, mdc, mef, mos, mrw, nef, nrw, orf, pef, raf, raw, rw2, rwl, sr2, srf, srw, x3f. Read: a developed preview (demosaiced, white-balanced) with camera metadata; the embedded JPEG preview is shown first for speed. Write: out of scope.
 - **Proposed verification:** automated: decode asserts exact dimensions and camera model for fixtures of the common formats (cr2, nef, arw, dng, raf).
 
 ### P-019: Audio playback
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#audio)
+- **Family:** audio
 - **Description:** Extensions: 3ga, 3gpa, aa, aa3, at3, aac, ac3, aif, aiff, aifc, amr, ape, caf, caff, dss, dts, flac, gsm, m4a, m4b, m4r, mka, mlp, mp1, mp2, mp3, ogg, oga, oma, opus, ra, w64, wav, wma, wv, xa, xma, 8svx, act, aea, apc, au, aud, g722, htk, iss, rso, sf, ircam, mpa, mpc, paf, fap, pvf, qcp, shn, snd, sol, son, sph, nist, spx, str, tak, tta, voc, vqf. Playback through libVLC with play, pause, seek, volume, duration and tag metadata; a waveform overview is a later extension. Write: out of scope.
 - **Proposed verification:** automated: duration and tags assert exact values for wav, mp3, flac and ogg fixtures; manual: audible playback and seek on both platforms.
 
 ### P-020: Video playback through VLC
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#video)
+- **Family:** video
 - **Description:** Extensions: 3g2, 3gp, asf, avi, bik, cam, ml20, dat, divx, dvr-ms, f4v, flv, gxf, hevc, m2t, m2ts, m2v, m4v, mk3d, mkv, mod, mov, mp4, mpg, mpeg, mts, mxf, nsv, nut, nuv, ogm, ogv, pmf, pmp, rm, rmvb, thp, tp, trp, ts, vob, webm, wmv, wtv, xesc, xmv, 4xm, amv, anim, anm, bfi, bmv, c93, cak, cmv, cpk, cin, cdxl, dct, dfa, drc, duk, dv, dxa, fli, flc, flic, gdv, h263, h264, jv, k3g, skm, lvf, lxf, mad, mmv, mv, mv8, mve, mpc, mvi, p64, pva, qt, rl2, roq, rpl, san, snm, sfd, smk, tgq, tgv, tmv, vb, vc1, vid, vmd, vp3, vp5, vp6, vp7, vqa, vsr, wve, yop. libVLC decodes and hands frames to Sfoglia's GPU texture so playback works inside the window on Windows and on Linux including Wayland; controls: play, pause, seek bar, volume, audio track and subtitle selection, frame step. Whatever libVLC cannot decode is reported as such. Write: out of scope.
 - **Proposed verification:** automated: frame size, duration and track list assert exact values for mp4, mkv and webm fixtures; manual: smooth playback with audio sync on both platforms.
 
 ### P-021: Archives, with 7z read and write, as the seed of an archive manager
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#archives)
+- **Family:** archives
 - **Description:** Extensions: 7z, apk, arj, bz2, bzip2, cab, cbr, cbz, chm, cpio, dd, deb, deskthemepack, dmg, gz, gzip, hfs, iso, jar, lha, lzh, lzma, pk3, pk4, pkz, rar, rpm, tar, tar.lzma, taz, tar.z, tbz, tar.bz2, tbz2, tgz, tar.gz, txz, tar.xz, vhd, war, wim, xar, xz, z, zip, zipx. Read: list entries with size, packed size, date and method, extract all or selected, and open an entry inside Sfoglia without extracting to disk. Write: create, add, remove and update entries for 7z (LZMA2, BCJ filters, AES password), zip, and tar with gzip, xz, bzip2 or zstd. 7z comes first because its compression quality is the reference. Archive containers and compression codecs are separate traits so the user's own compression algorithm plugs in as a codec later without touching the viewer. rar and the exotic containers are read-only through a library or an installed 7-Zip when present.
 - **Proposed verification:** automated: entry lists assert exact names, sizes and CRCs for fixtures of each container; create-then-list round trips assert identical content for 7z, zip and tar variants; a password-protected 7z asserts a clear error without the password.
 
 ### P-022: Markdown rendering
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#markdown)
+- **Family:** markdown
 - **Description:** Extensions: md, markdown. Rendered view with headings, lists, tables, code blocks with syntax highlighting, images and links, with a toggle to the raw text and the two views scrolled together. Write: the raw text is editable (P-004).
 - **Proposed verification:** automated: the rendered block tree asserts exact structure for a fixture with nested lists, tables and fenced code; manual: scroll sync.
 
 ### P-023: Structured data trees
 - **Date:** 2026-10-14
 - **Source:** ingest (user-request-2026-10-13#data-trees)
+- **Family:** data-trees
 - **Description:** Extensions: json, jsonl, xml, yaml, yml, toml, ini. A collapsible tree with key, type and value columns, search by key or value, copy path, and pretty-print; the raw text shows with highlighting (P-002). Invalid files show the parse error at its line and still open as text. Write: the raw text is editable (P-004).
 - **Proposed verification:** automated: tree node counts and exact paths for fixtures, including a 50 MB json and a malformed xml.
 

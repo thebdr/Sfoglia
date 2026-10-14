@@ -4,11 +4,12 @@ Generated from `.zen/contract.md` by `cargo run -p xtask -- formats`. Do not edi
 
 Legend: **done** = proven by a verified clause. **in progress** = clause exists, not yet verified. **planned** = pending clause. **later** = a later extension of the clause. **no** = out of scope.
 
-16 families, 384 extensions.
+17 families, 386 extensions.
 
 | Family | Clause | Read | Write | Requested | Extensions |
 |---|---|---|---|---|---|
-| Word-processing documents | P-007 | planned | planned | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, txt, wps |
+| Source and text viewing with syntax highlighting | P-002 | planned | no | user request 2026-10-13 | txt, log, text |
+| Word-processing documents | P-007 | planned | later | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps |
 | PDF and XPS viewing | P-008 | planned | no | user request 2026-10-13 | pdf, oxps, xps |
 | Spreadsheets and delimited tables | P-010 | planned | planned | user request 2026-10-13 | csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm |
 | Presentations | P-011 | planned | no | user request 2026-10-13 | odp, pot, potm, potx, pps, ppsx, ppt, pptm, pptx |
