@@ -14,8 +14,10 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::dock::Panel as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, TextRun, font, px};
+use sfoglia::workspace::{FileInfo, FilePanel};
 use sfoglia::{APP_NAME, Workspace, window_options};
 
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
@@ -140,6 +142,13 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("does-not-exist.txt".into()));
         let status = window.find("file-status").label().unwrap_or_default().to_string();
         assert!(status.starts_with("Cannot read this file:"), "{status}");
+
+        // The tab is named after the file, not after the panel kind. The kit draws the
+        // tab bar from these names; the drawn tab bar itself is checked in the captures.
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), cx));
+        assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt"));
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), cx));
+        assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("does-not-exist.txt"));
     })
     .unwrap();
 }

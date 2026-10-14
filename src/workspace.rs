@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::dock::{
     BasePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
-    PanelEvent, PanelId,
+    PanelEvent, PanelId, panel_handle,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -99,6 +99,10 @@ impl BasePanel for FilePanel {
 }
 
 impl KitPanel for FilePanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some(self.info.name.clone().into())
+    }
+
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         SharedString::from(self.info.name.clone())
     }
@@ -224,8 +228,10 @@ impl Workspace {
             }
             let info = FileInfo::probe(path);
             let panel = cx.new(|cx| FilePanel::new(info, cx));
+            // The kit's handle carries the panel's title; a bare entity would show its panel_name.
+            let handle = panel_handle(panel.clone());
             self.dock_area.update(cx, |dock, cx| {
-                dock.add_panel(panel.clone(), DockPlacement::Center, None, window, cx)
+                dock.add_panel_view(handle, DockPlacement::Center, None, window, cx)
             });
             self.open.push(OpenFile { key, panel });
         }
