@@ -41,6 +41,8 @@ pub enum TextEncoding {
     Utf8Bom,
     Utf16Le,
     Utf16Be,
+    /// Not valid UTF-8, but every byte is printable Latin-1 or ordinary whitespace.
+    Latin1,
 }
 
 /// Where a file goes: a family's viewer, or the hex view for anything binary that no
@@ -233,11 +235,22 @@ fn is_text_char(c: char) -> bool {
     !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\x0c' | '\x1b')
 }
 
+/// Bytes that are not UTF-8 still read as text when none of them is a control byte
+/// other than ordinary whitespace and escape, and none is DEL: that is Latin-1 (or a
+/// Windows code page) prose, which the text viewer decodes byte by byte.
+fn looks_like_latin1(body: &[u8]) -> bool {
+    !body.is_empty()
+        && body
+            .iter()
+            .all(|&b| b >= 0x20 && b != 0x7f || matches!(b, b'\t' | b'\n' | b'\r' | 0x0c | 0x1b))
+}
+
 /// Whether `head` reads as text, and in which encoding. UTF-8 is accepted when every
 /// byte decodes (a cut-off final character is forgiven) and every character passes
 /// `is_text_char`. UTF-16 is recognised by its byte-order mark and then held to the same
 /// rule: every unit after the mark must decode (a cut-off final unit or surrogate pair
-/// is forgiven) to text characters.
+/// is forgiven) to text characters. Bytes that are not UTF-8 are Latin-1 text when they
+/// contain no control bytes beyond whitespace and escape.
 pub fn text_encoding(head: &[u8]) -> Option<TextEncoding> {
     let utf16 = |body: &[u8], encoding: TextEncoding| -> Option<TextEncoding> {
         let whole = &body[..body.len() - body.len() % 2];
@@ -269,9 +282,10 @@ pub fn text_encoding(head: &[u8]) -> Option<TextEncoding> {
     let valid = match std::str::from_utf8(body) {
         Ok(text) => text,
         Err(e) => {
-            // Only a character cut off by the end of the sample is forgiven.
+            // Only a character cut off by the end of the sample is forgiven; anything
+            // else is not UTF-8, and may still be Latin-1 text.
             if e.error_len().is_some() {
-                return None;
+                return (!bom && looks_like_latin1(body)).then_some(TextEncoding::Latin1);
             }
             std::str::from_utf8(&body[..e.valid_up_to()]).ok()?
         }
@@ -622,11 +636,24 @@ mod tests {
         assert_eq!(text_encoding("\u{feff}caffè\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>().as_slice()), Some(TextEncoding::Utf16Le));
         assert_eq!(text_encoding("caffè\tlatte\r\n".as_bytes()), Some(TextEncoding::Utf8));
         assert_eq!(text_encoding(b"abc\x00def"), None);
+        // Latin-1 prose is text; Latin-1 bytes mixed with control bytes are binary.
+        assert_eq!(text_encoding(b"caff\xe8 latte \xe0 Roma\n"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"// caff\xe8 latte\nfn main() {}\n"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"caff\xe8\x00latte"), None);
+        assert_eq!(text_encoding(b"caff\xe8\x7flatte"), None);
+        assert_eq!(text_encoding(b"\xef\xbb\xbfcaff\xe8 latte"), None, "a UTF-8 mark promises UTF-8");
+        assert_eq!(text_encoding(b"caff\xe8"), Some(TextEncoding::Utf8), "a trailing lead byte is a cut-off character");
+        let latin_source = detect("main.rs", b"// caff\xe8 latte\nfn main() {}\n");
+        assert_eq!(latin_source.content, Content::Text(TextEncoding::Latin1));
+        assert_eq!(latin_source.family, Some(Text));
+        assert_eq!(detect("README", b"caff\xe8 latte\n").family, Some(Text));
+        assert_eq!(detect("notes.md", b"caff\xe8 latte\n").family, Some(Markdown));
+        assert_eq!(detect("blob.xyz", b"caff\xe8\x00latte").route, Route::Hex);
         assert_eq!(text_encoding(b"\x1b[31mred\x1b[0m\n"), Some(TextEncoding::Utf8));
         // A multi-byte character cut by the end of the sample is still text.
         let cut = &"héllo wörld".as_bytes()[..7];
         assert_eq!(text_encoding(cut), Some(TextEncoding::Utf8));
-        assert_eq!(text_encoding(b"\xc3\x28"), None);
+        assert_eq!(text_encoding(b"\xc3\x28"), Some(TextEncoding::Latin1), "not UTF-8, but printable Latin-1");
         assert_eq!(detect("notes.txt", b"\xff\xfeh\x00i\x00").content, Content::Text(TextEncoding::Utf16Le));
         assert_eq!(sniff(b""), Content::Empty);
     }

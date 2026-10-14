@@ -266,16 +266,53 @@ fn text_files_open_in_the_editor_with_their_status_and_theme_switches(cx: &mut T
         assert!(!editor.read(cx).is_editable(), "the viewer's editor is read-only");
         window.input("XYZ", cx);
         assert_eq!(view.read(cx).text(cx).as_ref(), "one\r\ntwo\nthree\r\n");
+
+        // Latin-1 source and a Latin-1 file without extension reach the editor too, with
+        // the language of their name; the other encodings and endings show their labels.
+        let cases: [(&str, &str, &str, &str, &str); 6] = [
+            ("latin1.rs", "Latin-1", "LF", "3 lines", "rust"),
+            ("latin1-readme", "Latin-1", "LF", "2 lines", "text"),
+            ("utf16le.txt", "UTF-16 LE", "CRLF", "2 lines", "text"),
+            ("utf16be.txt", "UTF-16 BE", "LF", "2 lines", "text"),
+            ("no-final-newline.txt", "UTF-8", "none", "1 lines", "text"),
+            ("empty.txt", "UTF-8", "none", "0 lines", "text"),
+        ];
+        for (i, (name, encoding, endings, lines, language)) in cases.iter().enumerate() {
+            workspace.update(cx, |w, cx| w.open_paths(&[fixture(name)], window, cx));
+            window.render_frame(cx);
+            let view = workspace.read(cx).panels(cx)[5 + i].read(cx).text_view().cloned()
+                .unwrap_or_else(|| panic!("{name} opens in the text viewer"));
+            assert_eq!(window.find("text-encoding").label(), Some(*encoding), "{name}");
+            assert_eq!(window.find("text-line-endings").label(), Some(*endings), "{name}");
+            assert_eq!(window.find("text-lines").label(), Some(*lines), "{name}");
+            assert_eq!(window.find("text-language").label(), Some(*language), "{name}");
+            assert_eq!(view.read(cx).editor_lines(cx).max(1), lines.split(' ').next().unwrap().parse::<usize>().unwrap().max(1), "{name}");
+        }
+        let latin_rs = workspace.read(cx).panels(cx)[5].read(cx).text_view().cloned().unwrap();
+        assert_eq!(latin_rs.read(cx).status().encoding, Encoding::Latin1);
+        assert_eq!(latin_rs.read(cx).text(cx).as_ref(), "// caffè latte\nfn main() {}\n");
+        let utf16 = workspace.read(cx).panels(cx)[7].read(cx).text_view().cloned().unwrap();
+        assert_eq!(utf16.read(cx).text(cx).as_ref(), "hi\r\n");
     })
     .unwrap();
 
     // The theme flips on the action and back again. The change lands once the window
     // update ends, like any other deferred effect.
+    // The real key chord, pressed with the visible editor focused, reaches the workspace action.
     let was_dark = cx.update(|cx| cx.theme().is_dark());
-    cx.update_window(handle, |_, window, cx| window.dispatch_action(Box::new(ToggleTheme), cx))
-        .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        let active = workspace.read(cx).panels(cx).last().cloned().unwrap();
+        let editor = active.read(cx).text_view().cloned().unwrap().read(cx).editor().clone();
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        assert!(focus.is_focused(window), "the visible editor holds focus");
+        window.press("ctrl-shift-t", cx);
+    })
+    .unwrap();
     cx.run_until_parked();
     assert_ne!(cx.update(|cx| cx.theme().is_dark()), was_dark, "Ctrl+Shift+T switches the theme");
+    // The action itself, dispatched directly, switches back.
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.dispatch_action(Box::new(ToggleTheme), cx);
