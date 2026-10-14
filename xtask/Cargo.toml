@@ -1,0 +1,8 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Repository tasks: `cargo run -p xtask -- formats` regenerates FORMATS.md from .zen/contract.md"
+
+[dependencies]

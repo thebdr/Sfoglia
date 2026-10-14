@@ -1,0 +1,23 @@
+{
+  "clause": "C-001",
+  "verdict": "holds",
+  "ranAt": "2026-10-14T11:18:53.241Z",
+  "headCommit": "",
+  "tests": [
+    {
+      "name": "shell_window_shows_the_application_name",
+      "file": "tests/ui.rs",
+      "symbolSha": "1add3999a67f4052a92fcc53b3dd796d6eee81b333b1f7f905be80db8d57513c"
+    },
+    {
+      "name": "main_window_is_titled_with_the_application_name",
+      "file": "src/shell.rs",
+      "symbolSha": "a676891f5f18ceaaaf48d1a06e861cc14ecabe672b2f0364b6a4387a9be5a4f3"
+    },
+    {
+      "name": "main_window_opens_at_a_usable_size",
+      "file": "src/shell.rs",
+      "symbolSha": "a676891f5f18ceaaaf48d1a06e861cc14ecabe672b2f0364b6a4387a9be5a4f3"
+    }
+  ]
+}

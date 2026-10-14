@@ -1,0 +1,53 @@
+{
+  "clause": "C-002",
+  "verdict": "holds",
+  "ranAt": "2026-10-14T11:24:34.041Z",
+  "headCommit": "",
+  "tests": [
+    {
+      "name": "renders_the_expected_table_for_the_fixture",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "committed_checklist_matches_the_committed_contract",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "committed_contract_families_are_exactly_the_clauses_that_start_with_extensions",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "a_clause_that_mentions_extensions_in_prose_is_not_a_family",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "a_malformed_extension_token_is_an_error_not_a_row",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "extension_lists_keep_order_drop_duplicates_and_parentheses",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "flags_follow_clause_kind_status_and_write_sentence",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "parses_every_clause_with_its_fields",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    },
+    {
+      "name": "requested_by_names_the_origin_and_a_real_date",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "e6fa8bcaf841035dd2b350fd3133a48706b6713b405536c38168d160db7b6227"
+    }
+  ]
+}

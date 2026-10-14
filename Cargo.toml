@@ -1,0 +1,18 @@
+[package]
+name = "sfoglia"
+version = "0.1.0"
+edition = "2024"
+description = "Sfoglia: a viewer for any file, with editing where it is worth it."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+gpui-kit = "0.7.3"
+
+[dev-dependencies]
+gpui-kit = { version = "0.7.3", features = ["test-support"] }
+
+[workspace]
+members = ["xtask"]
+# A bare `cargo test` must run the checklist freshness check in xtask too (C-002).
+default-members = [".", "xtask"]
