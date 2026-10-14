@@ -152,6 +152,8 @@ impl Render for FilePanel {
             ),
         };
         div()
+            .id("file-panel")
+            .track_focus(&self.focus_handle)
             .size_full()
             .p_4()
             .flex()
@@ -195,9 +197,30 @@ impl Workspace {
         }
     }
 
-    /// The open files, in the order they were opened.
+    /// Whether the dock still holds this file's tab (the user may have closed it).
+    fn still_open(&self, file: &OpenFile, cx: &App) -> bool {
+        self.dock_area
+            .read(cx)
+            .panel(PanelId::from(file.panel.entity_id()))
+            .is_some()
+    }
+
+    /// The panels of the files that are open, in the order they were opened.
+    pub fn panels(&self, cx: &App) -> Vec<Entity<FilePanel>> {
+        self.open
+            .iter()
+            .filter(|f| self.still_open(f, cx))
+            .map(|f| f.panel.clone())
+            .collect()
+    }
+
+    /// The open files, in the order they were opened. A file whose tab was closed is
+    /// not open.
     pub fn open_files(&self, cx: &App) -> Vec<FileInfo> {
-        self.open.iter().map(|f| f.panel.read(cx).info.clone()).collect()
+        self.panels(cx)
+            .iter()
+            .map(|panel| panel.read(cx).info.clone())
+            .collect()
     }
 
     /// The file whose tab is active in the centre, if any.
@@ -216,8 +239,12 @@ impl Workspace {
             .map(|f| f.panel.read(cx).info.clone())
     }
 
-    /// Open every path: a new tab each, or the existing tab activated.
+    /// Open every path: a new tab each, or the existing tab activated. A file whose
+    /// tab was closed since is opened afresh.
     pub fn open_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let dock = self.dock_area.clone();
+        self.open
+            .retain(|f| dock.read(cx).panel(PanelId::from(f.panel.entity_id())).is_some());
         for path in paths {
             let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             if let Some(existing) = self.open.iter().find(|f| f.key == key) {

@@ -173,18 +173,26 @@ fn id3_signature(head: &[u8]) -> Option<Content> {
     )
 }
 
-/// The signature at the start of `head`, if any.
+/// The signature at the start of `head`, if any. A signature spelled entirely in
+/// printable text (`GIF89a`, `8BPS`, `fLaC`, `OggS`, `BZh…`) is only believed when the
+/// sample does not read as text: a real file of that kind carries binary bytes right
+/// after its magic, while a note that merely begins with those letters is text. PDF is
+/// the exception, because a whole PDF can be printable.
 pub fn signature(head: &[u8]) -> Option<Content> {
     if let Some(found) = iso_media_signature(head).or_else(|| id3_signature(head)) {
         return Some(found);
     }
+    let reads_as_text = text_encoding(head).is_some();
+    let printable = |bytes: &[u8]| bytes.iter().all(|b| (0x20..0x7f).contains(b));
     let matches_at = |offset: usize, magic: &[u8]| {
         head.len() >= offset + magic.len() && &head[offset..offset + magic.len()] == magic
     };
     SIGNATURES.iter().find_map(|s| {
         let hit = matches_at(s.offset, s.magic)
             && s.also.is_none_or(|(offset, magic)| matches_at(offset, magic));
-        hit.then_some(Content::Signature {
+        let spelled_in_text = printable(s.magic) && s.also.is_none_or(|(_, m)| printable(m));
+        let believed = hit && (s.label == "PDF" || !spelled_in_text || !reads_as_text);
+        believed.then_some(Content::Signature {
             family: s.family,
             label: s.label,
             definitive: s.definitive,
@@ -360,11 +368,26 @@ mod tests {
         // A truncated signature is not a signature.
         assert_eq!(detect("photo.txt", &PNG[..4]).family, Some(Text));
         // Plain text that merely starts with the letters of a signature stays text.
-        assert_eq!(detect("notes.txt", b"BZh is how I start this note\n").family, Some(Text));
-        assert_eq!(detect("notes.txt", b"ID3 tags explained\n").family, Some(Text));
-        assert_eq!(detect("notes.txt", b"RIFF is a container format\n").family, Some(Text));
-        assert_eq!(sniff(b"BZh is how I start this note\n"), Content::Text(TextEncoding::Utf8));
-        assert_eq!(sniff(b"ID3 tags explained\n"), Content::Text(TextEncoding::Utf8));
+        for note in [
+            b"BZh is how I start this note\n".as_slice(),
+            b"BZh91AY&SY looks like a bzip2 block but this is prose\n",
+            b"ID3 tags explained\n",
+            b"RIFF is a container format\n",
+            b"RIFF....WEBP spelled out in a note\n",
+            b"GIF89a was released in 1989.\n",
+            b"GIF87a came first.\n",
+            b"8BPS is the Photoshop magic.\n",
+            b"fLaC means FLAC.\n",
+            b"OggS is the Ogg page marker.\n",
+            b"Rar! is how RAR archives begin.\n",
+            b"7z is a format; this line is text.\n",
+        ] {
+            assert_eq!(sniff(note), Content::Text(TextEncoding::Utf8), "{}", String::from_utf8_lossy(note));
+            assert_eq!(detect("notes.txt", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
+            assert_eq!(detect("README", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
+        }
+        // A whole PDF can be printable, so its signature is believed even in text.
+        assert_eq!(detect("x.q", b"%PDF-1.4\n1 0 obj\n").family, Some(PdfXps));
     }
 
     #[test]
@@ -432,7 +455,7 @@ mod tests {
             ("doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\x00".to_vec(), sig(WordProcessing, "OLE compound container", false), WordProcessing),
             ("7z", b"7z\xbc\xaf\x27\x1c\x00\x04".to_vec(), sig(Archives, "7-Zip", true), Archives),
             ("xz", b"\xfd7zXZ\x00\x00".to_vec(), sig(Archives, "xz", true), Archives),
-            ("bz2", b"BZh91AY&SY".to_vec(), sig(Archives, "bzip2", true), Archives),
+            ("bz2", b"BZh91AY&SY\xf1\x9c\x8b\x12".to_vec(), sig(Archives, "bzip2", true), Archives),
             ("rar", b"Rar!\x1a\x07\x00".to_vec(), sig(Archives, "RAR", true), Archives),
             ("tar", tar, sig(Archives, "tar", true), Archives),
             ("tar", gnu_tar, sig(Archives, "tar", true), Archives),
@@ -466,6 +489,7 @@ mod tests {
         assert_eq!(sniff(b"ID3\x09\x00\x00"), Content::Binary);
         assert_eq!(sniff(b"RIFF\x24\x00\x00\x00ACON"), Content::Binary);
         assert_eq!(sniff(b"BZh9"), Content::Text(TextEncoding::Utf8));
+        assert_eq!(sniff(b"BZh91AY&SY"), Content::Text(TextEncoding::Utf8), "block magic alone, all printable");
         assert_eq!(sniff(b"\x00\x00\x00\x18fty"), Content::Binary);
         assert_eq!(sniff(&vec![0u8; 257]), Content::Binary);
         assert_eq!(signature(b""), None);

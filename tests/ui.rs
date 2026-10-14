@@ -14,9 +14,11 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::dock::Panel as _;
+use gpui_kit::component::dock::{ClosePanel, Panel as _};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, TextRun, font, px};
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, px,
+};
 use sfoglia::workspace::{FileInfo, FilePanel};
 use sfoglia::{APP_NAME, Workspace, window_options};
 
@@ -143,12 +145,44 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         let status = window.find("file-status").label().unwrap_or_default().to_string();
         assert!(status.starts_with("Cannot read this file:"), "{status}");
 
+        // Closing the active tab through the dock's own Close action forgets the file;
+        // opening it again adds a fresh tab and activates it.
+        workspace.update(cx, |w, cx| w.open_paths(&[dot.clone()], window, cx));
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("dot.png".into()));
+        let dot_panel = workspace.read(cx).panels(cx)[1].clone();
+        assert_eq!(dot_panel.read(cx).info().name, "dot.png");
+        let focus = dot_panel.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        assert!(focus.is_focused(window), "the active panel holds focus");
+        window.dispatch_action(Box::new(ClosePanel), cx);
+        window.render_frame(cx);
+
         // The tab is named after the file, not after the panel kind. The kit draws the
         // tab bar from these names; the drawn tab bar itself is checked in the captures.
         let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt"));
         let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("does-not-exist.txt"));
+    })
+    .unwrap();
+
+    // The dock applies a close through an event, delivered once the update above ends.
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["hello.txt", "renamed-png.txt", "does-not-exist.txt"]);
+        assert_ne!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("dot.png".into()));
+        workspace.update(cx, |w, cx| w.open_paths(&[dot.clone()], window, cx));
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["hello.txt", "renamed-png.txt", "does-not-exist.txt", "dot.png"]);
+        assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("dot.png".into()));
+        assert_eq!(window.find("file-name").label(), Some("dot.png"));
+        assert_eq!(workspace.read(cx).panels(cx).len(), 4);
     })
     .unwrap();
 }
