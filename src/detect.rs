@@ -174,6 +174,17 @@ fn id3_signature(head: &[u8]) -> Option<Content> {
     )
 }
 
+/// An untagged MP3 starts with an MPEG audio frame: eleven sync bits followed by the
+/// Layer III bits (`FF FB`, `FF FA`, `FF F3`, `FF F2`, `FF E3`, ...). JPEG's `FF D8` does
+/// not satisfy the layer bits.
+fn mp3_frame_signature(head: &[u8]) -> Option<Content> {
+    (head.len() >= 4 && head[0] == 0xff && head[1] & 0xe6 == 0xe2).then_some(Content::Signature {
+        family: Family::Audio,
+        label: "MP3 (frame sync)",
+        definitive: true,
+    })
+}
+
 /// A PDF opens with its full header line, `%PDF-1.7` followed by a line ending. A whole
 /// PDF can be printable, so this is the one signature believed inside text, and prose
 /// that merely starts with `%PDF-` does not match it.
@@ -195,6 +206,7 @@ pub fn signature(head: &[u8]) -> Option<Content> {
     if let Some(found) = pdf_signature(head)
         .or_else(|| iso_media_signature(head))
         .or_else(|| id3_signature(head))
+        .or_else(|| mp3_frame_signature(head))
     {
         return Some(found);
     }
@@ -216,16 +228,40 @@ pub fn signature(head: &[u8]) -> Option<Content> {
     })
 }
 
+/// A character text may contain: anything but a control character, except the usual
+/// whitespace controls and escape (terminal colour codes appear in logs).
+fn is_text_char(c: char) -> bool {
+    !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\x0c' | '\x1b')
+}
+
 /// Whether `head` reads as text, and in which encoding. UTF-8 is accepted when every
-/// byte decodes (a cut-off final character is forgiven) and no control characters
-/// other than tab, newline, carriage return, form feed and escape occur. UTF-16 is
-/// recognised by its byte-order mark.
+/// byte decodes (a cut-off final character is forgiven) and every character passes
+/// `is_text_char`. UTF-16 is recognised by its byte-order mark and then held to the same
+/// rule: every unit after the mark must decode (a cut-off final unit or surrogate pair
+/// is forgiven) to text characters.
 pub fn text_encoding(head: &[u8]) -> Option<TextEncoding> {
-    if head.starts_with(&[0xff, 0xfe]) {
-        return Some(TextEncoding::Utf16Le);
+    let utf16 = |body: &[u8], encoding: TextEncoding| -> Option<TextEncoding> {
+        let whole = &body[..body.len() - body.len() % 2];
+        let units = whole.chunks_exact(2).map(|pair| match encoding {
+            TextEncoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
+            _ => u16::from_be_bytes([pair[0], pair[1]]),
+        });
+        let mut decoded = char::decode_utf16(units).peekable();
+        while let Some(result) = decoded.next() {
+            match result {
+                Ok(c) if is_text_char(c) => {}
+                // An unpaired surrogate is forgiven only as the sample's last unit.
+                Err(_) if decoded.peek().is_none() => {}
+                _ => return None,
+            }
+        }
+        Some(encoding)
+    };
+    if let Some(body) = head.strip_prefix(&[0xff, 0xfe]) {
+        return utf16(body, TextEncoding::Utf16Le);
     }
-    if head.starts_with(&[0xfe, 0xff]) {
-        return Some(TextEncoding::Utf16Be);
+    if let Some(body) = head.strip_prefix(&[0xfe, 0xff]) {
+        return utf16(body, TextEncoding::Utf16Be);
     }
     let (body, bom) = match head.strip_prefix(&[0xef, 0xbb, 0xbf]) {
         Some(rest) => (rest, true),
@@ -241,10 +277,10 @@ pub fn text_encoding(head: &[u8]) -> Option<TextEncoding> {
             std::str::from_utf8(&body[..e.valid_up_to()]).ok()?
         }
     };
-    let clean = valid
+    valid
         .chars()
-        .all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\x0c' | '\x1b'));
-    clean.then_some(if bom { TextEncoding::Utf8Bom } else { TextEncoding::Utf8 })
+        .all(is_text_char)
+        .then_some(if bom { TextEncoding::Utf8Bom } else { TextEncoding::Utf8 })
 }
 
 /// Classify the leading bytes of a file.
@@ -303,9 +339,9 @@ pub fn detect(name: &str, head: &[u8]) -> Detection {
         (Content::Signature { family, definitive: true, .. }, _) => Some(family),
         // Any signature settles an extension shared by several families when it is one of them.
         (Content::Signature { family, .. }, candidates) if candidates.contains(&family) => Some(family),
-        // A known extension wins over containers, text and binary alike.
+        // A known extension wins over containers, text and binary alike; one shared by
+        // several families and settled by no signature goes to the first in contract order.
         (_, [only]) => Some(*only),
-        (Content::Text(_), candidates) if candidates.contains(&Family::Text) => Some(Family::Text),
         (_, [first, ..]) => Some(*first),
         // No known extension: content decides.
         (Content::Signature { family, .. }, []) => Some(family),
@@ -487,6 +523,9 @@ mod tests {
             ("dat", b"\x78\x9f\x3e\x22\x01\x00".to_vec(), sig(Email, "TNEF (winmail.dat)", true), Email),
             ("mp3", b"ID3\x04\x00\x00".to_vec(), sig(Audio, "MP3 (ID3)", true), Audio),
             ("mp3", b"ID3\x03\x00\x00".to_vec(), sig(Audio, "MP3 (ID3)", true), Audio),
+            ("mp3", b"\xff\xfb\x90\x64\x00\x00".to_vec(), sig(Audio, "MP3 (frame sync)", true), Audio),
+            ("mp3", b"\xff\xf3\x80\x00\x00\x00".to_vec(), sig(Audio, "MP3 (frame sync)", true), Audio),
+            ("mp3", b"\xff\xe3\x18\xc4\x00\x00".to_vec(), sig(Audio, "MP3 (frame sync)", true), Audio),
             ("flac", b"fLaC\x00\x00".to_vec(), sig(Audio, "FLAC", true), Audio),
             ("wav", b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec(), sig(Audio, "WAV", true), Audio),
             ("ogg", b"OggS\x00\x02".to_vec(), sig(Audio, "Ogg container", false), Audio),
@@ -508,6 +547,11 @@ mod tests {
             assert_eq!(own.family, Some(*family), "x.{ext}");
             assert_eq!(own.content, *content, "x.{ext}");
         }
+        // An untagged MP3 under a misleading or unknown name is still audio; JPEG is not.
+        assert_eq!(detect("song.txt", b"\xff\xfb\x90\x64\x00\x00").family, Some(Audio));
+        assert_eq!(detect("x.q", b"\xff\xfb\x90\x64\x00\x00").family, Some(Audio));
+        assert_eq!(sniff(b"\xff\xd8\xff\xe0\x00\x10"), sig(Images, "JPEG", true));
+        assert_eq!(sniff(b"\xff\xf9\x00\x00"), Content::Binary, "layer bits 00 are reserved");
         // Near misses: wrong version bytes, a missing second run, a signature cut short.
         assert_eq!(sniff(b"ID3\x09\x00\x00"), Content::Binary);
         assert_eq!(sniff(b"RIFF\x24\x00\x00\x00ACON"), Content::Binary);
@@ -557,6 +601,15 @@ mod tests {
         assert_eq!(text_encoding(b"\xef\xbb\xbfhi"), Some(TextEncoding::Utf8Bom));
         assert_eq!(text_encoding(b"\xff\xfeh\x00i\x00"), Some(TextEncoding::Utf16Le));
         assert_eq!(text_encoding(b"\xfe\xff\x00h\x00i"), Some(TextEncoding::Utf16Be));
+        // A byte-order mark followed by binary is not text; a cut-off unit or pair is forgiven.
+        assert_eq!(text_encoding(b"\xff\xfe\x00\x00\x01\x00\x02\x00"), None);
+        assert_eq!(text_encoding(b"\xfe\xff\x00\x00\x00\x01"), None);
+        assert_eq!(detect("x.q", b"\xff\xfe\x00\x00\x01\x00\x02\x00").route, Route::Hex);
+        assert_eq!(text_encoding(b"\xff\xfeh\x00i"), Some(TextEncoding::Utf16Le), "odd trailing byte");
+        assert_eq!(text_encoding(b"\xff\xfeh\x00\x3d\xd8"), Some(TextEncoding::Utf16Le), "cut-off surrogate pair");
+        assert_eq!(text_encoding(b"\xff\xfe\x3d\xd8h\x00"), None, "unpaired surrogate mid-text");
+        assert_eq!(text_encoding(b"\xff\xfe"), Some(TextEncoding::Utf16Le), "mark alone");
+        assert_eq!(text_encoding("\u{feff}caffè\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>().as_slice()), Some(TextEncoding::Utf16Le));
         assert_eq!(text_encoding("caffè\tlatte\r\n".as_bytes()), Some(TextEncoding::Utf8));
         assert_eq!(text_encoding(b"abc\x00def"), None);
         assert_eq!(text_encoding(b"\x1b[31mred\x1b[0m\n"), Some(TextEncoding::Utf8));
