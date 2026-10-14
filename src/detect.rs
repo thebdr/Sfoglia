@@ -158,10 +158,9 @@ fn iso_media_signature(head: &[u8]) -> Option<Content> {
         b"avif" | b"avis" => (Family::Images, "AVIF (ISO media)", true),
         b"M4A " | b"M4B " => (Family::Audio, "M4A (ISO media)", true),
         b"crx " => (Family::CameraRaw, "Canon CR3 (ISO media)", true),
-        b"isom" | b"iso2" | b"iso5" | b"iso6" | b"mp41" | b"mp42" | b"avc1" | b"M4V " | b"qt  "
-        | b"3gp4" | b"3gp5" | b"3gp6" | b"3g2a" | b"dash" | b"hev1" => {
-            (Family::Video, "MP4 family (ISO media)", true)
-        }
+        b"M4V " | b"qt  " => (Family::Video, "Movie (ISO media)", true),
+        // Generic brands (isom, mp42, dash, 3gp...) label audio-only files as often as
+        // movies, so they only settle an unknown extension, defaulting to video.
         _ => (Family::Video, "ISO media container", false),
     };
     Some(Content::Signature { family, label, definitive })
@@ -461,9 +460,15 @@ mod tests {
             ("p.heic", ftyp(b"heic"), Images),
             ("p.avif", ftyp(b"avif"), Images),
             ("s.m4a", ftyp(b"M4A "), Audio),
+            ("s.m4a", ftyp(b"isom"), Audio),
+            ("s.m4a", ftyp(b"mp42"), Audio),
+            ("s.m4a", ftyp(b"dash"), Audio),
+            ("b.m4b", ftyp(b"isom"), Audio),
             ("r.cr3", ftyp(b"crx "), CameraRaw),
             ("m.mp4", ftyp(b"isom"), Video),
+            ("m.mp4", ftyp(b"mp42"), Video),
             ("m.mov", ftyp(b"qt  "), Video),
+            ("v.m4v", ftyp(b"M4V "), Video),
             ("r.dng", tiff.to_vec(), CameraRaw),
             ("r.nef", tiff.to_vec(), CameraRaw),
             ("p.tif", tiff.to_vec(), Images),
@@ -488,10 +493,14 @@ mod tests {
         assert_eq!(detect("x.q", ebml).family, Some(Video));
         assert_eq!(detect("x.q", gzip).family, Some(Archives));
         assert_eq!(detect("x.q", &ftyp(b"zzzz")).content, sig(Video, "ISO media container", false));
+        assert_eq!(detect("x.q", &ftyp(b"isom")).content, sig(Video, "ISO media container", false));
+        assert_eq!(detect("x.q", &ftyp(b"isom")).family, Some(Video));
         assert_eq!(detect("x.q", &ftyp(b"heic")).content, sig(Images, "HEIF (ISO media)", true));
         assert_eq!(detect("p.txt", &ftyp(b"heic")).family, Some(Images));
         assert_eq!(detect("s.txt", &ftyp(b"M4A ")).family, Some(Audio));
+        assert_eq!(detect("m.txt", &ftyp(b"qt  ")).family, Some(Video));
         assert_eq!(detect("p.txt", &ftyp(b"zzzz")).family, Some(Text));
+        assert_eq!(detect("s.txt", &ftyp(b"isom")).family, Some(Text), "a generic brand never overrides");
     }
 
     #[test]
@@ -531,7 +540,8 @@ mod tests {
             ("ogg", b"OggS\x00\x02".to_vec(), sig(Audio, "Ogg container", false), Audio),
             ("m4a", b"\x00\x00\x00\x18ftypM4A \x00\x00".to_vec(), sig(Audio, "M4A (ISO media)", true), Audio),
             ("avi", b"RIFF\x24\x00\x00\x00AVI LIST".to_vec(), sig(Video, "AVI", true), Video),
-            ("mp4", b"\x00\x00\x00\x18ftypmp42\x00\x00".to_vec(), sig(Video, "MP4 family (ISO media)", true), Video),
+            ("mp4", b"\x00\x00\x00\x18ftypmp42\x00\x00".to_vec(), sig(Video, "ISO media container", false), Video),
+            ("mov", b"\x00\x00\x00\x14ftypqt  \x00\x00".to_vec(), sig(Video, "Movie (ISO media)", true), Video),
             ("mkv", b"\x1a\x45\xdf\xa3\x93".to_vec(), sig(Video, "Matroska container", false), Video),
             ("mpg", b"\x00\x00\x01\xba\x44".to_vec(), sig(Video, "MPEG program stream", true), Video),
             ("heic", b"\x00\x00\x00\x18ftypheic\x00\x00".to_vec(), sig(Images, "HEIF (ISO media)", true), Images),
