@@ -115,8 +115,7 @@ const SIGNATURES: &[Signature] = &[
     // TIFF is also the container of most camera RAW formats (DNG, NEF, CR2, ARW).
     sig!(b"II*\x00", 0, Images, "TIFF container", false),
     sig!(b"MM\x00*", 0, Images, "TIFF container", false),
-    // Documents
-    sig!(b"%PDF-", 0, PdfXps, "PDF", true),
+    // Documents (PDF has its own header check, see `pdf_signature`)
     sig!(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, WordProcessing, "OLE compound container", false),
     // Archives
     sig!(b"7z\xbc\xaf\x27\x1c", 0, Archives, "7-Zip", true),
@@ -146,7 +145,9 @@ const SIGNATURES: &[Signature] = &[
 /// still images (HEIF, AVIF), audio (M4A), camera RAW (Canon CR3) and movies share
 /// the container.
 fn iso_media_signature(head: &[u8]) -> Option<Content> {
-    if head.len() < 12 || &head[4..8] != b"ftyp" {
+    // The file opens with the ftyp box's big-endian size, a small number whose three
+    // leading bytes are zero; prose with "ftyp" at offset 4 has letters there instead.
+    if head.len() < 12 || &head[4..8] != b"ftyp" || head[0..3] != [0, 0, 0] {
         return None;
     }
     let brand = &head[8..12];
@@ -173,13 +174,28 @@ fn id3_signature(head: &[u8]) -> Option<Content> {
     )
 }
 
+/// A PDF opens with its full header line, `%PDF-1.7` followed by a line ending. A whole
+/// PDF can be printable, so this is the one signature believed inside text, and prose
+/// that merely starts with `%PDF-` does not match it.
+fn pdf_signature(head: &[u8]) -> Option<Content> {
+    let shaped = head.len() >= 9
+        && head.starts_with(b"%PDF-")
+        && head[5].is_ascii_digit()
+        && head[6] == b'.'
+        && head[7].is_ascii_digit()
+        && matches!(head[8], b'\r' | b'\n');
+    shaped.then_some(Content::Signature { family: Family::PdfXps, label: "PDF", definitive: true })
+}
+
 /// The signature at the start of `head`, if any. A signature spelled entirely in
 /// printable text (`GIF89a`, `8BPS`, `fLaC`, `OggS`, `BZh…`) is only believed when the
 /// sample does not read as text: a real file of that kind carries binary bytes right
-/// after its magic, while a note that merely begins with those letters is text. PDF is
-/// the exception, because a whole PDF can be printable.
+/// after its magic, while a note that merely begins with those letters is text.
 pub fn signature(head: &[u8]) -> Option<Content> {
-    if let Some(found) = iso_media_signature(head).or_else(|| id3_signature(head)) {
+    if let Some(found) = pdf_signature(head)
+        .or_else(|| iso_media_signature(head))
+        .or_else(|| id3_signature(head))
+    {
         return Some(found);
     }
     let reads_as_text = text_encoding(head).is_some();
@@ -191,7 +207,7 @@ pub fn signature(head: &[u8]) -> Option<Content> {
         let hit = matches_at(s.offset, s.magic)
             && s.also.is_none_or(|(offset, magic)| matches_at(offset, magic));
         let spelled_in_text = printable(s.magic) && s.also.is_none_or(|(_, m)| printable(m));
-        let believed = hit && (s.label == "PDF" || !spelled_in_text || !reads_as_text);
+        let believed = hit && (!spelled_in_text || !reads_as_text);
         believed.then_some(Content::Signature {
             family: s.family,
             label: s.label,
@@ -381,13 +397,20 @@ mod tests {
             b"OggS is the Ogg page marker.\n",
             b"Rar! is how RAR archives begin.\n",
             b"7z is a format; this line is text.\n",
+            b"The ftypisom brand marks an MP4 file.\n",
+            b"The ftyp box opens every MP4 file.\n",
+            b"%PDF-1.7 is the version we target.\n",
+            b"%PDF- without a version is not a header\n",
         ] {
             assert_eq!(sniff(note), Content::Text(TextEncoding::Utf8), "{}", String::from_utf8_lossy(note));
             assert_eq!(detect("notes.txt", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
             assert_eq!(detect("README", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
         }
-        // A whole PDF can be printable, so its signature is believed even in text.
+        // A whole PDF can be printable, so its full header line is believed even in text.
         assert_eq!(detect("x.q", b"%PDF-1.4\n1 0 obj\n").family, Some(PdfXps));
+        assert_eq!(detect("notes.txt", b"%PDF-1.7\r\n%\xe2\xe3\xcf\xd3\n").family, Some(PdfXps));
+        assert_eq!(sniff(b"%PDF-1.7\n"), sig(PdfXps, "PDF", true));
+        assert_eq!(sniff(b"%PDF-1.7"), Content::Text(TextEncoding::Utf8), "no line ending yet");
     }
 
     #[test]
