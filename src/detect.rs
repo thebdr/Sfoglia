@@ -1,10 +1,13 @@
 //! What a file is, and which viewer gets it (C-004).
 //!
 //! Identification is by extension first, through the table generated from the
-//! contract's family clauses, then by content: a definitive signature at the start
-//! of the file overrides a misleading extension, an extension shared by several
-//! families is settled by content and otherwise by contract order, and a file with no
-//! known extension is text when its bytes decode as text and binary otherwise.
+//! contract's family clauses, then by content. A *definitive* signature at the start
+//! of the file (PNG, PDF, 7z, ...) pins one family and overrides a misleading
+//! extension. A *container* signature shared by several families (ZIP, OLE, TIFF,
+//! Ogg, Matroska, gzip, ISO media without a telling brand) never overrides a known
+//! extension: it only settles an unknown one, or picks among the families that share
+//! an extension. A file with no known extension and no signature is text when its
+//! bytes decode as text and binary otherwise.
 
 use std::path::Path;
 
@@ -21,7 +24,8 @@ pub enum Content {
     /// Decodes as text in the given encoding.
     Text(TextEncoding),
     /// A known signature; `definitive` says whether it pins one family on its own
-    /// (PNG, PDF) or only names a container shared by many families (ZIP, OLE).
+    /// (PNG, PDF) or only names a container shared by many families (ZIP, TIFF).
+    /// For a container, `family` is the family an unknown extension defaults to.
     Signature {
         family: Family,
         label: &'static str,
@@ -79,50 +83,108 @@ pub struct Detection {
     pub route: Route,
 }
 
-/// A leading-bytes signature. `offset` is where `magic` must sit.
+/// A leading-bytes signature: `magic` at `offset`, and optionally a second run
+/// (`RIFF` at 0 together with `WAVE` at 8).
 struct Signature {
     magic: &'static [u8],
     offset: usize,
+    also: Option<(usize, &'static [u8])>,
     family: Family,
     label: &'static str,
     definitive: bool,
 }
 
+macro_rules! sig {
+    ($magic:expr, $offset:expr, $family:ident, $label:expr, $definitive:expr) => {
+        Signature { magic: $magic, offset: $offset, also: None, family: Family::$family, label: $label, definitive: $definitive }
+    };
+    ($magic:expr, $offset:expr, also $also:expr, $family:ident, $label:expr, $definitive:expr) => {
+        Signature { magic: $magic, offset: $offset, also: Some($also), family: Family::$family, label: $label, definitive: $definitive }
+    };
+}
+
 const SIGNATURES: &[Signature] = &[
-    Signature { magic: b"\x89PNG\r\n\x1a\n", offset: 0, family: Family::Images, label: "PNG", definitive: true },
-    Signature { magic: b"\xff\xd8\xff", offset: 0, family: Family::Images, label: "JPEG", definitive: true },
-    Signature { magic: b"GIF87a", offset: 0, family: Family::Images, label: "GIF", definitive: true },
-    Signature { magic: b"GIF89a", offset: 0, family: Family::Images, label: "GIF", definitive: true },
-    Signature { magic: b"WEBP", offset: 8, family: Family::Images, label: "WebP", definitive: true },
-    Signature { magic: b"II*\x00", offset: 0, family: Family::Images, label: "TIFF", definitive: true },
-    Signature { magic: b"MM\x00*", offset: 0, family: Family::Images, label: "TIFF", definitive: true },
-    Signature { magic: b"8BPS", offset: 0, family: Family::Images, label: "Photoshop", definitive: true },
-    Signature { magic: b"\x76\x2f\x31\x01", offset: 0, family: Family::Images, label: "OpenEXR", definitive: true },
-    Signature { magic: b"%PDF-", offset: 0, family: Family::PdfXps, label: "PDF", definitive: true },
-    Signature { magic: b"7z\xbc\xaf\x27\x1c", offset: 0, family: Family::Archives, label: "7-Zip", definitive: true },
-    Signature { magic: b"\x1f\x8b", offset: 0, family: Family::Archives, label: "gzip", definitive: true },
-    Signature { magic: b"\xfd7zXZ\x00", offset: 0, family: Family::Archives, label: "xz", definitive: true },
-    Signature { magic: b"BZh", offset: 0, family: Family::Archives, label: "bzip2", definitive: true },
-    Signature { magic: b"Rar!\x1a\x07", offset: 0, family: Family::Archives, label: "RAR", definitive: true },
-    Signature { magic: b"ustar", offset: 257, family: Family::Archives, label: "tar", definitive: true },
-    Signature { magic: b"PK\x03\x04", offset: 0, family: Family::Archives, label: "ZIP container", definitive: false },
-    Signature { magic: b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", offset: 0, family: Family::WordProcessing, label: "OLE compound document", definitive: false },
-    Signature { magic: b"\x78\x9f\x3e\x22", offset: 0, family: Family::Email, label: "TNEF (winmail.dat)", definitive: true },
-    Signature { magic: b"ID3", offset: 0, family: Family::Audio, label: "MP3 (ID3)", definitive: true },
-    Signature { magic: b"fLaC", offset: 0, family: Family::Audio, label: "FLAC", definitive: true },
-    Signature { magic: b"OggS", offset: 0, family: Family::Audio, label: "Ogg", definitive: true },
-    Signature { magic: b"WAVE", offset: 8, family: Family::Audio, label: "WAV", definitive: true },
-    Signature { magic: b"AVI ", offset: 8, family: Family::Video, label: "AVI", definitive: true },
-    Signature { magic: b"ftyp", offset: 4, family: Family::Video, label: "MP4 family", definitive: true },
-    Signature { magic: b"\x1a\x45\xdf\xa3", offset: 0, family: Family::Video, label: "Matroska / WebM", definitive: true },
-    Signature { magic: b"\x00\x00\x01\xba", offset: 0, family: Family::Video, label: "MPEG program stream", definitive: true },
+    // Images
+    sig!(b"\x89PNG\r\n\x1a\n", 0, Images, "PNG", true),
+    sig!(b"\xff\xd8\xff", 0, Images, "JPEG", true),
+    sig!(b"GIF87a", 0, Images, "GIF", true),
+    sig!(b"GIF89a", 0, Images, "GIF", true),
+    sig!(b"RIFF", 0, also (8, b"WEBP"), Images, "WebP", true),
+    sig!(b"8BPS", 0, Images, "Photoshop", true),
+    sig!(b"\x76\x2f\x31\x01", 0, Images, "OpenEXR", true),
+    // TIFF is also the container of most camera RAW formats (DNG, NEF, CR2, ARW).
+    sig!(b"II*\x00", 0, Images, "TIFF container", false),
+    sig!(b"MM\x00*", 0, Images, "TIFF container", false),
+    // Documents
+    sig!(b"%PDF-", 0, PdfXps, "PDF", true),
+    sig!(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, WordProcessing, "OLE compound container", false),
+    // Archives
+    sig!(b"7z\xbc\xaf\x27\x1c", 0, Archives, "7-Zip", true),
+    sig!(b"\xfd7zXZ\x00", 0, Archives, "xz", true),
+    sig!(b"BZh", 0, also (4, b"1AY&SY"), Archives, "bzip2", true),
+    sig!(b"Rar!\x1a\x07", 0, Archives, "RAR", true),
+    sig!(b"ustar\x00", 257, Archives, "tar", true),
+    sig!(b"ustar ", 257, Archives, "tar", true),
+    // gzip also wraps svgz and tar.gz; ZIP wraps docx, xlsx, pptx, odt, vsdx, jar, epub.
+    sig!(b"\x1f\x8b\x08", 0, Archives, "gzip container", false),
+    sig!(b"PK\x03\x04", 0, Archives, "ZIP container", false),
+    // Email
+    sig!(b"\x78\x9f\x3e\x22", 0, Email, "TNEF (winmail.dat)", true),
+    // Audio
+    sig!(b"fLaC", 0, Audio, "FLAC", true),
+    sig!(b"RIFF", 0, also (8, b"WAVE"), Audio, "WAV", true),
+    // Ogg carries Vorbis and Opus audio as well as Theora video.
+    sig!(b"OggS", 0, Audio, "Ogg container", false),
+    // Video
+    sig!(b"RIFF", 0, also (8, b"AVI "), Video, "AVI", true),
+    sig!(b"\x00\x00\x01\xba", 0, Video, "MPEG program stream", true),
+    // Matroska carries video (mkv, webm) and audio-only (mka) files.
+    sig!(b"\x1a\x45\xdf\xa3", 0, Video, "Matroska container", false),
 ];
+
+/// ISO base media files (`ftyp` at offset 4) are told apart by their major brand:
+/// still images (HEIF, AVIF), audio (M4A), camera RAW (Canon CR3) and movies share
+/// the container.
+fn iso_media_signature(head: &[u8]) -> Option<Content> {
+    if head.len() < 12 || &head[4..8] != b"ftyp" {
+        return None;
+    }
+    let brand = &head[8..12];
+    let (family, label, definitive) = match brand {
+        b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"heim" | b"heis" => {
+            (Family::Images, "HEIF (ISO media)", true)
+        }
+        b"avif" | b"avis" => (Family::Images, "AVIF (ISO media)", true),
+        b"M4A " | b"M4B " => (Family::Audio, "M4A (ISO media)", true),
+        b"crx " => (Family::CameraRaw, "Canon CR3 (ISO media)", true),
+        b"isom" | b"iso2" | b"iso5" | b"iso6" | b"mp41" | b"mp42" | b"avc1" | b"M4V " | b"qt  "
+        | b"3gp4" | b"3gp5" | b"3gp6" | b"3g2a" | b"dash" | b"hev1" => {
+            (Family::Video, "MP4 family (ISO media)", true)
+        }
+        _ => (Family::Video, "ISO media container", false),
+    };
+    Some(Content::Signature { family, label, definitive })
+}
+
+/// MP3 files tagged with ID3v2: `ID3`, a major version 2 to 4, revision 0.
+fn id3_signature(head: &[u8]) -> Option<Content> {
+    (head.len() >= 5 && &head[0..3] == b"ID3" && (2..=4).contains(&head[3]) && head[4] == 0).then_some(
+        Content::Signature { family: Family::Audio, label: "MP3 (ID3)", definitive: true },
+    )
+}
 
 /// The signature at the start of `head`, if any.
 pub fn signature(head: &[u8]) -> Option<Content> {
+    if let Some(found) = iso_media_signature(head).or_else(|| id3_signature(head)) {
+        return Some(found);
+    }
+    let matches_at = |offset: usize, magic: &[u8]| {
+        head.len() >= offset + magic.len() && &head[offset..offset + magic.len()] == magic
+    };
     SIGNATURES.iter().find_map(|s| {
-        let end = s.offset + s.magic.len();
-        (head.len() >= end && &head[s.offset..end] == s.magic).then_some(Content::Signature {
+        let hit = matches_at(s.offset, s.magic)
+            && s.also.is_none_or(|(offset, magic)| matches_at(offset, magic));
+        hit.then_some(Content::Signature {
             family: s.family,
             label: s.label,
             definitive: s.definitive,
@@ -212,25 +274,19 @@ pub fn detect(name: &str, head: &[u8]) -> Detection {
         .unwrap_or(&[]);
     let content = sniff(head);
 
-    let family = match content {
-        Content::Signature { family, definitive: true, .. }
-            if by_extension.is_empty() || !by_extension.contains(&family) =>
-        {
-            Some(family)
-        }
-        _ => match by_extension {
-            [only] => Some(*only),
-            [first, ..] => match content {
-                Content::Signature { family, .. } if by_extension.contains(&family) => Some(family),
-                Content::Text(_) if by_extension.contains(&Family::Text) => Some(Family::Text),
-                _ => Some(*first),
-            },
-            [] => match content {
-                Content::Empty | Content::Text(_) => Some(Family::Text),
-                Content::Signature { family, .. } => Some(family),
-                Content::Binary => None,
-            },
-        },
+    let family = match (content, by_extension) {
+        // A definitive signature pins its family, whatever the name says.
+        (Content::Signature { family, definitive: true, .. }, _) => Some(family),
+        // Any signature settles an extension shared by several families when it is one of them.
+        (Content::Signature { family, .. }, candidates) if candidates.contains(&family) => Some(family),
+        // A known extension wins over containers, text and binary alike.
+        (_, [only]) => Some(*only),
+        (Content::Text(_), candidates) if candidates.contains(&Family::Text) => Some(Family::Text),
+        (_, [first, ..]) => Some(*first),
+        // No known extension: content decides.
+        (Content::Signature { family, .. }, []) => Some(family),
+        (Content::Empty | Content::Text(_), []) => Some(Family::Text),
+        (Content::Binary, []) => None,
     };
     let route = family.map_or(Route::Hex, Route::Family);
     Detection {
@@ -245,10 +301,15 @@ pub fn detect(name: &str, head: &[u8]) -> Detection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use Family::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
     const ZIP: &[u8] = b"PK\x03\x04\x14\x00\x00\x00";
     const NOISE: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x10, 0x80, 0x00, 0x7f];
+
+    fn sig(family: Family, label: &'static str, definitive: bool) -> Content {
+        Content::Signature { family, label, definitive }
+    }
 
     #[test]
     fn every_family_extension_routes_to_its_family() {
@@ -269,10 +330,10 @@ mod tests {
             }
         }
         assert_eq!(detect("archive.tar.gz", b"").extension.as_deref(), Some("tar.gz"));
-        assert_eq!(detect("ARCHIVE.TAR.GZ", b"").family, Some(Family::Archives));
+        assert_eq!(detect("ARCHIVE.TAR.GZ", b"").family, Some(Archives));
         assert_eq!(detect("notes.backup.txt", b"").extension.as_deref(), Some("txt"));
-        assert_eq!(detect("C:\\dir.v2\\report.PDF", b"").family, Some(Family::PdfXps));
-        assert_eq!(detect("/tmp/some.dir/photo.jpeg", b"").family, Some(Family::Images));
+        assert_eq!(detect("C:\\dir.v2\\report.PDF", b"").family, Some(PdfXps));
+        assert_eq!(detect("/tmp/some.dir/photo.jpeg", b"").family, Some(Images));
         assert_eq!(extension_of("Makefile"), None);
         assert_eq!(extension_of("trailing."), None);
         assert_eq!(extension_of(".bashrc").as_deref(), Some("bashrc"));
@@ -282,54 +343,168 @@ mod tests {
     #[test]
     fn a_definitive_signature_overrides_a_misleading_extension() {
         let d = detect("photo.txt", PNG);
-        assert_eq!(d.by_extension, &[Family::Text]);
-        assert_eq!(d.content, Content::Signature { family: Family::Images, label: "PNG", definitive: true });
-        assert_eq!(d.family, Some(Family::Images));
+        assert_eq!(d.by_extension, &[Text]);
+        assert_eq!(d.content, sig(Images, "PNG", true));
+        assert_eq!(d.family, Some(Images));
         assert_eq!(d.route.id(), "images");
+        assert_eq!(detect("song.docx", b"fLaC\x00\x00\x00\x22").family, Some(Audio));
+        assert_eq!(detect("scan.csv", b"%PDF-1.7\n").family, Some(PdfXps));
         // A container signature does not: a docx is a ZIP, and stays a document.
         let d = detect("report.docx", ZIP);
-        assert_eq!(d.content, Content::Signature { family: Family::Archives, label: "ZIP container", definitive: false });
-        assert_eq!(d.family, Some(Family::WordProcessing));
+        assert_eq!(d.content, sig(Archives, "ZIP container", false));
+        assert_eq!(d.family, Some(WordProcessing));
         // Text content does not override a known extension either.
-        assert_eq!(detect("notes.pdf", b"just words\n").family, Some(Family::PdfXps));
+        assert_eq!(detect("notes.pdf", b"just words\n").family, Some(PdfXps));
         // A signature of the extension's own family changes nothing.
-        assert_eq!(detect("photo.png", PNG).family, Some(Family::Images));
+        assert_eq!(detect("photo.png", PNG).family, Some(Images));
         // A truncated signature is not a signature.
-        assert_eq!(detect("photo.txt", &PNG[..4]).family, Some(Family::Text));
+        assert_eq!(detect("photo.txt", &PNG[..4]).family, Some(Text));
+        // Plain text that merely starts with the letters of a signature stays text.
+        assert_eq!(detect("notes.txt", b"BZh is how I start this note\n").family, Some(Text));
+        assert_eq!(detect("notes.txt", b"ID3 tags explained\n").family, Some(Text));
+        assert_eq!(detect("notes.txt", b"RIFF is a container format\n").family, Some(Text));
+        assert_eq!(sniff(b"BZh is how I start this note\n"), Content::Text(TextEncoding::Utf8));
+        assert_eq!(sniff(b"ID3 tags explained\n"), Content::Text(TextEncoding::Utf8));
+    }
+
+    #[test]
+    fn container_signatures_never_override_a_known_extension() {
+        let ftyp = |brand: &[u8]| [b"\x00\x00\x00\x18ftyp".as_slice(), brand, b"\x00\x00\x00\x00"].concat();
+        let tiff: &[u8] = b"II*\x00\x08\x00\x00\x00";
+        let ogg: &[u8] = b"OggS\x00\x02\x00\x00";
+        let ebml: &[u8] = b"\x1a\x45\xdf\xa3\x93\x42\x82\x88";
+        let gzip: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00";
+        // Correctly named files keep their family, whatever shared container they use.
+        for (name, head, family) in [
+            ("p.heic", ftyp(b"heic"), Images),
+            ("p.avif", ftyp(b"avif"), Images),
+            ("s.m4a", ftyp(b"M4A "), Audio),
+            ("r.cr3", ftyp(b"crx "), CameraRaw),
+            ("m.mp4", ftyp(b"isom"), Video),
+            ("m.mov", ftyp(b"qt  "), Video),
+            ("r.dng", tiff.to_vec(), CameraRaw),
+            ("r.nef", tiff.to_vec(), CameraRaw),
+            ("p.tif", tiff.to_vec(), Images),
+            ("v.ogv", ogg.to_vec(), Video),
+            ("a.ogg", ogg.to_vec(), Audio),
+            ("a.mka", ebml.to_vec(), Audio),
+            ("v.mkv", ebml.to_vec(), Video),
+            ("i.svgz", gzip.to_vec(), Images),
+            ("t.tar.gz", gzip.to_vec(), Archives),
+            ("d.docx", ZIP.to_vec(), WordProcessing),
+            ("b.epub", ZIP.to_vec(), WordProcessing),
+            ("s.xlsx", ZIP.to_vec(), Spreadsheets),
+            ("m.msg", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1".to_vec(), Email),
+            ("w.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1".to_vec(), WordProcessing),
+        ] {
+            assert_eq!(detect(name, &head).family, Some(family), "{name}");
+        }
+        // Under an unknown extension a container falls back to its default family, and an
+        // ISO media brand that tells the family is definitive.
+        assert_eq!(detect("x.q", tiff).family, Some(Images));
+        assert_eq!(detect("x.q", ogg).family, Some(Audio));
+        assert_eq!(detect("x.q", ebml).family, Some(Video));
+        assert_eq!(detect("x.q", gzip).family, Some(Archives));
+        assert_eq!(detect("x.q", &ftyp(b"zzzz")).content, sig(Video, "ISO media container", false));
+        assert_eq!(detect("x.q", &ftyp(b"heic")).content, sig(Images, "HEIF (ISO media)", true));
+        assert_eq!(detect("p.txt", &ftyp(b"heic")).family, Some(Images));
+        assert_eq!(detect("s.txt", &ftyp(b"M4A ")).family, Some(Audio));
+        assert_eq!(detect("p.txt", &ftyp(b"zzzz")).family, Some(Text));
+    }
+
+    #[test]
+    fn every_signature_is_recognised_with_its_real_header() {
+        let mut tar = vec![0u8; 257];
+        tar.extend_from_slice(b"ustar\x00" as &[u8]);
+        let mut gnu_tar = vec![0u8; 257];
+        gnu_tar.extend_from_slice(b"ustar  \x00" as &[u8]);
+        let cases: Vec<(&str, Vec<u8>, Content, Family)> = vec![
+            ("png", PNG.to_vec(), sig(Images, "PNG", true), Images),
+            ("jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF".to_vec(), sig(Images, "JPEG", true), Images),
+            ("gif", b"GIF89a\x01\x00".to_vec(), sig(Images, "GIF", true), Images),
+            ("gif", b"GIF87a\x01\x00".to_vec(), sig(Images, "GIF", true), Images),
+            ("webp", b"RIFF\x24\x00\x00\x00WEBPVP8 ".to_vec(), sig(Images, "WebP", true), Images),
+            ("psd", b"8BPS\x00\x01".to_vec(), sig(Images, "Photoshop", true), Images),
+            ("exr", b"\x76\x2f\x31\x01\x02\x00".to_vec(), sig(Images, "OpenEXR", true), Images),
+            ("tif", b"II*\x00\x08\x00".to_vec(), sig(Images, "TIFF container", false), Images),
+            ("tif", b"MM\x00*\x00\x00".to_vec(), sig(Images, "TIFF container", false), Images),
+            ("pdf", b"%PDF-1.4\n".to_vec(), sig(PdfXps, "PDF", true), PdfXps),
+            ("doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\x00".to_vec(), sig(WordProcessing, "OLE compound container", false), WordProcessing),
+            ("7z", b"7z\xbc\xaf\x27\x1c\x00\x04".to_vec(), sig(Archives, "7-Zip", true), Archives),
+            ("xz", b"\xfd7zXZ\x00\x00".to_vec(), sig(Archives, "xz", true), Archives),
+            ("bz2", b"BZh91AY&SY".to_vec(), sig(Archives, "bzip2", true), Archives),
+            ("rar", b"Rar!\x1a\x07\x00".to_vec(), sig(Archives, "RAR", true), Archives),
+            ("tar", tar, sig(Archives, "tar", true), Archives),
+            ("tar", gnu_tar, sig(Archives, "tar", true), Archives),
+            ("gz", b"\x1f\x8b\x08\x00".to_vec(), sig(Archives, "gzip container", false), Archives),
+            ("zip", ZIP.to_vec(), sig(Archives, "ZIP container", false), Archives),
+            ("dat", b"\x78\x9f\x3e\x22\x01\x00".to_vec(), sig(Email, "TNEF (winmail.dat)", true), Email),
+            ("mp3", b"ID3\x04\x00\x00".to_vec(), sig(Audio, "MP3 (ID3)", true), Audio),
+            ("mp3", b"ID3\x03\x00\x00".to_vec(), sig(Audio, "MP3 (ID3)", true), Audio),
+            ("flac", b"fLaC\x00\x00".to_vec(), sig(Audio, "FLAC", true), Audio),
+            ("wav", b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec(), sig(Audio, "WAV", true), Audio),
+            ("ogg", b"OggS\x00\x02".to_vec(), sig(Audio, "Ogg container", false), Audio),
+            ("m4a", b"\x00\x00\x00\x18ftypM4A \x00\x00".to_vec(), sig(Audio, "M4A (ISO media)", true), Audio),
+            ("avi", b"RIFF\x24\x00\x00\x00AVI LIST".to_vec(), sig(Video, "AVI", true), Video),
+            ("mp4", b"\x00\x00\x00\x18ftypmp42\x00\x00".to_vec(), sig(Video, "MP4 family (ISO media)", true), Video),
+            ("mkv", b"\x1a\x45\xdf\xa3\x93".to_vec(), sig(Video, "Matroska container", false), Video),
+            ("mpg", b"\x00\x00\x01\xba\x44".to_vec(), sig(Video, "MPEG program stream", true), Video),
+            ("heic", b"\x00\x00\x00\x18ftypheic\x00\x00".to_vec(), sig(Images, "HEIF (ISO media)", true), Images),
+            ("avif", b"\x00\x00\x00\x18ftypavif\x00\x00".to_vec(), sig(Images, "AVIF (ISO media)", true), Images),
+            ("cr3", b"\x00\x00\x00\x18ftypcrx \x00\x00".to_vec(), sig(CameraRaw, "Canon CR3 (ISO media)", true), CameraRaw),
+        ];
+        for (ext, head, content, family) in &cases {
+            assert_eq!(sniff(head), *content, "{ext}");
+            let neutral = detect("x.q", head);
+            assert_eq!(neutral.content, *content, "x.q as {ext}");
+            assert_eq!(neutral.family, Some(*family), "x.q as {ext}");
+            let own = detect(&format!("x.{ext}"), head);
+            assert_eq!(own.family, Some(*family), "x.{ext}");
+            assert_eq!(own.content, *content, "x.{ext}");
+        }
+        // Near misses: wrong version bytes, a missing second run, a signature cut short.
+        assert_eq!(sniff(b"ID3\x09\x00\x00"), Content::Binary);
+        assert_eq!(sniff(b"RIFF\x24\x00\x00\x00ACON"), Content::Binary);
+        assert_eq!(sniff(b"BZh9"), Content::Text(TextEncoding::Utf8));
+        assert_eq!(sniff(b"\x00\x00\x00\x18fty"), Content::Binary);
+        assert_eq!(sniff(&vec![0u8; 257]), Content::Binary);
+        assert_eq!(signature(b""), None);
     }
 
     #[test]
     fn unknown_extension_is_settled_by_content() {
-        assert_eq!(detect("README", b"Sfoglia\n").family, Some(Family::Text));
+        assert_eq!(detect("README", b"Sfoglia\n").family, Some(Text));
         assert_eq!(detect("blob.xyz", NOISE).family, None);
         assert_eq!(detect("blob.xyz", NOISE).route, Route::Hex);
-        assert_eq!(detect("a.unknown", PNG).family, Some(Family::Images));
-        assert_eq!(detect("x.q", ZIP).family, Some(Family::Archives));
-        assert_eq!(detect("x.q", b"%PDF-1.7\n").family, Some(Family::PdfXps));
-        assert_eq!(detect("x.q", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest").family, Some(Family::WordProcessing));
+        assert_eq!(detect("a.unknown", PNG).family, Some(Images));
+        assert_eq!(detect("x.q", ZIP).family, Some(Archives));
+        assert_eq!(detect("x.q", b"%PDF-1.7\n").family, Some(PdfXps));
+        assert_eq!(detect("x.q", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest").family, Some(WordProcessing));
     }
 
     #[test]
     fn shared_extensions_are_settled_by_content_then_contract_order() {
-        assert_eq!(families_for_extension("dat"), &[Family::Email, Family::Video]);
-        assert_eq!(detect("winmail.dat", b"\x78\x9f\x3e\x22\x01\x00").family, Some(Family::Email));
-        assert_eq!(detect("movie.dat", b"\x00\x00\x01\xba\x44\x00").family, Some(Family::Video));
-        assert_eq!(detect("x.dat", b"").family, Some(Family::Email));
-        assert_eq!(detect("x.dat", NOISE).family, Some(Family::Email));
-        assert_eq!(families_for_extension("mpc"), &[Family::Audio, Family::Video]);
-        assert_eq!(detect("x.mpc", b"").family, Some(Family::Audio));
-        assert_eq!(families_for_extension("cin"), &[Family::Images, Family::Video]);
-        assert_eq!(detect("x.cin", b"").family, Some(Family::Images));
+        assert_eq!(families_for_extension("dat"), &[Email, Video]);
+        assert_eq!(detect("winmail.dat", b"\x78\x9f\x3e\x22\x01\x00").family, Some(Email));
+        assert_eq!(detect("movie.dat", b"\x00\x00\x01\xba\x44\x00").family, Some(Video));
+        assert_eq!(detect("x.dat", b"").family, Some(Email));
+        assert_eq!(detect("x.dat", NOISE).family, Some(Email));
+        assert_eq!(families_for_extension("mpc"), &[Audio, Video]);
+        assert_eq!(detect("x.mpc", b"").family, Some(Audio));
+        assert_eq!(families_for_extension("cin"), &[Images, Video]);
+        assert_eq!(detect("x.cin", b"").family, Some(Images));
+        // A container shared by two candidates picks the candidate it names.
+        assert_eq!(detect("x.cin", b"\x1a\x45\xdf\xa3\x93").family, Some(Video));
         assert_eq!(families_for_extension("nothing-known"), &[]);
     }
 
     #[test]
     fn empty_and_text_files_go_to_text_and_unknown_binary_to_hex() {
         let d = detect("empty", b"");
-        assert_eq!((d.content, d.family, d.route.id()), (Content::Empty, Some(Family::Text), "text"));
-        assert_eq!(detect("x.unknownext", b"").family, Some(Family::Text));
+        assert_eq!((d.content, d.family, d.route.id()), (Content::Empty, Some(Text), "text"));
+        assert_eq!(detect("x.unknownext", b"").family, Some(Text));
         // A known extension keeps its family even when the file is empty.
-        assert_eq!(detect("x.png", b"").family, Some(Family::Images));
+        assert_eq!(detect("x.png", b"").family, Some(Images));
         let d = detect("a.bin", NOISE);
         assert_eq!((d.content, d.family, d.route, d.route.clause()), (Content::Binary, None, Route::Hex, "P-005"));
         assert_eq!(text_encoding(b"\xef\xbb\xbfhi"), Some(TextEncoding::Utf8Bom));
