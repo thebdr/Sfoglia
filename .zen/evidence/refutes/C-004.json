@@ -1,0 +1,53 @@
+{
+  "clause": "C-004",
+  "verdict": "holds",
+  "ranAt": "2026-10-14T16:03:12.034Z",
+  "headCommit": "8237908534836b71479b51484bbec4e978860897",
+  "tests": [
+    {
+      "name": "every_family_extension_routes_to_its_family",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "a_definitive_signature_overrides_a_misleading_extension",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "container_signatures_never_override_a_known_extension",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "every_signature_is_recognised_with_its_real_header",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "unknown_extension_is_settled_by_content",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "shared_extensions_are_settled_by_content_then_contract_order",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "empty_and_text_files_go_to_text_and_unknown_binary_to_hex",
+      "file": "src/detect.rs",
+      "symbolSha": "f4b011aa11823f6cf7caa70a562baae82f1751caf9d69e01591893312bf3427c"
+    },
+    {
+      "name": "generated_family_table_matches_the_committed_contract",
+      "file": "xtask/src/main.rs",
+      "symbolSha": "0cb020fb94e0dab5bc26442b7036b372fece39c48a52ab3946849e6f0e999ce3"
+    },
+    {
+      "name": "opening_files_adds_tabs_and_reopening_activates_the_existing_tab",
+      "file": "tests/ui.rs",
+      "symbolSha": "9bbebd684d331f48f97373e377412d8e6908489ecbe0b463589f922e4797d691"
+    }
+  ]
+}
