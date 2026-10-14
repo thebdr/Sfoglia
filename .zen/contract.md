@@ -3,8 +3,8 @@
 ## C-001: App shell opens a native window
 - **Date:** 2026-10-14
 - **Source:** discovery
-- **Description:** Sfoglia starts as a native desktop window built on gpui-kit, from one code base, showing the application name. The window is the host for every viewer that follows. The window opens on the host platform the build was made for; the guarantee that the same commit opens on both Windows and Linux is carried by P-024 until continuous verification exists.
-- **Verification:** automated → shell_window_shows_the_application_name, main_window_is_titled_with_the_application_name, main_window_opens_at_a_usable_size | the headless gpui-kit window lays out one one-line element at the centre of the viewport whose accessibility name is the application name and whose laid-out width equals the application name shaped in the window's text style within one pixel, and the window options carry the title and size; the pinned GPUI exposes no rendered text to in-process tests, so a same-width variant of the text (a case change, for example) is not caught in-process and the drawn text itself is proven manually: the real window on Windows, launched from `target/debug/sfoglia.exe`, reports the title "Sfoglia" and its capture `.zen/evidence/runs/C-001-after.png` shows the name centred (see evidence).
+- **Description:** Sfoglia starts as a native desktop window built on gpui-kit, from one code base, showing the application name. The window is the host for every viewer that follows. The same commit opens the window on Windows and on Linux under X11; continuous verification on both platforms is C-003.
+- **Verification:** automated → shell_window_shows_the_application_name, main_window_is_titled_with_the_application_name, main_window_opens_at_a_usable_size | the headless gpui-kit window lays out one one-line element at the centre of the viewport whose accessibility name is the application name and whose laid-out width equals the application name shaped in the window's text style within one pixel, and the window options carry the title and size; the pinned GPUI exposes no rendered text to in-process tests, so a same-width variant of the text (a case change, for example) is not caught in-process and the drawn text itself is proven manually on each platform: on Windows the real window launched from `target/debug/sfoglia.exe` reports the title "Sfoglia" and its capture `.zen/evidence/runs/C-001-after.png` shows the name centred; on Linux (Mint 22.3 VM, X11) the window found by xdotool is named "Sfoglia", 1200 x 800, and its capture `.zen/evidence/runs/C-001-linux-after.png` shows the name centred (see evidence). The headless test also runs green on the Linux CI runner (C-003).
 - **Evidence:** .zen/evidence/C-001.md
 - **Status:** verified
 
@@ -21,7 +21,7 @@
 - **Description:** Every push to the main branch and every pull request builds Sfoglia and runs its whole test suite, including the headless window test and the checklist freshness check, on a Windows runner and on a Linux runner in continuous integration. A failure on either platform marks the commit red, so a platform-specific regression cannot land unnoticed. Release artifacts are P-027. Until a commit has passed both jobs, Linux claims in other clauses are unproven.
 - **Verification:** automated → test-windows, test-linux | the two GitHub Actions jobs in `.github/workflows/ci.yml`; a run is recorded with `gh run view <id> --exit-status`, whose exit code is the verdict of both jobs.
 - **Evidence:** .zen/evidence/C-003.md
-- **Status:** pending verification
+- **Status:** verified
 
 ## Pending Contract Deltas
 

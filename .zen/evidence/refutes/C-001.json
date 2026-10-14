@@ -1,8 +1,8 @@
 {
   "clause": "C-001",
   "verdict": "holds",
-  "ranAt": "2026-10-14T11:18:53.241Z",
-  "headCommit": "",
+  "ranAt": "2026-10-14T15:01:53.120Z",
+  "headCommit": "e0a51e636c86fc6e854cb0c1e0aee9a9f94513cb",
   "tests": [
     {
       "name": "shell_window_shows_the_application_name",

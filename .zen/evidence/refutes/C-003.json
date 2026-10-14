@@ -1,0 +1,18 @@
+{
+  "clause": "C-003",
+  "verdict": "holds",
+  "ranAt": "2026-10-14T14:58:46.634Z",
+  "headCommit": "e0a51e636c86fc6e854cb0c1e0aee9a9f94513cb",
+  "tests": [
+    {
+      "name": "test-windows",
+      "file": ".github/workflows/ci.yml",
+      "symbolSha": "4883e15c4cbc092d7ea06ce7e2ba7fb7a1aecbf9738b1dc12205f50433f34d30"
+    },
+    {
+      "name": "test-linux",
+      "file": ".github/workflows/ci.yml",
+      "symbolSha": "4883e15c4cbc092d7ea06ce7e2ba7fb7a1aecbf9738b1dc12205f50433f34d30"
+    }
+  ]
+}

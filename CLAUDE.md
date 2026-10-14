@@ -6,4 +6,6 @@
 - `FORMATS.md` is generated. Never edit it by hand; change the clause and regenerate.
 - Headless UI tests live in `tests/ui.rs` and need the `test-support` dev-dependency feature; the first `cargo test` after a `cargo build` recompiles the gpui stack once.
 - Screenshots from the agent shell: `CopyFromScreen` returns black; use `PrintWindow(hwnd, 2)` on the process's `MainWindowHandle` (see `.zen/evidence/C-001.md`).
-- Linux is not reachable from the agent session on this machine; Linux proof comes from CI (P-024).
+- Linux verification runs in the VMware VM `C:\_VMs\LMint\LinuxMint64.vmx` (Linux Mint 22.3, X11, llvmpipe Vulkan): start it with `vmrun -T ws start <vmx>`, address via `vmrun getGuestIPAddress <vmx> -wait`, then `ssh -i ~/.ssh/sfoglia_vm hyper@<ip>`. The shared folder `C:\_VMs\_Shared` is `/mnt/hgfs/_Shared` in the guest. WSL is unusable on this machine (company policy denies the VM service logon).
+- CI: `.github/workflows/ci.yml`, jobs `test-windows` and `test-linux`, on the public repo https://github.com/thebdr/Sfoglia.
+- Linux verification in the VM: , then fetch ~/sfoglia-linux.png.
