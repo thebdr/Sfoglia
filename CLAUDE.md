@@ -9,3 +9,5 @@
 - Linux verification runs in the VMware VM `C:\_VMs\LMint\LinuxMint64.vmx` (Linux Mint 22.3, X11, llvmpipe Vulkan): start it with `vmrun -T ws start <vmx>`, address via `vmrun getGuestIPAddress <vmx> -wait`, then `ssh -i ~/.ssh/sfoglia_vm hyper@<ip>`. The shared folder `C:\_VMs\_Shared` is `/mnt/hgfs/_Shared` in the guest. WSL is unusable on this machine (company policy denies the VM service logon).
 - CI: `.github/workflows/ci.yml`, jobs `test-windows` and `test-linux`, on the public repo https://github.com/thebdr/Sfoglia.
 - Linux verification in the VM: copy `scripts/linux-verify.sh` to the VM with scp, run it there over SSH (`bash linux-verify.sh`), then fetch `~/sfoglia-linux.png` and `~/sfoglia-linux.log`.
+- The `tree-sitter-languages` feature of gpui-kit compiles every grammar; enabling it re-resolved the lockfile and `cc` had to come down to 1.2.x (`cargo update -p cc`), see `.zen/evidence/C-005.md`.
+- Effects such as a dock close or a theme change land after the window update ends: in headless tests, leave `update_window`, call `cx.run_until_parked()`, then assert.

@@ -13,14 +13,17 @@
 
 use std::path::PathBuf;
 
+use std::time::Instant;
+
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::dock::{ClosePanel, Panel as _};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, px,
 };
+use sfoglia::text::{Encoding, LineEndings};
 use sfoglia::workspace::{FileInfo, FilePanel};
-use sfoglia::{APP_NAME, Workspace, window_options};
+use sfoglia::{APP_NAME, ToggleTheme, Workspace, window_options};
 
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
     cx.update(gpui_kit::init);
@@ -123,13 +126,16 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         assert_eq!(window.find("file-size").label(), Some("67 bytes"));
         assert_eq!(window.find("file-family").label(), Some("Images (images)"));
 
-        // Reopening the first file activates its tab; nothing is added.
+        // Reopening the first file activates its tab; nothing is added. A text file shows
+        // the text viewer (C-005) rather than the info rows.
         workspace.update(cx, |w, cx| w.open_paths(&[hello.clone()], window, cx));
         window.render_frame(cx);
         assert_eq!(workspace.read(cx).open_files(cx).len(), 2);
         assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("hello.txt".into()));
-        assert_eq!(window.find("file-viewer").label(), Some("text"));
-        assert_eq!(window.find("file-name").label(), Some("hello.txt"));
+        assert!(window.try_find("file-viewer").is_none(), "a text file shows the editor, not the info rows");
+        assert_eq!(window.find("text-language").label(), Some("text"));
+        let hello_view = workspace.read(cx).panels(cx)[0].read(cx).text_view().cloned().unwrap();
+        assert_eq!(hello_view.read(cx).text(cx).as_ref(), "Sfoglia reads anything.\nSecond line.\n");
 
         // A misleading extension is routed by content; a missing file still opens a tab.
         let missing = fixture("does-not-exist.txt");
@@ -161,9 +167,9 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
 
         // The tab is named after the file, not after the panel kind. The kit draws the
         // tab bar from these names; the drawn tab bar itself is checked in the captures.
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), cx));
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt"));
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), cx));
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("does-not-exist.txt"));
     })
     .unwrap();
@@ -185,4 +191,92 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         assert_eq!(workspace.read(cx).panels(cx).len(), 4);
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn text_files_open_in_the_editor_with_their_status_and_theme_switches(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let sample = fixture("sample.rs");
+    let latin1 = fixture("latin1.txt");
+    let dot = fixture("dot.png");
+    let expected = std::fs::read_to_string(&sample).unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[sample.clone()], window, cx));
+        window.render_frame(cx);
+
+        // The Rust file is in the editor, exactly, with its status row.
+        let panel = workspace.read(cx).panels(cx)[0].clone();
+        let view = panel.read(cx).text_view().expect("a text file opens in the text viewer").clone();
+        assert_eq!(view.read(cx).text(cx).as_ref(), expected);
+        let status = view.read(cx).status().clone();
+        assert_eq!(status.encoding, Encoding::Utf8);
+        assert_eq!(status.line_endings, LineEndings::Lf);
+        assert_eq!(status.lines, 6);
+        assert_eq!(status.language, "rust");
+        assert_eq!(window.find("text-encoding").label(), Some("UTF-8"));
+        assert_eq!(window.find("text-line-endings").label(), Some("LF"));
+        assert_eq!(window.find("text-lines").label(), Some("6 lines"));
+        assert_eq!(window.find("text-language").label(), Some("rust"));
+        assert!(window.try_find("text-replaced").is_none());
+        assert!(window.try_find("file-viewer").is_none(), "the info rows give way to the editor");
+        // The status row sits at the bottom of the panel, below an editor that fills the rest.
+        let status_row = window.find("text-status");
+        let viewport = window.viewport_size();
+        assert!(status_row.bounds().bottom() > viewport.height - px(60.), "{:?}", status_row.bounds());
+        assert!(status_row.bounds().top() > viewport.height * 0.5, "{:?}", status_row.bounds());
+
+        // Latin-1 and a binary file: the first is text in the editor, the second stays an info tab.
+        workspace.update(cx, |w, cx| w.open_paths(&[latin1.clone(), dot.clone()], window, cx));
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        let latin = panels[1].read(cx).text_view().expect("latin-1 is text").clone();
+        assert_eq!(latin.read(cx).text(cx).as_ref(), "caffè latte à Roma\n");
+        assert_eq!(latin.read(cx).status().encoding, Encoding::Latin1);
+        assert_eq!(latin.read(cx).status().language, "text");
+        assert!(panels[2].read(cx).text_view().is_none(), "a PNG is not text");
+        assert_eq!(window.find("file-viewer").label(), Some("images"));
+
+    })
+    .unwrap();
+
+    // The theme flips on the action and back again. The change lands once the window
+    // update ends, like any other deferred effect.
+    let was_dark = cx.update(|cx| cx.theme().is_dark());
+    cx.update_window(handle, |_, window, cx| window.dispatch_action(Box::new(ToggleTheme), cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_ne!(cx.update(|cx| cx.theme().is_dark()), was_dark, "Ctrl+Shift+T switches the theme");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(ToggleTheme), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.theme().is_dark()), was_dark);
+}
+
+#[gpui_kit::test]
+fn three_hundred_thousand_lines_render_a_frame_within_budget(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let big: String = (0..300_000).map(|i| format!("line {i}: the quick brown fox jumps over the lazy dog\n")).collect();
+    let path = std::env::temp_dir().join(format!("sfoglia-big-{}.txt", std::process::id()));
+    std::fs::write(&path, &big).unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        let opened = Instant::now();
+        workspace.update(cx, |w, cx| w.open_paths(&[path.clone()], window, cx));
+        window.render_frame(cx);
+        let first = opened.elapsed();
+        let timed = Instant::now();
+        window.render_frame(cx);
+        let second = timed.elapsed();
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).status().lines, 300_001);
+        assert_eq!(window.find("text-lines").label(), Some("300001 lines"));
+        println!("300k lines: open+first frame {first:?}, steady frame {second:?}");
+        assert!(second.as_millis() < 250, "a steady frame took {second:?}");
+    })
+    .unwrap();
+    let _ = std::fs::remove_file(&path);
 }

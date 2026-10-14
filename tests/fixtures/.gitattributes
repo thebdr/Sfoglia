@@ -1,2 +1,4 @@
 *.png binary
 *.bin binary
+*.txt -text
+*.rs -text

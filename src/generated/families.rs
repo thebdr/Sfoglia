@@ -5,7 +5,7 @@
 /// A format family, as named by a clause of the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
-    /// Source and text viewing with syntax highlighting (P-002).
+    /// Source and text viewing with syntax highlighting (C-005).
     Text,
     /// Word-processing documents (P-007).
     WordProcessing,
@@ -112,7 +112,7 @@ impl Family {
     /// The clause that defines the family (a P- clause until its viewer is verified).
     pub fn clause(self) -> &'static str {
         match self {
-            Family::Text => "P-002",
+            Family::Text => "C-005",
             Family::WordProcessing => "P-007",
             Family::PdfXps => "P-008",
             Family::Spreadsheets => "P-010",

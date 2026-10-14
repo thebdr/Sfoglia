@@ -10,6 +10,10 @@ Early. The application shell opens a window; everything else is planned. [FORMAT
 
 Give paths on the command line, press Ctrl+O for the Open dialog, or drop files onto the window. Each file opens in its own tab; opening a file that is already open just activates its tab. Sfoglia identifies a file by its extension first and then by its content, so a PNG renamed to `.txt` still opens as an image, and a binary file nobody claims opens in the hex view rather than failing. Until a family's viewer is built, its tab shows the file's name, path, size, detected family and the clause that will bring the viewer.
 
+## Text and source files
+
+Any text file opens in a read-only editor with line numbers; source files are highlighted by language (35 grammars, from Rust and JSON to SQL and Zig). The status row under the text names the encoding (UTF-8, UTF-8 with BOM, UTF-16 LE or BE, or Latin-1 when the bytes are not valid UTF-8), the line endings, the line count and the language. Ctrl+Shift+T switches between the light and the dark theme.
+
 ## Build and run
 
 Requirements: stable Rust (1.96 or newer), and on Windows the MSVC build tools with a Windows 10 or 11 SDK and CMake. On Linux install the system libraries gpui needs (see Zed's `script/linux` list: Vulkan, Wayland, X11-xcb, xkbcommon, fontconfig, ALSA, OpenSSL, zstd, clang, cmake).

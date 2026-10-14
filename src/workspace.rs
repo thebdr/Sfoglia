@@ -5,7 +5,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
 use gpui_kit::component::dock::{
     BasePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
     PanelEvent, PanelId, panel_handle,
@@ -17,14 +17,19 @@ use gpui_kit::{
     div,
 };
 
-use crate::detect::{Detection, Route, SNIFF_BYTES, detect};
+use crate::detect::{Content, Detection, Route, SNIFF_BYTES, detect};
+use crate::generated::families::Family;
 use crate::shell::{APP_NAME, title};
+use crate::viewers::TextView;
 
-actions!(sfoglia, [OpenFiles]);
+actions!(sfoglia, [OpenFiles, ToggleTheme]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-o", OpenFiles, Some("Workspace"))]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-o", OpenFiles, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("Workspace")),
+    ]);
 }
 
 /// What is known about an open file.
@@ -73,22 +78,58 @@ impl FileInfo {
     }
 }
 
+/// What a tab shows for its file.
+enum PanelView {
+    /// The facts about the file, until its family's viewer exists.
+    Info,
+    /// The text viewer (C-005).
+    Text(Entity<TextView>),
+}
+
 /// One open file: a tab in the centre of the dock.
 pub struct FilePanel {
     focus_handle: FocusHandle,
     info: FileInfo,
+    view: PanelView,
 }
 
 impl FilePanel {
-    pub fn new(info: FileInfo, cx: &mut Context<Self>) -> Self {
+    pub fn new(info: FileInfo, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let view = if Self::opens_as_text(&info) {
+            match std::fs::read(&info.path) {
+                Ok(bytes) => {
+                    PanelView::Text(cx.new(|cx| TextView::new(&info.name, &bytes, window, cx)))
+                }
+                Err(_) => PanelView::Info,
+            }
+        } else {
+            PanelView::Info
+        };
         Self {
             focus_handle: cx.focus_handle(),
             info,
+            view,
         }
+    }
+
+    /// A readable file whose content is text, or that is routed to the text family, opens
+    /// in the text viewer; a family with a viewer of its own will take over later.
+    fn opens_as_text(info: &FileInfo) -> bool {
+        info.error.is_none()
+            && (info.route() == Route::Family(Family::Text)
+                || matches!(info.detection.content, Content::Text(_)))
     }
 
     pub fn info(&self) -> &FileInfo {
         &self.info
+    }
+
+    /// The text viewer, when this tab shows one.
+    pub fn text_view(&self) -> Option<&Entity<TextView>> {
+        match &self.view {
+            PanelView::Text(view) => Some(view),
+            PanelView::Info => None,
+        }
     }
 }
 
@@ -134,6 +175,14 @@ fn row(id: &'static str, label: &'static str, value: impl Into<SharedString>) ->
 
 impl Render for FilePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let PanelView::Text(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
         let info = &self.info;
         let route = info.route();
         let family = info
@@ -168,6 +217,7 @@ impl Render for FilePanel {
             .child(row("file-viewer", "Viewer", route.id()))
             .child(row("file-content", "Content", format!("{:?}", info.detection.content)))
             .child(div().id("file-status").role(Role::Status).test_support().aria_label(status.clone()).child(status))
+            .into_any_element()
     }
 }
 
@@ -254,7 +304,7 @@ impl Workspace {
                 continue;
             }
             let info = FileInfo::probe(path);
-            let panel = cx.new(|cx| FilePanel::new(info, cx));
+            let panel = cx.new(|cx| FilePanel::new(info, window, cx));
             // The kit's handle carries the panel's title; a bare entity would show its panel_name.
             let handle = panel_handle(panel.clone());
             self.dock_area.update(cx, |dock, cx| {
@@ -262,6 +312,12 @@ impl Workspace {
             });
             self.open.push(OpenFile { key, panel });
         }
+        cx.notify();
+    }
+
+    fn on_toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if cx.theme().is_dark() { ThemeMode::Light } else { ThemeMode::Dark };
+        Theme::change(mode, Some(window), cx);
         cx.notify();
     }
 
@@ -290,6 +346,7 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .on_action(cx.listener(Self::on_open_files))
+            .on_action(cx.listener(Self::on_toggle_theme))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();

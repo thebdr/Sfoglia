@@ -6,6 +6,9 @@
 # BRANCH defaults to main. FILEs are paths inside the clone (for example
 # tests/fixtures/hello.txt) handed to the app on its command line. When files are given
 # the script also drives the Open dialog with Ctrl+O and types the path of a third fixture.
+# Optional steps, enabled by environment variables:
+#   TOGGLE_THEME=1   press Ctrl+Shift+T and capture ~/sfoglia-linux-dark.png, then press it again
+#   SCROLL_END=1     click into the text and press Ctrl+End, capture ~/sfoglia-linux-end.png
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -15,8 +18,11 @@ LOG="$HOME/sfoglia-linux.log"
 RESULT="$HOME/sfoglia-linux.result"
 PNG="$HOME/sfoglia-linux.png"
 PNG2="$HOME/sfoglia-linux-dialog.png"
-: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2"
+PNGDARK="$HOME/sfoglia-linux-dark.png"
+PNGEND="$HOME/sfoglia-linux-end.png"
+: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
+shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
 
 log "== clone or update ($BRANCH) =="
 if [ -d "$HOME/Sfoglia/.git" ]; then
@@ -34,6 +40,7 @@ log "build exit $BUILD"
 log "== cargo test --locked =="
 cargo test --locked >>"$LOG" 2>&1; TEST=$?
 log "test exit $TEST"
+grep -E "300k lines" "$LOG" | tail -1 | tee -a "$RESULT.timing" >/dev/null || true
 
 log "== run the app on the desktop =="
 export DISPLAY=:0
@@ -53,12 +60,22 @@ for i in $(seq 1 60); do
 done
 TITLE=""; GEOM=""; DIALOG=""
 if [ -n "$WID" ]; then
-  sleep 2
+  sleep 2.5
   TITLE=$(xdotool getwindowname "$WID" 2>/dev/null)
   GEOM=$(xdotool getwindowgeometry --shell "$WID" 2>/dev/null | tr '\n' ' ')
   xdotool windowactivate --sync "$WID" 2>/dev/null; sleep 0.5
-  scrot -o -u "$PNG" 2>>"$LOG" || scrot -o "$PNG" 2>>"$LOG"
-  log "window id=$WID title='$TITLE' $GEOM png=$( [ -s "$PNG" ] && stat -c %s "$PNG" || echo missing)"
+  shot "$PNG" "window id=$WID title='$TITLE' $GEOM"
+  if [ "${TOGGLE_THEME:-0}" = "1" ]; then
+    xdotool key --window "$WID" ctrl+shift+t; sleep 1.5
+    shot "$PNGDARK" "after Ctrl+Shift+T"
+    xdotool key --window "$WID" ctrl+shift+t; sleep 1
+  fi
+  if [ "${SCROLL_END:-0}" = "1" ]; then
+    eval "$GEOM"
+    xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2)) click 1; sleep 0.5
+    xdotool key --window "$WID" ctrl+End; sleep 1.5
+    shot "$PNGEND" "after click and Ctrl+End"
+  fi
   if [ "$#" -gt 0 ]; then
     log "== Ctrl+O: the Open dialog =="
     xdotool key --window "$WID" ctrl+o; sleep 2.5
@@ -72,8 +89,7 @@ if [ -n "$WID" ]; then
       xdotool type --delay 20 "$HOME/Sfoglia/tests/fixtures/data.json"; sleep 0.3
       xdotool key Return; sleep 2.5
       xdotool windowactivate --sync "$WID" 2>/dev/null; sleep 0.5
-      scrot -o -u "$PNG2" 2>>"$LOG" || scrot -o "$PNG2" 2>>"$LOG"
-      log "after dialog png=$( [ -s "$PNG2" ] && stat -c %s "$PNG2" || echo missing)"
+      shot "$PNG2" "after dialog"
     fi
   fi
 else
@@ -82,6 +98,7 @@ else
 fi
 kill "$APP" 2>/dev/null; wait "$APP" 2>/dev/null
 log "app stopped"
-printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
-  "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" > "$RESULT"
+printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
+  "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" \
+  "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" > "$RESULT"
 cat "$RESULT"
