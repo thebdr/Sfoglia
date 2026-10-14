@@ -343,3 +343,33 @@ fn three_hundred_thousand_lines_render_a_frame_within_budget(cx: &mut TestAppCon
     .unwrap();
     let _ = std::fs::remove_file(&path);
 }
+
+#[gpui_kit::test]
+fn long_lines_are_not_wrapped(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let long = "x".repeat(2_000);
+    let path = std::env::temp_dir().join(format!("sfoglia-long-{}.txt", std::process::id()));
+    std::fs::write(&path, format!("{long}\nshort\n")).unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[path.clone()], window, cx));
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        let editor = view.read(cx).editor().clone();
+        assert_eq!(view.read(cx).status().lines, 3);
+        assert_eq!(view.read(cx).editor_lines(cx), 3);
+        // Three logical lines, three display rows: the 2000-character line takes one row.
+        let visible = editor.read(cx).visible_row_range().expect("rows are laid out");
+        assert_eq!(visible, 0..3, "with soft wrap the long line would take many rows");
+        assert_eq!(window.find("text-lines").label(), Some("3 lines"));
+        // The long line runs past the viewport instead of wrapping, so the editor scrolls
+        // sideways: an overshoot to the left clamps to a far negative x offset.
+        editor.update(cx, |state, cx| state.set_scroll_offset(point(px(-1.0e6), px(0.)), cx));
+        window.render_frame(cx);
+        let x = f32::from(editor.read(cx).scroll_offset().x);
+        let viewport = f32::from(window.viewport_size().width);
+        assert!(x < -viewport, "the 2000-character line scrolls sideways: max x offset {x}, viewport {viewport}");
+    })
+    .unwrap();
+    let _ = std::fs::remove_file(&path);
+}
