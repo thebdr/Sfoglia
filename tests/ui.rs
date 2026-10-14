@@ -19,7 +19,8 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::dock::{ClosePanel, Panel as _};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, px,
+    AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, point,
+    px,
 };
 use sfoglia::text::{Encoding, LineEndings};
 use sfoglia::workspace::{FileInfo, FilePanel};
@@ -237,6 +238,34 @@ fn text_files_open_in_the_editor_with_their_status_and_theme_switches(cx: &mut T
         assert!(panels[2].read(cx).text_view().is_none(), "a PNG is not text");
         assert_eq!(window.find("file-viewer").label(), Some("images"));
 
+        // CR-only and mixed endings: the editor lays out as many lines as the status row
+        // counts, and the rendered row names the endings.
+        let cr = fixture("cr-only.txt");
+        let mixed = fixture("mixed-endings.txt");
+        workspace.update(cx, |w, cx| w.open_paths(&[cr.clone()], window, cx));
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[3].read(cx).text_view().cloned().unwrap();
+        assert_eq!(view.read(cx).status().lines, 3);
+        assert_eq!(view.read(cx).editor_lines(cx), 3, "the editor breaks on lone CR too");
+        assert_eq!(view.read(cx).text(cx).as_ref(), "alpha\nbeta\ngamma");
+        assert_eq!(window.find("text-line-endings").label(), Some("CR"));
+        assert_eq!(window.find("text-lines").label(), Some("3 lines"));
+        workspace.update(cx, |w, cx| w.open_paths(&[mixed.clone()], window, cx));
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[4].read(cx).text_view().cloned().unwrap();
+        assert_eq!(view.read(cx).status().lines, 4);
+        assert_eq!(view.read(cx).editor_lines(cx), 4);
+        assert_eq!(window.find("text-line-endings").label(), Some("mixed"));
+        assert_eq!(window.find("text-lines").label(), Some("4 lines"));
+        assert_eq!(window.find("text-encoding").label(), Some("UTF-8"));
+        // The editor is read-only: typing into it changes nothing.
+        let editor = view.read(cx).editor().clone();
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        assert!(!editor.read(cx).is_editable(), "the viewer's editor is read-only");
+        window.input("XYZ", cx);
+        assert_eq!(view.read(cx).text(cx).as_ref(), "one\r\ntwo\nthree\r\n");
     })
     .unwrap();
 
@@ -268,14 +297,48 @@ fn three_hundred_thousand_lines_render_a_frame_within_budget(cx: &mut TestAppCon
         workspace.update(cx, |w, cx| w.open_paths(&[path.clone()], window, cx));
         window.render_frame(cx);
         let first = opened.elapsed();
-        let timed = Instant::now();
-        window.render_frame(cx);
-        let second = timed.elapsed();
         let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        let editor = view.read(cx).editor().clone();
         assert_eq!(view.read(cx).status().lines, 300_001);
+        assert_eq!(view.read(cx).editor_lines(cx), 300_001);
         assert_eq!(window.find("text-lines").label(), Some("300001 lines"));
-        println!("300k lines: open+first frame {first:?}, steady frame {second:?}");
-        assert!(second.as_millis() < 250, "a steady frame took {second:?}");
+
+        // Only a screenful of rows is laid out at any depth, and every frame stays cheap:
+        // scroll to the top, a quarter, half, three quarters and the end of the file. The
+        // editor clamps an overshoot, which gives the real maximum offset.
+        editor.update(cx, |state, cx| state.set_scroll_offset(point(px(0.), px(-1.0e9)), cx));
+        window.render_frame(cx);
+        let max_y = f32::from(editor.read(cx).scroll_offset().y);
+        assert!(max_y < -1000.0, "the file scrolls far: max offset {max_y}");
+        let mut previous_start = 0usize;
+        let mut frames = Vec::new();
+        for (i, depth) in [0.0f32, 0.25, 0.5, 0.75, 1.0].into_iter().enumerate() {
+            editor.update(cx, |state, cx| state.set_scroll_offset(point(px(0.), px(max_y * depth)), cx));
+            let timed = Instant::now();
+            window.render_frame(cx);
+            let frame = timed.elapsed();
+            let visible = editor.read(cx).visible_row_range().expect("rows are laid out");
+            assert!(visible.len() <= 120, "depth {depth}: {visible:?} is not one screenful");
+            if depth == 0.0 {
+                assert_eq!(visible.start, 0);
+                assert!(visible.len() >= 10, "{visible:?}");
+            } else if depth == 1.0 {
+                assert_eq!(visible.end, 300_001, "the end of the file is reached: {visible:?}");
+            } else {
+                assert!(visible.len() >= 10, "depth {depth}: {visible:?}");
+                let expected = (300_001.0 * depth) as usize;
+                assert!(visible.start.abs_diff(expected) < 3_000, "depth {depth}: {visible:?} vs {expected}");
+            }
+            if i > 0 {
+                assert!(visible.start > previous_start, "depth {depth}: {visible:?} after {previous_start}");
+            }
+            previous_start = visible.start;
+            frames.push((depth, frame, visible));
+        }
+        println!("300k lines: open+first frame {first:?}; scrolled frames {frames:?}");
+        for (depth, frame, _) in &frames {
+            assert!(frame.as_millis() < 100, "frame at depth {depth} took {frame:?}");
+        }
     })
     .unwrap();
     let _ = std::fs::remove_file(&path);

@@ -2,7 +2,7 @@
 //! highlighting, and a status row naming the encoding, line endings, line count and
 //! language.
 
-use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::input::{Editor, EditorState, RopeExt as _};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -33,12 +33,13 @@ impl TextView {
     pub fn new(name: &str, bytes: &[u8], window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Decoded { text, encoding, line_endings, lines, replaced } = decode(bytes);
         let language = language_for(name).unwrap_or("text");
+        let shown = display_text(&text, line_endings);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(language)
                 .line_number(true)
                 .soft_wrap(false)
-                .default_value(text)
+                .default_value(shown)
         });
         Self {
             editor,
@@ -58,6 +59,49 @@ impl TextView {
     pub fn text(&self, cx: &App) -> SharedString {
         self.editor.read(cx).value()
     }
+
+    /// The number of lines the editor lays out, which must agree with the status row.
+    pub fn editor_lines(&self, cx: &App) -> usize {
+        self.editor.read(cx).text().lines_len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lone_carriage_returns_become_line_feeds_for_display_only() {
+        assert_eq!(display_text("alpha\rbeta\rgamma", LineEndings::Cr), "alpha\nbeta\ngamma");
+        assert_eq!(display_text("one\r\ntwo\nthree\r\n", LineEndings::Mixed), "one\r\ntwo\nthree\r\n");
+        assert_eq!(display_text("a\n\r", LineEndings::Mixed), "a\n\n");
+        assert_eq!(display_text("a\r\nb\rc", LineEndings::Mixed), "a\r\nb\nc");
+        assert_eq!(display_text("a\r\nb\r\n", LineEndings::CrLf), "a\r\nb\r\n");
+        assert_eq!(display_text("a\nb", LineEndings::Lf), "a\nb");
+        assert_eq!(display_text("", LineEndings::None), "");
+        assert_eq!(display_text("caffè\rlatte", LineEndings::Cr), "caffè\nlatte");
+    }
+}
+
+/// The text as the editor shows it. The editor breaks lines on LF only, so a lone CR
+/// (old Mac endings, or a stray one in a mixed file) becomes LF for display; the status
+/// row still reports the file's real endings, and CRLF is left as it is.
+pub fn display_text(text: &str, line_endings: LineEndings) -> String {
+    if !matches!(line_endings, LineEndings::Cr | LineEndings::Mixed) {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) != Some(&b'\n') {
+            out.push(b'\n');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("only ASCII CR bytes were replaced")
 }
 
 fn status_item(id: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
