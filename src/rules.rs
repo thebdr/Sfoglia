@@ -505,9 +505,21 @@ mod tests {
         assert_eq!(pieces(&spans), [(0..6, 0), (6..12, 1)]);
         let spans = resolve(vec![candidate(4..8, 5, 0), candidate(4..20, 5, 1)]);
         assert_eq!(pieces(&spans), [(4..20, 1)]);
-        // Identical range and priority: the rule declared first wins.
+        // Identical range and priority: the rule declared first wins, across sets in file
+        // order: the second rule of the first set beats the first rule of the second set.
         let spans = resolve(vec![candidate(4..8, 5, 1), candidate(4..8, 5, 0)]);
         assert_eq!(pieces(&spans), [(4..8, 0)]);
+        let spans = resolve(vec![
+            Candidate { range: 4..8, priority: 5, set: 1, rule: 0 },
+            Candidate { range: 4..8, priority: 5, set: 0, rule: 1 },
+        ]);
+        assert_eq!(spans, [Span { range: 4..8, set: 0, rule: 1 }]);
+        let file = RuleFile::parse(
+            "[[set]]\nfiles = \"*\"\n[[set.rule]]\npattern = \"zzz\"\n[[set.rule]]\nname = \"first-set\"\npattern = \"abc\"\n\n[[set]]\nfiles = \"*\"\n[[set.rule]]\nname = \"second-set\"\npattern = \"abc\"\n",
+        );
+        let spans = file.spans("a.txt", "abc");
+        assert_eq!(spans, [Span { range: 0..3, set: 0, rule: 1 }]);
+        assert_eq!(file.rule(&spans[0]).name, "first-set");
         // A loser under several winners is cut into every free piece.
         let spans = resolve(vec![
             candidate(0..30, 0, 0),
