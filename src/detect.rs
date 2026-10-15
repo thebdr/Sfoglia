@@ -209,12 +209,19 @@ pub fn signature(head: &[u8]) -> Option<Content> {
     if let Some(found) = pdf_signature(head)
         .or_else(|| iso_media_signature(head))
         .or_else(|| id3_signature(head))
-        .or_else(|| mp3_frame_signature(head))
     {
         return Some(found);
     }
     let reads_as_text = text_encoding(head).is_some();
-    let printable = |bytes: &[u8]| bytes.iter().all(|b| (0x20..0x7f).contains(b));
+    // An MP3 frame sync is two high bytes that single-byte text may begin with (`ÿû`);
+    // a real frame is followed by binary data, so it too is believed only outside text.
+    if !reads_as_text {
+        if let Some(found) = mp3_frame_signature(head) {
+            return Some(found);
+        }
+    }
+    // Printable in the single-byte sense, which is what `looks_like_latin1` accepts.
+    let printable = |bytes: &[u8]| bytes.iter().all(|&b| b >= 0x20 && b != 0x7f);
     let matches_at = |offset: usize, magic: &[u8]| {
         head.len() >= offset + magic.len() && &head[offset..offset + magic.len()] == magic
     };
@@ -437,6 +444,8 @@ mod tests {
         // A truncated signature is not a signature.
         assert_eq!(detect("photo.txt", &PNG[..4]).family, Some(Text));
         // Plain text that merely starts with the letters of a signature stays text.
+        // A whole-file sample whose final bytes do not decode: the cut-off is forgiven.
+        assert_eq!(sniff(b"\xef\xbb\xbfcaff\xe8"), Content::Text(TextEncoding::Utf8Bom));
         for note in [
             b"BZh is how I start this note\n".as_slice(),
             b"BZh91AY&SY looks like a bzip2 block but this is prose\n",
@@ -454,10 +463,15 @@ mod tests {
             b"The ftyp box opens every MP4 file.\n",
             b"%PDF-1.7 is the version we target.\n",
             b"%PDF- without a version is not a header\n",
+            // Single-byte text that begins like an MP3 frame, a JPEG or a TNEF file.
+            b"\xff\xfb le prime lettere di questa nota\n",
+            b"\xff\xd8\xff a Latin-1 note starting with y-umlaut\n",
+            b"x\x9f>\" looks like TNEF but is prose\n",
         ] {
-            assert_eq!(sniff(note), Content::Text(TextEncoding::Utf8), "{}", String::from_utf8_lossy(note));
-            assert_eq!(detect("notes.txt", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
-            assert_eq!(detect("README", note).family, Some(Text), "{}", String::from_utf8_lossy(note));
+            let shown = String::from_utf8_lossy(note);
+            assert!(matches!(sniff(note), Content::Text(TextEncoding::Utf8 | TextEncoding::Latin1)), "{shown}");
+            assert_eq!(detect("notes.txt", note).family, Some(Text), "{shown}");
+            assert_eq!(detect("README", note).family, Some(Text), "{shown}");
         }
         // A whole PDF can be printable, so its full header line is believed even in text.
         assert_eq!(detect("x.q", b"%PDF-1.4\n1 0 obj\n").family, Some(PdfXps));
