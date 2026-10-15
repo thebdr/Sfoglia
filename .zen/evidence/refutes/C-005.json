@@ -1,0 +1,43 @@
+{
+  "clause": "C-005",
+  "verdict": "holds",
+  "ranAt": "2026-10-15T09:11:48.967Z",
+  "headCommit": "46388a049da8cda041e49bae25abce2c411be557",
+  "tests": [
+    {
+      "name": "decoding_names_the_encoding_and_falls_back_to_latin1",
+      "file": "src/text.rs",
+      "symbolSha": "7f6d56f763ba8177d725f6ecf7c54c4316af328430abfb6c448fa25be46197c7"
+    },
+    {
+      "name": "line_endings_and_line_counts_are_exact",
+      "file": "src/text.rs",
+      "symbolSha": "7f6d56f763ba8177d725f6ecf7c54c4316af328430abfb6c448fa25be46197c7"
+    },
+    {
+      "name": "every_language_mapping_names_a_known_grammar",
+      "file": "tests/highlight.rs",
+      "symbolSha": "e484bbffe4900133ffdd5e00f13c902bfda8e2e94733a9775d6507e18bcff940"
+    },
+    {
+      "name": "rust_and_json_highlight_with_the_exact_token_spans",
+      "file": "tests/highlight.rs",
+      "symbolSha": "e484bbffe4900133ffdd5e00f13c902bfda8e2e94733a9775d6507e18bcff940"
+    },
+    {
+      "name": "text_files_open_in_the_editor_with_their_status_and_theme_switches",
+      "file": "tests/ui.rs",
+      "symbolSha": "a9f9e57563f477b0372826117ca26285c204a1c5bf8675f75fc7c991e97d7807"
+    },
+    {
+      "name": "three_hundred_thousand_lines_render_a_frame_within_budget",
+      "file": "tests/ui.rs",
+      "symbolSha": "a9f9e57563f477b0372826117ca26285c204a1c5bf8675f75fc7c991e97d7807"
+    },
+    {
+      "name": "long_lines_are_not_wrapped",
+      "file": "tests/ui.rs",
+      "symbolSha": "a9f9e57563f477b0372826117ca26285c204a1c5bf8675f75fc7c991e97d7807"
+    }
+  ]
+}

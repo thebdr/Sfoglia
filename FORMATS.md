@@ -8,7 +8,7 @@ Legend: **done** = proven by a verified clause. **in progress** = clause exists,
 
 | Family | Clause | Read | Write | Requested | Extensions |
 |---|---|---|---|---|---|
-| Source and text viewing with syntax highlighting | C-005 | in progress | no | user request 2026-10-13 | txt, log, text |
+| Source and text viewing with syntax highlighting | C-005 | done | no | user request 2026-10-13 | txt, log, text |
 | Word-processing documents | P-007 | planned | later | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps |
 | PDF and XPS viewing | P-008 | planned | no | user request 2026-10-13 | pdf, oxps, xps |
 | Spreadsheets and delimited tables | P-010 | planned | planned | user request 2026-10-13 | csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm |
