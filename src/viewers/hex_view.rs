@@ -26,8 +26,9 @@ actions!(hex_view, [FocusGoto, FocusSearch, ToggleSearchMode]);
 /// The key context the hex view's actions are bound in.
 pub const KEY_CONTEXT: &str = "HexView";
 
-/// The most rows the list holds at once.
-pub const WINDOW_ROWS: usize = 1 << 20;
+/// The most rows the list holds at once: a million, as the clause says (2e7 px tall at
+/// most, which 32-bit pixels hold exactly).
+pub const WINDOW_ROWS: usize = 1_000_000;
 
 /// How close to the window's edge the top row may come before the window slides.
 const WINDOW_EDGE: usize = 4096;
@@ -338,9 +339,16 @@ impl Render for HexView {
                     )
                     .child(div().w(px(260.)).child(Input::new(&self.search)))
                     .child(
-                        Button::new("hex-mode")
-                            .label(self.mode.label())
-                            .on_click(cx.listener(|this, _, _, cx| this.set_search_mode(this.mode.other(), cx))),
+                        // The wrapper carries the test id and the label the button shows.
+                        div()
+                            .id("hex-mode")
+                            .test_support()
+                            .aria_label(self.mode.label())
+                            .child(
+                                Button::new("hex-mode-button")
+                                    .label(self.mode.label())
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_search_mode(this.mode.other(), cx))),
+                            ),
                     )
                     .child(
                         Button::new("hex-next")

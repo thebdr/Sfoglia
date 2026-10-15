@@ -170,18 +170,32 @@ fn goto_offset_and_search_scroll_and_mark_the_hit(cx: &mut TestAppContext) {
         assert_eq!(parts.hex[1], "72");
         assert_eq!(parts.ascii[1], "r");
         assert!(window.try_find(hex_row(0)).is_none(), "row 0 is off screen");
-        // Ctrl+Shift+F focuses the search field; Enter finds the first hit.
+        // Ctrl+Shift+F focuses the search field; Enter on text that occurs nowhere says so.
         window.press("ctrl-shift-f", cx);
         window.render_frame(cx);
         let search = hex.read(cx).search_input().clone();
         assert!(search.read(cx).focus_handle(cx).is_focused(window), "Ctrl+Shift+F focuses the search field");
-        window.input("r0010", cx);
+        assert_eq!(window.find("hex-mode").label(), Some("text"));
+        window.input("zzz", cx);
         window.press("enter", cx);
     })
     .unwrap();
     cx.run_until_parked();
 
-    // `r0010` matches r00100 to r00109: ten hits, one row apart, from row 100.
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let hex = hex_of(&workspace, cx);
+        assert_eq!(hex.read(cx).status(), "not found");
+        assert_eq!(window.find("hex-status-text").label(), Some("not found"));
+        assert_eq!(hex.read(cx).mark(), Some(&(0x8000..0x8001)), "a miss leaves the mark");
+        // `r0010` matches r00100 to r00109: ten hits, one row apart, from row 100.
+        let search = hex.read(cx).search_input().clone();
+        search.update(cx, |state, cx| state.set_value("r0010", window, cx));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         let hex = hex_of(&workspace, cx);
@@ -231,7 +245,20 @@ fn goto_offset_and_search_scroll_and_mark_the_hit(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(hex.read(cx).search_mode(), SearchMode::Bytes);
         assert_eq!(window.find("hex-search").label(), Some("bytes search"));
+        assert_eq!(window.find("hex-mode").label(), Some("bytes"), "the mode button says so");
+        // The button itself switches too: back to text, and once more to bytes.
+        window.click("hex-mode", cx);
+        window.render_frame(cx);
+        assert_eq!(hex.read(cx).search_mode(), SearchMode::Text);
+        assert_eq!(window.find("hex-mode").label(), Some("text"));
+        window.click("hex-mode", cx);
+        window.render_frame(cx);
+        assert_eq!(hex.read(cx).search_mode(), SearchMode::Bytes);
+        // The click took the focus; the chord brings it back to the search field.
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
         let search = hex.read(cx).search_input().clone();
+        assert!(search.read(cx).focus_handle(cx).is_focused(window));
         search.update(cx, |state, cx| state.set_value("72 30 30 32", window, cx));
         window.press("enter", cx);
     })
@@ -280,6 +307,17 @@ fn a_two_gibibyte_file_opens_at_once_and_its_last_row_renders(cx: &mut TestAppCo
     let path = std::env::temp_dir().join("sfoglia-huge.bin");
     {
         let mut file = std::fs::File::create(&path).unwrap();
+        // Linux extends the file sparsely; NTFS allocates the whole 2 GiB unless the file
+        // is flagged sparse first, which once filled the disk.
+        if cfg!(windows) {
+            let flagged = std::process::Command::new("fsutil")
+                .args(["sparse", "setflag"])
+                .arg(&path)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            println!("2 GiB file: sparse flag {}", if flagged { "set" } else { "not set, the file is allocated in full" });
+        }
         file.set_len(1 << 31).unwrap();
         file.seek(SeekFrom::End(0)).unwrap();
         file.write_all(b"END-OF-THE-FILE!").unwrap();
@@ -330,6 +368,24 @@ fn a_two_gibibyte_file_opens_at_once_and_its_last_row_renders(cx: &mut TestAppCo
         window.render_frame(cx);
         assert_eq!((hex.read(cx).top_row(), hex.read(cx).base_row()), (100, 0));
         assert!(window.try_find(hex_row(100)).is_some());
+        // Scrolling down from the start to the window's far edge slides it forward, and
+        // scrolling on reaches rows the first window never held.
+        assert_eq!(WINDOW_ROWS, 1_000_000, "the clause says a million rows");
+        hex.update(cx, |hex, cx| hex.show_row_at_top(0, cx));
+        window.render_frame(cx);
+        assert_eq!((hex.read(cx).top_row(), hex.read(cx).base_row()), (0, 0));
+        let far = WINDOW_ROWS - 4000;
+        hex.update(cx, |hex, cx| hex.scroll_by_rows(far as isize, cx));
+        window.render_frame(cx);
+        assert_eq!(hex.read(cx).top_row(), far, "scrolled {far} rows down");
+        assert_eq!(hex.read(cx).base_row(), far - WINDOW_ROWS / 2, "the window slid forward");
+        assert!(window.try_find(hex_row(far)).is_some());
+        hex.update(cx, |hex, cx| hex.scroll_by_rows(10_000, cx));
+        window.render_frame(cx);
+        assert_eq!(hex.read(cx).top_row(), far + 10_000, "past the first window's end");
+        assert!(window.try_find(hex_row(far + 10_000)).is_some());
+        window.render_frame(cx);
+        assert_eq!(hex.read(cx).top_row(), far + 10_000, "and stays");
         // Past the end: the last row with its bytes.
         hex.update(cx, |hex, cx| hex.go_to("0xffffffffff", cx));
         window.render_frame(cx);

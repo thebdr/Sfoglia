@@ -13,6 +13,7 @@
 #                    ~/sfoglia-linux-rules.png; the panel stays open for the later captures
 #   HEX_SEARCH=text  in the hex view: press Ctrl+Shift+F, type the text, press Return and
 #                    capture ~/sfoglia-linux-hex.png with the hit marked
+#   HEX_BYTES=1      with HEX_SEARCH: press Ctrl+M first, so the text is hexadecimal pairs
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -76,7 +77,9 @@ if [ -n "$WID" ]; then
     shot "$PNGRULES" "after Ctrl+Shift+H"
   fi
   if [ -n "${HEX_SEARCH:-}" ]; then
-    # The hex view holds focus when a binary opens; Ctrl+Shift+F focuses its search field.
+    # The hex view holds focus when a binary opens; Ctrl+Shift+F focuses its search field,
+    # and HEX_BYTES=1 presses Ctrl+M first so the text is read as hexadecimal pairs.
+    [ "${HEX_BYTES:-0}" = "1" ] && { xdotool key --window "$WID" ctrl+m; sleep 0.3; }
     xdotool key --window "$WID" ctrl+shift+f; sleep 0.5
     xdotool type --delay 20 "$HEX_SEARCH"; sleep 0.3
     xdotool key Return; sleep 1.5
