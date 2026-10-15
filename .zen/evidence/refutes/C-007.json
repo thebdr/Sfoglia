@@ -1,0 +1,38 @@
+{
+  "clause": "C-007",
+  "verdict": "holds",
+  "ranAt": "2026-10-15T14:21:47.328Z",
+  "headCommit": "2acf35e12b5991ba848c0f2969f85c1f6bc0dc90",
+  "tests": [
+    {
+      "name": "rows_render_offset_hex_and_ascii_columns_exactly",
+      "file": "src/hex.rs",
+      "symbolSha": "1350c3c55bc8c3870c43718b3c756d663528c80f2286d1d11738174305542f84"
+    },
+    {
+      "name": "offsets_and_byte_patterns_parse",
+      "file": "src/hex.rs",
+      "symbolSha": "1350c3c55bc8c3870c43718b3c756d663528c80f2286d1d11738174305542f84"
+    },
+    {
+      "name": "search_finds_exact_offsets_in_text_and_bytes",
+      "file": "src/hex.rs",
+      "symbolSha": "1350c3c55bc8c3870c43718b3c756d663528c80f2286d1d11738174305542f84"
+    },
+    {
+      "name": "binary_files_open_in_the_hex_view_and_any_file_toggles_to_it",
+      "file": "tests/hex.rs",
+      "symbolSha": "d73c042463dbd6cbc0319177e919e48f4d6b6c58493129bc375168960ec00a78"
+    },
+    {
+      "name": "goto_offset_and_search_scroll_and_mark_the_hit",
+      "file": "tests/hex.rs",
+      "symbolSha": "d73c042463dbd6cbc0319177e919e48f4d6b6c58493129bc375168960ec00a78"
+    },
+    {
+      "name": "a_two_gibibyte_file_opens_at_once_and_its_last_row_renders",
+      "file": "tests/hex.rs",
+      "symbolSha": "d73c042463dbd6cbc0319177e919e48f4d6b6c58493129bc375168960ec00a78"
+    }
+  ]
+}
