@@ -628,6 +628,15 @@ underline = true
         assert_eq!(ranges("abc\r\ndef\r\nnot this one\r\n"), [0..3, 5..8]);
         assert_eq!(ranges("abc\ndef\nnot this one\n"), [0..3, 4..7]);
         assert_eq!(ranges("dx\r\n"), [0..2], "`.*` leaves the carriage return alone");
+        // A rule without a priority has priority 0: it beats -1 and loses to 1.
+        let file = RuleFile::parse(
+            "[[set]]\nfiles = \"*\"\n[[set.rule]]\nname = \"absent\"\npattern = \"abc\"\n[[set.rule]]\nname = \"below\"\npattern = \"bcd\"\npriority = -1\n[[set.rule]]\nname = \"above\"\npattern = \"cde\"\npriority = 1\n",
+        );
+        assert_eq!(file.sets[0].rules.iter().map(|r| r.priority).collect::<Vec<_>>(), [0, -1, 1]);
+        let spans = file.spans("a.txt", "abcd");
+        assert_eq!(spans.iter().map(|s| (s.range.clone(), s.rule)).collect::<Vec<_>>(), [(0..3, 0), (3..4, 1)]);
+        let spans = file.spans("a.txt", "abcde");
+        assert_eq!(spans.iter().map(|s| (s.range.clone(), s.rule)).collect::<Vec<_>>(), [(0..2, 0), (2..5, 2)]);
     }
 
     #[test]

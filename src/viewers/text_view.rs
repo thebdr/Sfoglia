@@ -36,6 +36,8 @@ pub struct TextView {
     status: TextStatus,
     rules: Entity<RulesStore>,
     decorations: TextDecorationCollection,
+    /// What the collection was last given: one decoration per span, in span order.
+    painted: Vec<TextDecoration>,
     spans: Vec<Span>,
     sets: Vec<String>,
     _observe_rules: Subscription,
@@ -70,6 +72,7 @@ impl TextView {
             status: TextStatus { encoding, line_endings, lines, replaced, language },
             rules: rules.clone(),
             decorations,
+            painted: Vec::new(),
             spans: Vec::new(),
             sets: Vec::new(),
             _observe_rules: observe,
@@ -85,13 +88,18 @@ impl TextView {
         let file = rules.file();
         self.sets = file.sets_for(&self.name).into_iter().map(|i| file.sets[i].name.clone()).collect();
         self.spans = file.spans(&self.name, &text);
-        let decorations: Vec<TextDecoration> = self
+        self.painted = self
             .spans
             .iter()
             .map(|span| TextDecoration::new(span.range.clone(), highlight_style(&file.rule(span).style)))
             .collect();
-        self.decorations.set(decorations, cx);
+        self.decorations.set(self.painted.clone(), cx);
         cx.notify();
+    }
+
+    /// The decorations handed to the editor for the current spans, in span order.
+    pub fn rule_decorations(&self) -> &[TextDecoration] {
+        &self.painted
     }
 
     pub fn editor(&self) -> &Entity<EditorState> {

@@ -20,10 +20,11 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::dock::{ClosePanel, Panel as _};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, point,
-    px,
+    AnyWindowHandle, AppContext as _, Entity, Focusable as _, FontWeight, HighlightStyle, Rgba,
+    TestAppContext, TextRun, font, point, px,
 };
 use sfoglia::rules::STARTER;
+use sfoglia::viewers::text_view::highlight_style;
 use sfoglia::text::{Encoding, LineEndings};
 use sfoglia::workspace::{FileInfo, FilePanel};
 use sfoglia::{APP_NAME, ToggleHighlightRules, ToggleTheme, Workspace, window_options};
@@ -494,6 +495,21 @@ bold = true
         let ranges: Vec<_> = log_view.read(cx).rule_spans().iter().map(|s| s.range.clone()).collect();
         assert_eq!(log_view.read(cx).decoration_ranges(cx), ranges);
         assert_eq!(ranges[19], text.find("ERROR").unwrap()..text.find("plc_").unwrap() + 4);
+        // Each decoration carries its rule's style: red for the error rule, bold for numbers.
+        let decorations = log_view.read(cx).rule_decorations().to_vec();
+        assert_eq!(decorations.len(), ranges.len());
+        {
+            let rules = workspace.read(cx).rules().read(cx);
+            for (decoration, span) in decorations.iter().zip(log_view.read(cx).rule_spans()) {
+                assert_eq!(decoration.range, span.range);
+                assert_eq!(decoration.style, highlight_style(&rules.file().rule(span).style));
+            }
+        }
+        assert_eq!(decorations[19].style.color, Some(Rgba { r: 1., g: 0., b: 0., a: 1. }.into()));
+        assert_eq!(decorations[19].style.font_weight, None);
+        assert_eq!(decorations[0].style.font_weight, Some(FontWeight::BOLD));
+        assert_eq!(decorations[0].style.color, None);
+        assert_ne!(decorations[0].style, HighlightStyle::default());
 
         // The rules panel starts closed.
         assert!(!workspace.read(cx).rules_panel_open(cx));
