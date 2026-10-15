@@ -41,7 +41,9 @@ pub enum TextEncoding {
     Utf8Bom,
     Utf16Le,
     Utf16Be,
-    /// Not valid UTF-8, but every byte is printable Latin-1 or ordinary whitespace.
+    /// Not valid UTF-8 and without a byte-order mark, but no byte is a control byte
+    /// beyond whitespace and escape, nor DEL: single-byte text, Latin-1 or a Windows
+    /// code page (bytes 0x80 to 0x9F are Windows-1252 punctuation and count as text).
     Latin1,
 }
 
@@ -236,8 +238,10 @@ fn is_text_char(c: char) -> bool {
 }
 
 /// Bytes that are not UTF-8 still read as text when none of them is a control byte
-/// other than ordinary whitespace and escape, and none is DEL: that is Latin-1 (or a
-/// Windows code page) prose, which the text viewer decodes byte by byte.
+/// other than ordinary whitespace and escape, and none is DEL: that is Latin-1 or a
+/// Windows code page (whose bytes 0x80 to 0x9F are punctuation, so they pass), which the
+/// text viewer decodes byte by byte. A byte-order mark promises its encoding, so a sample
+/// that starts with one never falls back here.
 fn looks_like_latin1(body: &[u8]) -> bool {
     !body.is_empty()
         && body
@@ -642,6 +646,11 @@ mod tests {
         assert_eq!(text_encoding(b"caff\xe8\x00latte"), None);
         assert_eq!(text_encoding(b"caff\xe8\x7flatte"), None);
         assert_eq!(text_encoding(b"\xef\xbb\xbfcaff\xe8 latte"), None, "a UTF-8 mark promises UTF-8");
+        assert_eq!(text_encoding(b"\xff\xfeA\xd8AA"), None, "a UTF-16 mark promises UTF-16");
+        // Windows-1252 punctuation (0x80..0x9F) and its C1 range count as text.
+        assert_eq!(text_encoding(b"caff\xe8 \x93latte\x94 \x96 3\x80\n"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"caff\xe8 \x85 and so on"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"caff\xe8\x08"), None, "backspace is a control byte");
         assert_eq!(text_encoding(b"caff\xe8"), Some(TextEncoding::Utf8), "a trailing lead byte is a cut-off character");
         let latin_source = detect("main.rs", b"// caff\xe8 latte\nfn main() {}\n");
         assert_eq!(latin_source.content, Content::Text(TextEncoding::Latin1));

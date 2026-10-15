@@ -12,7 +12,7 @@ Give paths on the command line, press Ctrl+O for the Open dialog, or drop files 
 
 ## Text and source files
 
-Any text file opens in a read-only editor with line numbers; source files are highlighted by language (35 grammars, from Rust and JSON to SQL and Zig). The status row under the text names the encoding (UTF-8, UTF-8 with BOM, UTF-16 LE or BE, or Latin-1 when the bytes are not valid UTF-8), the line endings, the line count and the language. Ctrl+Shift+T switches between the light and the dark theme.
+Any text file opens in a read-only editor with line numbers; source files are highlighted by language (35 grammars, from Rust and JSON to SQL and Zig). The status row under the text names the encoding (UTF-8, UTF-8 with BOM, UTF-16 LE or BE, or Latin-1 or Windows-1252 when the bytes are not valid UTF-8), the line endings, the line count and the language. Ctrl+Shift+T switches between the light and the dark theme.
 
 ## Build and run
 

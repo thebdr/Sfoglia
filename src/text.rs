@@ -12,6 +12,9 @@ pub enum Encoding {
     Utf16Be,
     /// The bytes were not valid UTF-8; every byte became the character of that value.
     Latin1,
+    /// Not valid UTF-8, and bytes 0x80 to 0x9F occur: those are the Windows-1252
+    /// punctuation (smart quotes, dashes, the euro sign) rather than Latin-1 controls.
+    Windows1252,
 }
 
 impl Encoding {
@@ -22,7 +25,24 @@ impl Encoding {
             Encoding::Utf16Le => "UTF-16 LE",
             Encoding::Utf16Be => "UTF-16 BE",
             Encoding::Latin1 => "Latin-1",
+            Encoding::Windows1252 => "Windows-1252",
         }
+    }
+}
+
+/// Windows-1252 for bytes 0x80 to 0x9F; the five undefined bytes keep their Latin-1 value.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// One byte of a single-byte file as a character: Windows-1252 where it differs from Latin-1.
+fn single_byte_char(b: u8) -> char {
+    match b {
+        0x80..=0x9f => CP1252_HIGH[(b - 0x80) as usize],
+        _ => b as char,
     }
 }
 
@@ -64,7 +84,8 @@ pub struct Decoded {
 }
 
 /// Decode the whole file. A UTF-16 byte-order mark decides UTF-16; a UTF-8 mark is
-/// stripped; bytes that are not valid UTF-8 are read as Latin-1, one character per byte.
+/// stripped; bytes that are not valid UTF-8 are read one character per byte, as Latin-1,
+/// or as Windows-1252 when any byte from 0x80 to 0x9F occurs.
 pub fn decode(bytes: &[u8]) -> Decoded {
     let (text, encoding, replaced) = if let Some(body) = bytes.strip_prefix(&[0xff, 0xfe]) {
         let (text, replaced) = decode_utf16(body, u16::from_le_bytes);
@@ -79,7 +100,11 @@ pub fn decode(bytes: &[u8]) -> Decoded {
         };
         match std::str::from_utf8(body) {
             Ok(text) => (text.to_string(), if bom { Encoding::Utf8Bom } else { Encoding::Utf8 }, 0),
-            Err(_) => (bytes.iter().map(|&b| b as char).collect(), Encoding::Latin1, 0),
+            Err(_) => {
+                let windows = bytes.iter().any(|b| (0x80..=0x9f).contains(b));
+                let text: String = bytes.iter().map(|&b| single_byte_char(b)).collect();
+                (text, if windows { Encoding::Windows1252 } else { Encoding::Latin1 }, 0)
+            }
         }
     };
     let (line_endings, lines) = line_endings(&text);
@@ -241,6 +266,17 @@ mod tests {
 
         assert_eq!(Encoding::Latin1.label(), "Latin-1");
         assert_eq!(Encoding::Utf8Bom.label(), "UTF-8 with BOM");
+
+        // Bytes 0x80 to 0x9F make it Windows-1252: smart quotes, an en dash, the euro sign.
+        let d = decode(b"caff\xe8 \x93latte\x94 \x96 3\x80\n");
+        assert_eq!(d.text, "caffè \u{201C}latte\u{201D} \u{2013} 3\u{20AC}\n");
+        assert_eq!((d.encoding, d.lines), (Encoding::Windows1252, 2));
+        assert_eq!(Encoding::Windows1252.label(), "Windows-1252");
+        // The five bytes Windows-1252 leaves undefined keep their Latin-1 control value.
+        assert_eq!(decode(b"a\x81b\x8d\x8f\x90\x9dc\xe8").text, "a\u{81}b\u{8d}\u{8f}\u{90}\u{9d}cè");
+        // Without any 0x80..0x9F byte the file stays Latin-1, byte for byte.
+        assert_eq!(decode(b"\xa9 2026 \xff").text, "\u{a9} 2026 \u{ff}");
+        assert_eq!(decode(b"\xa9 2026 \xff").encoding, Encoding::Latin1);
     }
 
     #[test]
