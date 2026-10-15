@@ -386,6 +386,27 @@ fn a_two_gibibyte_file_opens_at_once_and_its_last_row_renders(cx: &mut TestAppCo
         assert!(window.try_find(hex_row(far + 10_000)).is_some());
         window.render_frame(cx);
         assert_eq!(hex.read(cx).top_row(), far + 10_000, "and stays");
+        // A go-to inside the window but within its edge margin moves the window as well, so
+        // the row still reaches the top: from the start, to ten rows short of the first
+        // window's end, then to ten rows past the start of the window that made.
+        hex.update(cx, |hex, cx| hex.show_row_at_top(0, cx));
+        window.render_frame(cx);
+        let near_end = WINDOW_ROWS - 10;
+        hex.update(cx, |hex, cx| hex.go_to(&(near_end * 16).to_string(), cx));
+        window.render_frame(cx);
+        assert_eq!(
+            (hex.read(cx).top_row(), hex.read(cx).base_row()),
+            (near_end, near_end - WINDOW_ROWS / 2),
+            "a go-to near the window's end moves the window"
+        );
+        let near_start = hex.read(cx).base_row() + 10;
+        hex.update(cx, |hex, cx| hex.show_row_at_top(near_start, cx));
+        window.render_frame(cx);
+        assert_eq!(
+            (hex.read(cx).top_row(), hex.read(cx).base_row()),
+            (near_start, near_start - WINDOW_ROWS / 2),
+            "a row near the window's start moves the window"
+        );
         // Past the end: the last row with its bytes.
         hex.update(cx, |hex, cx| hex.go_to("0xffffffffff", cx));
         window.render_frame(cx);
