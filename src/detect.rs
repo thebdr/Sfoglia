@@ -273,8 +273,11 @@ pub fn text_encoding(head: &[u8]) -> Option<TextEncoding> {
         while let Some(result) = decoded.next() {
             match result {
                 Ok(c) if is_text_char(c) => {}
-                // An unpaired surrogate is forgiven only as the sample's last unit.
-                Err(_) if decoded.peek().is_none() => {}
+                // Only a high surrogate that is the sample's last unit is forgiven: it may be
+                // the first half of a pair cut off by the sample. A lone low surrogate never is.
+                Err(e)
+                    if decoded.peek().is_none()
+                        && (0xd800..0xdc00).contains(&e.unpaired_surrogate()) => {}
                 _ => return None,
             }
         }
@@ -649,7 +652,13 @@ mod tests {
         assert_eq!(detect("x.q", b"\xff\xfe\x00\x00\x01\x00\x02\x00").route, Route::Hex);
         assert_eq!(text_encoding(b"\xff\xfeh\x00i"), Some(TextEncoding::Utf16Le), "odd trailing byte");
         assert_eq!(text_encoding(b"\xff\xfeh\x00\x3d\xd8"), Some(TextEncoding::Utf16Le), "cut-off surrogate pair");
+        assert_eq!(text_encoding(b"\xfe\xff\x00h\xd8\x3d"), Some(TextEncoding::Utf16Be), "cut-off surrogate pair, big-endian");
         assert_eq!(text_encoding(b"\xff\xfe\x3d\xd8h\x00"), None, "unpaired surrogate mid-text");
+        // A low surrogate cannot be the first half of a pair, so a trailing one is not a cut-off.
+        assert_eq!(text_encoding(b"\xff\xfeh\x00i\x00\x00\xdc"), None, "trailing low surrogate");
+        assert_eq!(text_encoding(b"\xfe\xff\x00h\xdc\x00"), None, "trailing low surrogate, big-endian");
+        assert_eq!(text_encoding(b"\xff\xfeh\x00\xff\xdf"), None, "trailing low surrogate, last code unit");
+        assert_eq!(detect("x.q", b"\xff\xfeh\x00i\x00\x00\xdc").route, Route::Hex);
         assert_eq!(text_encoding(b"\xff\xfe"), Some(TextEncoding::Utf16Le), "mark alone");
         assert_eq!(text_encoding("\u{feff}caffè\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>().as_slice()), Some(TextEncoding::Utf16Le));
         assert_eq!(text_encoding("caffè\tlatte\r\n".as_bytes()), Some(TextEncoding::Utf8));
