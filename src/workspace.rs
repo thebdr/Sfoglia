@@ -1,6 +1,6 @@
 //! The main window's content: open files as tabs in a dock (C-004), the application
-//! name when nothing is open (C-001), and the highlighting rules panel on the right
-//! (C-006).
+//! name when nothing is open (C-001), the highlighting rules panel on the right (C-006)
+//! and the hex view any tab can switch to (C-007).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,11 +20,13 @@ use gpui_kit::{
 
 use crate::detect::{Content, Detection, Route, SNIFF_BYTES, detect};
 use crate::generated::families::Family;
+use crate::hex::HexFile;
 use crate::rules;
 use crate::shell::{APP_NAME, title};
-use crate::viewers::{RulesPanel, RulesStore, TextView};
+use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
+use crate::viewers::{HexView, RulesPanel, RulesStore, TextView};
 
-actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules]);
+actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
@@ -32,6 +34,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-o", OpenFiles, Some("Workspace")),
         KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("Workspace")),
         KeyBinding::new("ctrl-shift-h", ToggleHighlightRules, Some("Workspace")),
+        // The kit's inputs bind ctrl-f, ctrl-g and ctrl-h themselves, so the hex chords
+        // take the shift and stay reachable from inside its fields.
+        KeyBinding::new("ctrl-shift-b", ToggleHexView, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
     ]);
 }
 
@@ -81,7 +89,7 @@ impl FileInfo {
     }
 }
 
-/// What a tab shows for its file.
+/// What a tab shows for its file when it is not showing the hex view.
 enum PanelView {
     /// The facts about the file, until its family's viewer exists.
     Info,
@@ -94,6 +102,10 @@ pub struct FilePanel {
     focus_handle: FocusHandle,
     info: FileInfo,
     view: PanelView,
+    /// The hex view (C-007), made the first time it is shown.
+    hex: Option<Entity<HexView>>,
+    hex_shown: bool,
+    hex_error: Option<String>,
 }
 
 impl FilePanel {
@@ -113,11 +125,19 @@ impl FilePanel {
         } else {
             PanelView::Info
         };
-        Self {
+        let mut panel = Self {
             focus_handle: cx.focus_handle(),
             info,
             view,
+            hex: None,
+            hex_shown: false,
+            hex_error: None,
+        };
+        // A binary nobody claims opens as hex straight away.
+        if panel.info.error.is_none() && panel.info.route() == Route::Hex {
+            panel.show_hex(window, cx);
         }
+        panel
     }
 
     /// A readable file whose content is text, or that is routed to the text family, opens
@@ -135,8 +155,49 @@ impl FilePanel {
     /// The text viewer, when this tab shows one.
     pub fn text_view(&self) -> Option<&Entity<TextView>> {
         match &self.view {
-            PanelView::Text(view) => Some(view),
-            PanelView::Info => None,
+            PanelView::Text(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The hex view, when this tab shows one.
+    pub fn hex_view(&self) -> Option<&Entity<HexView>> {
+        if self.hex_shown { self.hex.as_ref() } else { None }
+    }
+
+    /// Why the hex view could not be opened, if it could not.
+    pub fn hex_error(&self) -> Option<&str> {
+        self.hex_error.as_deref()
+    }
+
+    /// Show the hex view, mapping the file the first time.
+    pub fn show_hex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hex.is_none() {
+            match HexFile::open(&self.info.path) {
+                Ok(file) => self.hex = Some(cx.new(|cx| HexView::new(file, window, cx))),
+                Err(error) => {
+                    self.hex_error = Some(format!("Cannot map this file: {error}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.hex_shown = true;
+        if let Some(hex) = &self.hex {
+            let focus = hex.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Switch between the hex view and the file's own view.
+    pub fn toggle_hex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hex_shown {
+            self.hex_shown = false;
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+        } else {
+            self.show_hex(window, cx);
         }
     }
 }
@@ -183,6 +244,14 @@ fn row(id: &'static str, label: &'static str, value: impl Into<SharedString>) ->
 
 impl Render for FilePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(hex) = self.hex_view().cloned() {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(hex)
+                .into_any_element();
+        }
         if let PanelView::Text(view) = &self.view {
             return div()
                 .id("file-panel")
@@ -200,10 +269,11 @@ impl Render for FilePanel {
         let size = info
             .size
             .map_or_else(|| "unknown".to_string(), |s| format!("{s} bytes"));
-        let status = match &info.error {
-            Some(error) => format!("Cannot read this file: {error}"),
-            None => format!(
-                "The {} viewer arrives with clause {}. Until then this tab shows what Sfoglia knows.",
+        let status = match (&info.error, &self.hex_error) {
+            (Some(error), _) => format!("Cannot read this file: {error}"),
+            (None, Some(error)) => error.clone(),
+            (None, None) => format!(
+                "The {} viewer arrives with clause {}. Until then this tab shows what Sfoglia knows; Ctrl+Shift+B shows the bytes.",
                 route.id(),
                 route.clause()
             ),
@@ -326,8 +396,8 @@ impl Workspace {
             .collect()
     }
 
-    /// The file whose tab is active in the centre, if any.
-    pub fn active_file(&self, cx: &App) -> Option<FileInfo> {
+    /// The panel whose tab is active in the centre, if any.
+    pub fn active_panel(&self, cx: &App) -> Option<Entity<FilePanel>> {
         fn active_in(node: &PaneNode) -> Option<PanelId> {
             match node.kind() {
                 PaneRef::Tabs { panels, active_ix } => panels.get(active_ix).copied(),
@@ -339,7 +409,12 @@ impl Workspace {
         self.open
             .iter()
             .find(|f| PanelId::from(f.panel.entity_id()) == active)
-            .map(|f| f.panel.read(cx).info.clone())
+            .map(|f| f.panel.clone())
+    }
+
+    /// The file whose tab is active in the centre, if any.
+    pub fn active_file(&self, cx: &App) -> Option<FileInfo> {
+        self.active_panel(cx).map(|panel| panel.read(cx).info.clone())
     }
 
     /// Open every path: a new tab each, or the existing tab activated. A file whose
@@ -386,6 +461,12 @@ impl Workspace {
         cx.notify();
     }
 
+    fn on_toggle_hex(&mut self, _: &ToggleHexView, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.active_panel(cx) {
+            panel.update(cx, |panel, cx| panel.toggle_hex(window, cx));
+        }
+    }
+
     fn on_open_files(&mut self, _: &OpenFiles, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -413,6 +494,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_open_files))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_rules))
+            .on_action(cx.listener(Self::on_toggle_hex))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();
@@ -446,7 +528,7 @@ impl Render for Workspace {
                         .flex()
                         .justify_center()
                         .opacity(0.7)
-                        .child("Ctrl+O opens files. Dropping files here opens them too. Ctrl+Shift+H edits the highlighting rules."),
+                        .child("Ctrl+O opens files. Dropping files here opens them too. Ctrl+Shift+H edits the highlighting rules. Ctrl+Shift+B shows a file's bytes."),
                 )
             })
     }

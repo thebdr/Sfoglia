@@ -68,7 +68,7 @@ impl Route {
     pub fn clause(self) -> &'static str {
         match self {
             Route::Family(family) => family.clause(),
-            Route::Hex => "P-005",
+            Route::Hex => "C-007",
         }
     }
 }
@@ -642,7 +642,7 @@ mod tests {
         // A known extension keeps its family even when the file is empty.
         assert_eq!(detect("x.png", b"").family, Some(Images));
         let d = detect("a.bin", NOISE);
-        assert_eq!((d.content, d.family, d.route, d.route.clause()), (Content::Binary, None, Route::Hex, "P-005"));
+        assert_eq!((d.content, d.family, d.route, d.route.clause()), (Content::Binary, None, Route::Hex, "C-007"));
         assert_eq!(text_encoding(b"\xef\xbb\xbfhi"), Some(TextEncoding::Utf8Bom));
         assert_eq!(text_encoding(b"\xff\xfeh\x00i\x00"), Some(TextEncoding::Utf16Le));
         assert_eq!(text_encoding(b"\xfe\xff\x00h\x00i"), Some(TextEncoding::Utf16Be));

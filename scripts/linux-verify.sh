@@ -11,6 +11,8 @@
 #   SCROLL_END=1     click into the text and press Ctrl+End, capture ~/sfoglia-linux-end.png
 #   RULES_PANEL=1    press Ctrl+Shift+H (the highlighting rules panel) and capture
 #                    ~/sfoglia-linux-rules.png; the panel stays open for the later captures
+#   HEX_SEARCH=text  in the hex view: press Ctrl+Shift+F, type the text, press Return and
+#                    capture ~/sfoglia-linux-hex.png with the hit marked
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -23,7 +25,8 @@ PNG2="$HOME/sfoglia-linux-dialog.png"
 PNGDARK="$HOME/sfoglia-linux-dark.png"
 PNGEND="$HOME/sfoglia-linux-end.png"
 PNGRULES="$HOME/sfoglia-linux-rules.png"
-: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES"
+PNGHEX="$HOME/sfoglia-linux-hex.png"
+: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
 
@@ -72,6 +75,13 @@ if [ -n "$WID" ]; then
     xdotool key --window "$WID" ctrl+shift+h; sleep 1.5
     shot "$PNGRULES" "after Ctrl+Shift+H"
   fi
+  if [ -n "${HEX_SEARCH:-}" ]; then
+    # The hex view holds focus when a binary opens; Ctrl+Shift+F focuses its search field.
+    xdotool key --window "$WID" ctrl+shift+f; sleep 0.5
+    xdotool type --delay 20 "$HEX_SEARCH"; sleep 0.3
+    xdotool key Return; sleep 1.5
+    shot "$PNGHEX" "after Ctrl+Shift+F, '$HEX_SEARCH', Return"
+  fi
   if [ "${TOGGLE_THEME:-0}" = "1" ]; then
     xdotool key --window "$WID" ctrl+shift+t; sleep 1.5
     shot "$PNGDARK" "after Ctrl+Shift+T"
@@ -105,8 +115,8 @@ else
 fi
 kill "$APP" 2>/dev/null; wait "$APP" 2>/dev/null
 log "app stopped"
-printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
+printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s hex=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
   "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" \
   "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" \
-  "$( [ -s "$PNGRULES" ] && echo yes || echo no)" > "$RESULT"
+  "$( [ -s "$PNGRULES" ] && echo yes || echo no)" "$( [ -s "$PNGHEX" ] && echo yes || echo no)" > "$RESULT"
 cat "$RESULT"

@@ -15,6 +15,9 @@ globset = "0.4"
 toml = "1"
 serde = { version = "1", features = ["derive"] }
 dirs = "6"
+# Hex view (C-007): the file is mapped, not read; search is memmem.
+memmap2 = "0.9"
+memchr = "2"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }

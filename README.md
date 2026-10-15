@@ -36,6 +36,10 @@ underline = false
 
 Where matches overlap, the higher priority wins; at equal priority the earlier start wins, then the longer match, then the rule declared first. The winner keeps its whole match and a loser keeps only what no winner covers, so a word rule can sit inside a line rule. A rule with a bad pattern, colour or field type is listed under the editor with its line and the other rules still load; an unknown field is listed and ignored; a syntax error is listed with its line and loads nothing until it is fixed. The first run starts from a commented example.
 
+## Hex view
+
+A binary file that no family claims opens as rows of 16 bytes: the offset, the bytes in two groups of eight, and the printable ASCII, like `00000010  48 65 6c 6c 6f 2c 20 77  6f 72 6c 64 0a 00 ff 7f  |Hello, world....|`. Any other open file switches to its bytes and back with Ctrl+Shift+B. The file is memory-mapped, so a multi-gigabyte file opens at once and only the rows on screen are laid out. Ctrl+Shift+G goes to an offset (decimal, or `0x` and hex); Ctrl+Shift+F finds text, or bytes as hex pairs when Ctrl+M has switched the mode, and Enter steps to the next hit. The hit is marked in both columns and the status row names its offset.
+
 ## Build and run
 
 Requirements: stable Rust (1.96 or newer), and on Windows the MSVC build tools with a Windows 10 or 11 SDK and CMake. On Linux install the system libraries gpui needs (see Zed's `script/linux` list: Vulkan, Wayland, X11-xcb, xkbcommon, fontconfig, ALSA, OpenSSL, zstd, clang, cmake).
