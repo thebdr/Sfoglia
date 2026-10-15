@@ -11,3 +11,5 @@
 - Linux verification in the VM: copy `scripts/linux-verify.sh` to the VM with scp, run it there over SSH (`bash linux-verify.sh`), then fetch `~/sfoglia-linux.png` and `~/sfoglia-linux.log`.
 - The `tree-sitter-languages` feature of gpui-kit compiles every grammar; enabling it re-resolved the lockfile and `cc` had to come down to 1.2.x (`cargo update -p cc`), see `.zen/evidence/C-005.md`.
 - Effects such as a dock close or a theme change land after the window update ends: in headless tests, leave `update_window`, call `cx.run_until_parked()`, then assert.
+- Windows captures of the real window: `pwsh scripts/windows-capture.ps1 -Out <png> -Args <file> -Keep` launches the app and saves a PrintWindow capture; `-ProcessId <pid>` captures a running window (after the user pressed a chord, since the agent shell cannot bring windows to the foreground).
+- The highlighting rules (C-006) live in `src/rules.rs` (pure) and `src/viewers/rules_panel.rs` (store + panel); headless tests give the workspace a temp rule path through `Workspace::with_rules_path`, never the real one under `%APPDATA%`.

@@ -1,0 +1,58 @@
+{
+  "clause": "C-006",
+  "verdict": "holds",
+  "ranAt": "2026-10-15T12:24:20.939Z",
+  "headCommit": "e2a98a27059d94b47940e76d9f2b51b79192bfa6",
+  "tests": [
+    {
+      "name": "overlap_resolution_keeps_the_winner_whole_and_clips_the_loser",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "glob_scoping_picks_the_sets_that_name_the_file",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "spans_come_from_every_applicable_set_with_the_rule_styles",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "anchors_match_at_line_boundaries_and_empty_matches_are_skipped",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "a_malformed_rule_file_loads_the_valid_rules_and_reports_the_bad_ones_by_line",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "colours_parse_in_three_lengths",
+      "file": "src/rules.rs",
+      "symbolSha": "01523324350e6dd8023ac384c0b6a624dad26a7252d5301677cef879c10a65a2"
+    },
+    {
+      "name": "rule_spans_reach_the_editor_and_follow_edits_to_the_rule_file",
+      "file": "tests/ui.rs",
+      "symbolSha": "efe0f7f9b873a37d43490ede28d909881be147923ef8b513175d91fb885f3601"
+    },
+    {
+      "name": "a_missing_rule_file_starts_from_the_example_and_is_written_on_the_first_change",
+      "file": "tests/ui.rs",
+      "symbolSha": "efe0f7f9b873a37d43490ede28d909881be147923ef8b513175d91fb885f3601"
+    },
+    {
+      "name": "an_unreadable_rule_file_is_never_written_over",
+      "file": "tests/ui.rs",
+      "symbolSha": "efe0f7f9b873a37d43490ede28d909881be147923ef8b513175d91fb885f3601"
+    },
+    {
+      "name": "globs_see_the_file_name_alone_and_anchors_see_crlf_lines",
+      "file": "tests/ui.rs",
+      "symbolSha": "efe0f7f9b873a37d43490ede28d909881be147923ef8b513175d91fb885f3601"
+    }
+  ]
+}
