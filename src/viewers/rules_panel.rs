@@ -22,18 +22,25 @@ pub struct RulesStore {
     source: String,
     file: RuleFile,
     write_error: Option<String>,
+    /// The file exists but could not be read, so it must never be written over.
+    unreadable: bool,
 }
 
 impl RulesStore {
     /// Read the rule file at `path`. A missing file starts from the commented example
-    /// without writing it; an unreadable one is reported as a write error.
+    /// without writing it. A file that exists but cannot be read (not UTF-8, say) shows
+    /// the example too, but is left alone: edits re-highlight without being written.
     pub fn load(path: Option<PathBuf>) -> Self {
         let mut write_error = None;
+        let mut unreadable = false;
         let source = match path.as_deref().map(std::fs::read_to_string) {
             Some(Ok(source)) => source,
             Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => STARTER.to_string(),
             Some(Err(error)) => {
-                write_error = Some(format!("cannot read the rule file: {error}"));
+                write_error = Some(format!(
+                    "the rule file could not be read ({error}), so it is left as it is: edits are not saved"
+                ));
+                unreadable = true;
                 STARTER.to_string()
             }
             None => {
@@ -42,7 +49,7 @@ impl RulesStore {
             }
         };
         let file = RuleFile::parse(&source);
-        Self { path, source, file, write_error }
+        Self { path, source, file, write_error, unreadable }
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -69,6 +76,10 @@ impl RulesStore {
         }
         self.file = RuleFile::parse(&source);
         self.source = source;
+        if self.unreadable {
+            cx.notify();
+            return;
+        }
         self.write_error = match &self.path {
             Some(path) => {
                 let written = path

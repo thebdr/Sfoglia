@@ -179,6 +179,9 @@ pub struct Candidate {
 struct Document {
     #[serde(default)]
     set: Vec<Spanned<SetDocument>>,
+    /// Whatever else was written at the top level: reported, then ignored.
+    #[serde(flatten)]
+    other: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +191,9 @@ struct SetDocument {
     files: OneOrMany,
     #[serde(default)]
     rule: Vec<Spanned<toml::Table>>,
+    /// Whatever else was written in the set: reported, then ignored.
+    #[serde(flatten)]
+    other: toml::Table,
 }
 
 #[derive(Deserialize)]
@@ -212,10 +218,11 @@ impl OneOrMany {
     }
 }
 
-/// A rule's typed fields; `name` is read from the table itself so that it names the
-/// rule in problems even when the other fields do not parse.
+/// A rule's typed fields. The name is also read from the table itself, so that it names
+/// the rule in problems even when the other fields do not parse.
 #[derive(Deserialize)]
 struct RuleDocument {
+    name: Option<String>,
     pattern: String,
     #[serde(default)]
     priority: i64,
@@ -238,6 +245,24 @@ fn line_of(source: &str, offset: usize) -> usize {
     source[..offset].matches('\n').count() + 1
 }
 
+/// The line of `key = ...` in the table whose header is on `header_line` (0 for the top
+/// level): the first line after the header and before the next header that starts with
+/// the key. The header line when the key is not found that way (quoted keys, say).
+fn line_of_key(source: &str, header_line: usize, key: &str) -> usize {
+    for (index, line) in source.lines().enumerate().skip(header_line) {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix(key)
+            && rest.trim_start().starts_with('=')
+        {
+            return index + 1;
+        }
+    }
+    header_line.max(1)
+}
+
 impl RuleFile {
     /// Parse the file. A syntax error, or a set whose fields have the wrong type, is
     /// reported with its line and loads nothing; a rule that cannot be used (bad
@@ -253,10 +278,22 @@ impl RuleFile {
                 return file;
             }
         };
+        for key in document.other.keys() {
+            file.problems.push(Problem {
+                line: line_of_key(source, 0, key),
+                message: format!("unknown field `{key}` is ignored"),
+            });
+        }
         for (set_index, set) in document.set.into_iter().enumerate() {
             let set_line = line_of(source, set.span().start);
             let set = set.into_inner();
             let name = set.name.unwrap_or_else(|| format!("set {}", set_index + 1));
+            for key in set.other.keys() {
+                file.problems.push(Problem {
+                    line: line_of_key(source, set_line, key),
+                    message: format!("set `{name}`: unknown field `{key}` is ignored"),
+                });
+            }
             let mut files = Vec::new();
             let mut matcher = GlobSetBuilder::new();
             for glob in set.files.into_vec() {
@@ -291,7 +328,7 @@ impl RuleFile {
                 let label = format!("set `{name}`, rule `{rule_name}`");
                 for field in unknown {
                     file.problems.push(Problem {
-                        line,
+                        line: line_of_key(source, line, field),
                         message: format!("{label}: unknown field `{field}` is ignored"),
                     });
                 }
@@ -324,7 +361,9 @@ impl RuleFile {
                     italic: parsed.italic,
                     underline: parsed.underline,
                 };
-                let regex = match RegexBuilder::new(&parsed.pattern).multi_line(true).build() {
+                // Multi-line: `^` and `$` at line boundaries; CRLF: `\r\n` is one boundary
+                // and `.` stops before the `\r` too.
+                let regex = match RegexBuilder::new(&parsed.pattern).multi_line(true).crlf(true).build() {
                     Ok(regex) => regex,
                     Err(error) => {
                         // The regex crate draws its errors over several lines; one line will do.
@@ -337,7 +376,7 @@ impl RuleFile {
                     continue;
                 }
                 rules.push(Rule {
-                    name: rule_name,
+                    name: parsed.name.unwrap_or(rule_name),
                     pattern: parsed.pattern,
                     priority: parsed.priority,
                     style,
@@ -583,6 +622,12 @@ underline = true
         assert_eq!(file.spans("a.txt", "abc"), [Span { range: 0..3, set: 0, rule: 0 }]);
         assert_eq!(file.spans("a.txt", " -- "), Vec::new());
         assert_eq!(file.spans("a.txt", " xx"), [Span { range: 1..3, set: 0, rule: 1 }]);
+        // CRLF endings are line boundaries too: `$` stops before the `\r`, and so does `.`.
+        let file = RuleFile::parse("[[set]]\nfiles = \"*\"\n[[set.rule]]\npattern = \"^[a-z]+$\"\n[[set.rule]]\npattern = \"d.*\"\n");
+        let ranges = |text: &str| file.spans("a.txt", text).iter().map(|s| s.range.clone()).collect::<Vec<_>>();
+        assert_eq!(ranges("abc\r\ndef\r\nnot this one\r\n"), [0..3, 5..8]);
+        assert_eq!(ranges("abc\ndef\nnot this one\n"), [0..3, 4..7]);
+        assert_eq!(ranges("dx\r\n"), [0..2], "`.*` leaves the carriage return alone");
     }
 
     #[test]
@@ -623,14 +668,30 @@ priority = 3
         assert_eq!(file.sets[0].rules[0].line, 9);
         assert_eq!(file.sets[0].rules[1].line, 24);
         let lines: Vec<usize> = file.problems.iter().map(|p| p.line).collect();
-        assert_eq!(lines, [1, 5, 9, 14, 19]);
+        assert_eq!(lines, [1, 5, 12, 14, 19], "an unknown field is reported on its own line");
         let messages: Vec<&str> = file.problems.iter().map(|p| p.message.as_str()).collect();
         assert!(messages[0].starts_with("set `logs`: glob `[unclosed`:"), "{}", messages[0]);
         assert!(messages[1].starts_with("set `logs`, rule `broken`: regex parse error"), "{}", messages[1]);
+        assert_eq!(messages[1].lines().count(), 1, "{}", messages[1]);
         assert_eq!(messages[2], "set `logs`, rule `fine`: unknown field `colour` is ignored");
         assert!(messages[3].starts_with("set `logs`, rule `wrong-type`: invalid type: string \"high\""), "{}", messages[3]);
         assert_eq!(messages[4], "set `logs`, rule `bad-colour`: colour `red` must start with `#`");
         assert_eq!(file.problems[1].label(), format!("line 5: {}", messages[1]));
+
+        // Unknown fields at the top level and in a set are reported on their lines and ignored;
+        // a rule name of the wrong type is a problem on the rule's header like any other field.
+        let file = RuleFile::parse(
+            "version = 2\n\n[[set]]\nname = \"a\"\nfiles = \"*\"\nflies = \"*.log\"\n\n[[set.rule]]\nname = 5\npattern = \"x\"\n\n[[set.rule]]\npattern = \"y\"\n",
+        );
+        let problems: Vec<(usize, &str)> = file.problems.iter().map(|p| (p.line, p.message.as_str())).collect();
+        assert_eq!(problems[0], (1, "unknown field `version` is ignored"));
+        assert_eq!(problems[1], (6, "set `a`: unknown field `flies` is ignored"));
+        assert_eq!(problems[2].0, 8);
+        assert!(problems[2].1.starts_with("set `a`, rule `rule 1`: invalid type: integer `5`"), "{}", problems[2].1);
+        assert_eq!(problems.len(), 3);
+        assert_eq!(file.sets[0].files, ["*"]);
+        let names: Vec<&str> = file.sets[0].rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["rule 2"], "the rule with the bad name is dropped, the other loads");
 
         // A rule without a pattern is reported on its header line.
         let file = RuleFile::parse("[[set]]\nfiles = \"*\"\n\n[[set.rule]]\nname = \"nothing\"\n");

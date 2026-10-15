@@ -23,9 +23,10 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, TextRun, font, point,
     px,
 };
+use sfoglia::rules::STARTER;
 use sfoglia::text::{Encoding, LineEndings};
 use sfoglia::workspace::{FileInfo, FilePanel};
-use sfoglia::{APP_NAME, ToggleTheme, Workspace, window_options};
+use sfoglia::{APP_NAME, ToggleHighlightRules, ToggleTheme, Workspace, window_options};
 
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
     open_workspace_with_rules(cx, temp_rules_path())
@@ -596,5 +597,156 @@ bold = true
         assert!(!workspace.read(cx).rules_panel_open(cx));
     })
     .unwrap();
+    let _ = std::fs::remove_file(&rules_path);
+}
+
+/// C-006: with no rule file, the panel starts from the commented example, which already
+/// paints; nothing is written until the first change, which creates the directory and
+/// the file.
+#[gpui_kit::test]
+fn a_missing_rule_file_starts_from_the_example_and_is_written_on_the_first_change(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("sfoglia-rules-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let rules_path = dir.join("sfoglia").join("highlight-rules.toml");
+    let (handle, workspace) = open_workspace_with_rules(cx, rules_path.clone());
+    let log = fixture("sample.log");
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[log.clone()], window, cx));
+        window.render_frame(cx);
+        assert!(!rules_path.exists(), "nothing is written before a change");
+        let store = workspace.read(cx).rules().clone();
+        assert_eq!(store.read(cx).source(), STARTER);
+        let editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).value().as_ref(), STARTER);
+        // The example's log set paints the log: three timestamps, the warning and the error.
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).rule_sets(), ["logs"]);
+        let names: Vec<String> = view
+            .read(cx)
+            .rule_spans()
+            .iter()
+            .map(|s| store.read(cx).file().rule(s).name.clone())
+            .collect();
+        assert_eq!(names, ["timestamp", "timestamp", "warning", "timestamp", "error"]);
+        assert_eq!(window.find("text-rules").label(), Some("rules: logs"));
+        window.dispatch_action(Box::new(ToggleHighlightRules), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).rules_panel_open(cx));
+        assert!(window.try_find("rules-write-error").is_none());
+        assert!(!rules_path.exists());
+        let editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        // One character at the start of the file: the example's first comment line gains a `#`.
+        window.input("#", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let expected = format!("#{STARTER}");
+        assert_eq!(workspace.read(cx).rules().read(cx).source(), expected);
+        assert_eq!(std::fs::read_to_string(&rules_path).unwrap(), expected, "the first change creates the directory and the file");
+        assert!(window.try_find("rules-write-error").is_none());
+        assert_eq!(window.find("rules-problems").label(), Some("No problems."));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// C-006: a rule file that exists but cannot be read is shown as the example and never
+/// written over; edits still re-highlight.
+#[gpui_kit::test]
+fn an_unreadable_rule_file_is_never_written_over(cx: &mut TestAppContext) {
+    let rules_path = temp_rules_path();
+    let bytes = [0xffu8, 0xfe, 0x00, 0x41, 0xff];
+    std::fs::write(&rules_path, bytes).unwrap();
+    let (handle, workspace) = open_workspace_with_rules(cx, rules_path.clone());
+    let log = fixture("sample.log");
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[log.clone()], window, cx));
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).rules().read(cx).source(), STARTER);
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).rule_spans().len(), 5, "the example paints meanwhile");
+        window.dispatch_action(Box::new(ToggleHighlightRules), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let error = window.find("rules-write-error").label().unwrap_or_default().to_string();
+        assert!(error.starts_with("the rule file could not be read"), "{error}");
+        assert!(error.ends_with("edits are not saved"), "{error}");
+        let editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("#", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).rules().read(cx).source(), format!("#{STARTER}"), "the edit is applied in memory");
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).rule_spans().len(), 5);
+        assert_eq!(std::fs::read(&rules_path).unwrap(), bytes, "the unreadable file is byte for byte as it was");
+        assert!(window.find("rules-write-error").label().unwrap_or_default().starts_with("the rule file could not be read"));
+    })
+    .unwrap();
+    let _ = std::fs::remove_file(&rules_path);
+}
+
+/// C-006: a set's globs see the file name alone, never its directory; `^` and `$` see
+/// CRLF line ends.
+#[gpui_kit::test]
+fn globs_see_the_file_name_alone_and_anchors_see_crlf_lines(cx: &mut TestAppContext) {
+    let rules_path = temp_rules_path();
+    std::fs::write(
+        &rules_path,
+        "[[set]]\nname = \"plc\"\nfiles = [\"plc_*.txt\"]\n\n[[set.rule]]\nname = \"word\"\npattern = \"^[a-z]+$\"\nbold = true\n\n[[set]]\nname = \"logs\"\nfiles = \"*logs*\"\n\n[[set.rule]]\npattern = \"x\"\n",
+    )
+    .unwrap();
+    // The directory's name matches `*logs*`; neither file's name does. The first file's
+    // name matches `plc_*.txt`, which its path, taken from the start, would not.
+    let dir = std::env::temp_dir().join(format!("sfoglia-logs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let plc = dir.join("plc_1.txt");
+    std::fs::write(&plc, "abc\r\ndef\r\nnot this one\r\n").unwrap();
+    let other = dir.join("notes.txt");
+    std::fs::write(&other, "x\n").unwrap();
+    let (handle, workspace) = open_workspace_with_rules(cx, rules_path.clone());
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[plc.clone(), other.clone()], window, cx));
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        let plc_view = panels[0].read(cx).text_view().unwrap().clone();
+        let other_view = panels[1].read(cx).text_view().unwrap().clone();
+        assert_eq!(plc_view.read(cx).rule_sets(), ["plc"]);
+        assert_eq!(other_view.read(cx).rule_sets(), Vec::<String>::new());
+        assert!(other_view.read(cx).rule_spans().is_empty());
+        assert_eq!(window.find("text-rules").label(), Some("no rules"));
+        // The two short lines match between their CRLF ends; the carriage returns are outside.
+        assert_eq!(plc_view.read(cx).status().line_endings, LineEndings::CrLf);
+        assert_eq!(plc_view.read(cx).text(cx).as_ref(), "abc\r\ndef\r\nnot this one\r\n");
+        let ranges: Vec<_> = plc_view.read(cx).rule_spans().iter().map(|s| s.range.clone()).collect();
+        assert_eq!(ranges, [0..3, 5..8]);
+        assert_eq!(plc_view.read(cx).decoration_ranges(cx), ranges);
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&rules_path);
 }
