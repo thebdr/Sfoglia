@@ -1,0 +1,4 @@
+2026-10-15 09:00:01 INFO  service started
+2026-10-15 09:00:02 WARN  disk at 91 percent
+2026-10-15 09:00:03 ERROR cannot open plc_7.txt: TODO retry
+plain line without a timestamp

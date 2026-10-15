@@ -1,5 +1,6 @@
-//! The main window's content: open files as tabs in a dock (C-004), and the
-//! application name when nothing is open (C-001).
+//! The main window's content: open files as tabs in a dock (C-004), the application
+//! name when nothing is open (C-001), and the highlighting rules panel on the right
+//! (C-006).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,21 +15,23 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
     KeyBinding, PathPromptOptions, Render, Role, SharedString, TestSupportExt, Window, actions,
-    div,
+    div, px,
 };
 
 use crate::detect::{Content, Detection, Route, SNIFF_BYTES, detect};
 use crate::generated::families::Family;
+use crate::rules;
 use crate::shell::{APP_NAME, title};
-use crate::viewers::TextView;
+use crate::viewers::{RulesPanel, RulesStore, TextView};
 
-actions!(sfoglia, [OpenFiles, ToggleTheme]);
+actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-o", OpenFiles, Some("Workspace")),
         KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-h", ToggleHighlightRules, Some("Workspace")),
     ]);
 }
 
@@ -94,12 +97,17 @@ pub struct FilePanel {
 }
 
 impl FilePanel {
-    pub fn new(info: FileInfo, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        info: FileInfo,
+        rules: &Entity<RulesStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let view = if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
-                Ok(bytes) => {
-                    PanelView::Text(cx.new(|cx| TextView::new(&info.name, &bytes, window, cx)))
-                }
+                Ok(bytes) => PanelView::Text(
+                    cx.new(|cx| TextView::new(&info.name, &bytes, rules, window, cx)),
+                ),
                 Err(_) => PanelView::Info,
             }
         } else {
@@ -221,12 +229,17 @@ impl Render for FilePanel {
     }
 }
 
+/// The width the rules panel opens at.
+const RULES_PANEL_WIDTH: f32 = 460.;
+
 /// The main window's root view.
 pub struct Workspace {
     focus_handle: FocusHandle,
     dock_area: Entity<DockArea>,
     _skin: Rc<DockSkin>,
     open: Vec<OpenFile>,
+    rules: Entity<RulesStore>,
+    rules_panel: Entity<RulesPanel>,
 }
 
 struct OpenFile {
@@ -235,16 +248,56 @@ struct OpenFile {
 }
 
 impl Workspace {
+    /// The workspace with the rule file from the user's configuration directory.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_rules_path(rules::default_path(), window, cx)
+    }
+
+    /// The workspace with the rule file at `rules_path` (`None`: rules are not saved).
+    pub fn with_rules_path(
+        rules_path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (dock_area, skin) = DockSkin::dock_area("sfoglia-main", Some(1), window, cx);
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        let rules = cx.new(|_| RulesStore::load(rules_path));
+        let rules_panel = cx.new(|cx| RulesPanel::new(&rules, window, cx));
+        // The rules panel lives in the right dock, closed until Ctrl+Shift+H.
+        dock_area.update(cx, |dock, cx| {
+            dock.add_panel_view(
+                panel_handle(rules_panel.clone()),
+                DockPlacement::Right,
+                Some(px(RULES_PANEL_WIDTH)),
+                window,
+                cx,
+            );
+            if dock.is_dock_open(DockPlacement::Right) {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+        });
         Self {
             focus_handle,
             dock_area,
             _skin: skin,
             open: Vec::new(),
+            rules,
+            rules_panel,
         }
+    }
+
+    pub fn rules(&self) -> &Entity<RulesStore> {
+        &self.rules
+    }
+
+    pub fn rules_panel(&self) -> &Entity<RulesPanel> {
+        &self.rules_panel
+    }
+
+    /// Whether the rules panel is on screen.
+    pub fn rules_panel_open(&self, cx: &App) -> bool {
+        self.dock_area.read(cx).is_dock_open(DockPlacement::Right)
     }
 
     /// Whether the dock still holds this file's tab (the user may have closed it).
@@ -304,7 +357,8 @@ impl Workspace {
                 continue;
             }
             let info = FileInfo::probe(path);
-            let panel = cx.new(|cx| FilePanel::new(info, window, cx));
+            let rules = self.rules.clone();
+            let panel = cx.new(|cx| FilePanel::new(info, &rules, window, cx));
             // The kit's handle carries the panel's title; a bare entity would show its panel_name.
             let handle = panel_handle(panel.clone());
             self.dock_area.update(cx, |dock, cx| {
@@ -318,6 +372,17 @@ impl Workspace {
     fn on_toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().is_dark() { ThemeMode::Light } else { ThemeMode::Dark };
         Theme::change(mode, Some(window), cx);
+        cx.notify();
+    }
+
+    fn on_toggle_rules(
+        &mut self,
+        _: &ToggleHighlightRules,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dock_area
+            .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Right, window, cx));
         cx.notify();
     }
 
@@ -347,6 +412,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(Self::on_open_files))
             .on_action(cx.listener(Self::on_toggle_theme))
+            .on_action(cx.listener(Self::on_toggle_rules))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();
@@ -380,7 +446,7 @@ impl Render for Workspace {
                         .flex()
                         .justify_center()
                         .opacity(0.7)
-                        .child("Ctrl+O opens files. Dropping files here opens them too."),
+                        .child("Ctrl+O opens files. Dropping files here opens them too. Ctrl+Shift+H edits the highlighting rules."),
                 )
             })
     }

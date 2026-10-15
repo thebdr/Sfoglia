@@ -40,6 +40,14 @@
 - **Evidence:** .zen/evidence/C-005.md
 - **Status:** verified
 
+## C-006: Custom highlighting rules with regex and priority
+- **Date:** 2026-10-14
+- **Source:** ingest (user-request-2026-10-13#core)
+- **Description:** The user defines highlighting rules in `highlight-rules.toml` under `sfoglia` in the configuration directory (`%APPDATA%` on Windows, `~/.config` on Linux): `[[set]]` tables scoped by file-name globs (`files`, one or several, matched case-insensitively against the name alone), each holding `[[set.rule]]` tables with a regular expression (`pattern`, Rust regex syntax, `^` and `$` matching at line boundaries), an integer `priority` (0 when absent) and a style: `foreground` and `background` colours as `#rgb`, `#rrggbb` or `#rrggbbaa`, and `bold`, `italic` and `underline` flags. Every set whose glob names the file applies to it. Rules paint on top of syntax highlighting: in a rule's spans its colours and flags replace the syntax colour. Where matches overlap, the higher priority wins; at equal priority the earlier start wins, then the longer match, then the rule declared first; the winner keeps its whole match and a loser keeps only what no winner covers. An empty match paints nothing. Ctrl+Shift+H shows and hides a panel holding the file in an editor; every change re-highlights the open files at once and is written to the file. A rule that cannot be used (a bad pattern, colour or field type) is reported in the panel with the line of its header and the other rules still load; an unknown field is reported and ignored; a syntax error, or a set field of the wrong type, is reported with its line and loads nothing. When the file does not exist, the panel starts from a commented example, written on the first change.
+- **Verification:** automated → overlap_resolution_keeps_the_winner_whole_and_clips_the_loser, glob_scoping_picks_the_sets_that_name_the_file, spans_come_from_every_applicable_set_with_the_rule_styles, anchors_match_at_line_boundaries_and_empty_matches_are_skipped, a_malformed_rule_file_loads_the_valid_rules_and_reports_the_bad_ones_by_line, colours_parse_in_three_lengths, rule_spans_reach_the_editor_and_follow_edits_to_the_rule_file | exact winning pieces for nested (both ways), partially overlapping, adjacent, equal-priority and identical matches; the sets that apply to a log, a `plc_` file and a Rust file; the exact styled substrings and rule styles of a log line; a file with a broken glob, a broken pattern, an unknown field, a wrong type and a bad colour loads the valid rules and lists each problem with its line; a headless window where a log file's rule spans reach the editor's decorations, change the moment the rules editor is typed into, and a bad pattern shows its line in the panel; manual: captures on Windows and Linux of a log file painted by the example rules with the panel open, in both themes.
+- **Evidence:** .zen/evidence/C-006.md
+- **Status:** pending verification
+
 ## Pending Contract Deltas
 
 ### P-027: Release artifacts for Windows and Linux
@@ -47,12 +55,6 @@
 - **Source:** ingest (user-request-2026-10-13#linux-day-1)
 - **Description:** A tagged release produces installable artifacts for both platforms: a Windows zip or installer and a Linux AppImage or tarball, built by the same continuous-integration workflow that tests every commit (C-003).
 - **Proposed verification:** TBD
-
-### P-003: Custom highlighting rules with regex and priority
-- **Date:** 2026-10-14
-- **Source:** ingest (user-request-2026-10-13#core)
-- **Description:** The user defines highlighting rules: a regular expression, a style (foreground, background, bold, italic, underline) and an integer priority. Rules apply on top of syntax highlighting. Where matches overlap, the higher priority wins; equal priority is resolved by earlier start, then by longer match. A rule set is scoped by filename glob (for example `*.log` or `plc_*.txt`) and several sets may apply to one file. Rule sets live in a TOML file in the user's configuration directory, are editable inside the app with immediate re-highlighting, and an invalid regex is reported on the rule, not by failing the file.
-- **Proposed verification:** automated: overlap resolution asserts exact winning spans for nested, partially overlapping, adjacent and equal-priority matches; glob scoping asserts which sets apply; a malformed rule file loads the valid rules and reports the bad one by line.
 
 ### P-004: Edit and save text-based files
 - **Date:** 2026-10-14

@@ -12,6 +12,7 @@
 //! that is already open activates its tab instead of adding another.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::time::Instant;
 
@@ -27,11 +28,23 @@ use sfoglia::workspace::{FileInfo, FilePanel};
 use sfoglia::{APP_NAME, ToggleTheme, Workspace, window_options};
 
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
+    open_workspace_with_rules(cx, temp_rules_path())
+}
+
+/// A rule file path of this test alone; the file need not exist (the workspace then
+/// starts from the example rules without writing them).
+fn temp_rules_path() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("sfoglia-rules-{}-{n}.toml", std::process::id()))
+}
+
+fn open_workspace_with_rules(cx: &mut TestAppContext, rules_path: PathBuf) -> (AnyWindowHandle, Entity<Workspace>) {
     cx.update(gpui_kit::init);
     cx.update(sfoglia::init);
     cx.update(|cx| {
         gpui_kit::open_window(window_options(), cx, |window, cx| {
-            cx.new(|cx| Workspace::new(window, cx))
+            cx.new(|cx| Workspace::with_rules_path(Some(rules_path.clone()), window, cx))
         })
         .expect("open the main window headlessly")
     })
@@ -168,9 +181,10 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
 
         // The tab is named after the file, not after the panel kind. The kit draws the
         // tab bar from these names; the drawn tab bar itself is checked in the captures.
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), window, cx));
+        let rules = workspace.read(cx).rules().clone();
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), &rules, window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt"));
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), window, cx));
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), &rules, window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("does-not-exist.txt"));
     })
     .unwrap();
@@ -409,4 +423,178 @@ fn long_lines_are_not_wrapped(cx: &mut TestAppContext) {
     })
     .unwrap();
     let _ = std::fs::remove_file(&path);
+}
+
+/// C-006: the rule sets that name a file paint it, through the editor's decorations;
+/// typing into the rules panel re-paints at once and writes the file; a bad pattern is
+/// reported with its line.
+#[gpui_kit::test]
+fn rule_spans_reach_the_editor_and_follow_edits_to_the_rule_file(cx: &mut TestAppContext) {
+    let rules_path = temp_rules_path();
+    std::fs::write(
+        &rules_path,
+        r##"[[set]]
+name = "logs"
+files = ["*.log"]
+
+[[set.rule]]
+name = "error"
+pattern = "ERROR.*"
+priority = 1
+foreground = "#f00"
+
+[[set.rule]]
+name = "number"
+pattern = "\\d+"
+priority = 5
+bold = true
+"##,
+    )
+    .unwrap();
+    let (handle, workspace) = open_workspace_with_rules(cx, rules_path.clone());
+    let log = fixture("sample.log");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let painted = |view: &Entity<sfoglia::viewers::TextView>, cx: &gpui_kit::App| -> Vec<(String, String)> {
+        let rules = workspace.read(cx).rules().read(cx);
+        view.read(cx)
+            .rule_spans()
+            .iter()
+            .map(|s| (text[s.range.clone()].to_string(), rules.file().rule(s).name.clone()))
+            .collect()
+    };
+    let numbers = |values: &[&str]| -> Vec<(String, String)> {
+        values.iter().map(|v| (v.to_string(), "number".to_string())).collect()
+    };
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("sample.rs"), log.clone()], window, cx));
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        let rs_view = panels[0].read(cx).text_view().unwrap().clone();
+        let log_view = panels[1].read(cx).text_view().unwrap().clone();
+
+        // The log is painted by its set, the Rust file by none; the status row says so.
+        assert_eq!(log_view.read(cx).rule_sets(), ["logs"]);
+        assert_eq!(rs_view.read(cx).rule_sets(), Vec::<String>::new());
+        assert!(rs_view.read(cx).rule_spans().is_empty());
+        assert!(rs_view.read(cx).decoration_ranges(cx).is_empty());
+        assert_eq!(window.find("text-rules").label(), Some("rules: logs"));
+        let spans = painted(&log_view, cx);
+        let mut expected = numbers(&["2026", "10", "15", "09", "00", "01"]);
+        expected.extend(numbers(&["2026", "10", "15", "09", "00", "02", "91"]));
+        expected.extend(numbers(&["2026", "10", "15", "09", "00", "03"]));
+        expected.extend([
+            ("ERROR cannot open plc_".to_string(), "error".to_string()),
+            ("7".to_string(), "number".to_string()),
+            (".txt: TODO retry".to_string(), "error".to_string()),
+        ]);
+        assert_eq!(spans, expected);
+        // The same ranges are what the editor's decoration layer holds.
+        let ranges: Vec<_> = log_view.read(cx).rule_spans().iter().map(|s| s.range.clone()).collect();
+        assert_eq!(log_view.read(cx).decoration_ranges(cx), ranges);
+        assert_eq!(ranges[19], text.find("ERROR").unwrap()..text.find("plc_").unwrap() + 4);
+
+        // The rules panel starts closed.
+        assert!(!workspace.read(cx).rules_panel_open(cx));
+        assert!(window.try_find("rules-problems").is_none());
+        let editor = log_view.read(cx).editor().clone();
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("ctrl-shift-h", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).rules_panel_open(cx), "Ctrl+Shift+H opens the rules panel");
+        assert_eq!(window.find("rules-problems").label(), Some("No problems."));
+        assert_eq!(window.find("rules-path").label().map(str::to_string), Some(rules_path.display().to_string()));
+        assert!(window.try_find("rules-write-error").is_none());
+
+        // Type a new set at the top of the file: TODO, at a priority above the error rule.
+        let rules_editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        let focus = rules_editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        assert!(focus.is_focused(window), "the rules editor holds focus");
+        for line in ["[[set]]", "files=\"*\"", "[[set.rule]]", "name=\"todo\"", "pattern=\"TODO\"", "priority=9", "background=\"#ff0\"", ""] {
+            window.input(line, cx);
+            window.press("enter", cx);
+        }
+        let typed = rules_editor.read(cx).value();
+        assert!(typed.starts_with("[[set]]\nfiles=\"*\"\n[[set.rule]]\nname=\"todo\"\npattern=\"TODO\"\npriority=9\nbackground=\"#ff0\"\n\n[[set]]\nname = \"logs\""), "{typed}");
+    })
+    .unwrap();
+    // The editor's change event reaches the store, and the store's observers the views,
+    // once the update that typed ends: the next frame already paints the new rule.
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let rules_editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        let typed = rules_editor.read(cx).value();
+        assert_eq!(window.find("rules-problems").label(), Some("No problems."));
+        // Painted in both open files, and written to the file.
+        let panels = workspace.read(cx).panels(cx);
+        let rs_view = panels[0].read(cx).text_view().unwrap().clone();
+        let log_view = panels[1].read(cx).text_view().unwrap().clone();
+        assert_eq!(log_view.read(cx).rule_sets(), ["set 1", "logs"]);
+        assert_eq!(rs_view.read(cx).rule_sets(), ["set 1"]);
+        let spans = painted(&log_view, cx);
+        assert_eq!(
+            &spans[19..],
+            [
+                ("ERROR cannot open plc_".to_string(), "error".to_string()),
+                ("7".to_string(), "number".to_string()),
+                (".txt: ".to_string(), "error".to_string()),
+                ("TODO".to_string(), "todo".to_string()),
+                (" retry".to_string(), "error".to_string()),
+            ]
+        );
+        let ranges: Vec<_> = log_view.read(cx).rule_spans().iter().map(|s| s.range.clone()).collect();
+        assert_eq!(log_view.read(cx).decoration_ranges(cx), ranges);
+        assert_eq!(std::fs::read_to_string(&rules_path).unwrap(), typed.as_ref());
+        assert_eq!(workspace.read(cx).rules().read(cx).source(), typed.as_ref());
+
+        // A broken pattern typed in is reported with its line; the other rules still paint.
+        let focus = rules_editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        for line in ["[[set]]", "files=\"*\"", "[[set.rule]]", "pattern=\"(\"", ""] {
+            window.input(line, cx);
+            window.press("enter", cx);
+        }
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let rules_editor = workspace.read(cx).rules_panel().read(cx).editor().clone();
+        let log_view = workspace.read(cx).panels(cx)[1].read(cx).text_view().unwrap().clone();
+        let problems = window.find("rules-problems").label().unwrap_or_default().to_string();
+        // The cursor stayed after the first typed set, so the broken set is the second one
+        // and its rule header is line 11.
+        assert!(problems.starts_with("line 11: set `set 2`, rule `rule 1`: regex parse error"), "{problems}");
+        assert_eq!(problems.lines().count(), 1, "one problem, on one line: {problems}");
+        assert!(problems.ends_with("error: unclosed group"), "{problems}");
+        assert_eq!(workspace.read(cx).rules().read(cx).file().problems.len(), 1);
+        let spans = painted(&log_view, cx);
+        assert_eq!(spans[22], ("TODO".to_string(), "todo".to_string()));
+        assert_eq!(log_view.read(cx).rule_sets(), ["set 1", "set 2", "logs"]);
+        assert_eq!(std::fs::read_to_string(&rules_path).unwrap(), rules_editor.read(cx).value().as_ref());
+
+        // The chord closes the panel again.
+        window.press("ctrl-shift-h", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!workspace.read(cx).rules_panel_open(cx));
+    })
+    .unwrap();
+    let _ = std::fs::remove_file(&rules_path);
 }

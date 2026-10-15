@@ -6254,7 +6254,12 @@ dependencies = [
 name = "sfoglia"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
+ "globset",
  "gpui-kit",
+ "regex",
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

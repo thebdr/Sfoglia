@@ -1,16 +1,23 @@
 //! The text viewer (C-005): a read-only code editor with line numbers and syntax
 //! highlighting, and a status row naming the encoding, line endings, line count and
-//! language.
+//! language. The user's highlighting rules (C-006) paint over the syntax colours as
+//! editor decorations and follow every change to the rule file.
 
-use gpui_kit::component::input::{Editor, EditorState, RopeExt as _};
+use std::ops::Range;
+
+use gpui_kit::component::input::{
+    Editor, EditorState, RopeExt as _, TextDecoration, TextDecorationCollection,
+};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, IntoElement, Render, Role, SharedString, TestSupportExt, Window, div,
-    relative,
+    App, Context, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement, Render, Rgba,
+    Role, SharedString, Subscription, TestSupportExt, UnderlineStyle, Window, div, px, relative,
 };
 
+use crate::rules::{Color, Span, Style};
 use crate::text::{Decoded, Encoding, LineEndings, decode, language_for};
+use crate::viewers::RulesStore;
 
 /// What the status row says about the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,13 +31,26 @@ pub struct TextStatus {
 }
 
 pub struct TextView {
+    name: String,
     editor: Entity<EditorState>,
     status: TextStatus,
+    rules: Entity<RulesStore>,
+    decorations: TextDecorationCollection,
+    spans: Vec<Span>,
+    sets: Vec<String>,
+    _observe_rules: Subscription,
 }
 
 impl TextView {
-    /// Decode `bytes` as the file named `name` and put the text in a read-only editor.
-    pub fn new(name: &str, bytes: &[u8], window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Decode `bytes` as the file named `name` and put the text in a read-only editor,
+    /// painted by the rule sets that name the file.
+    pub fn new(
+        name: &str,
+        bytes: &[u8],
+        rules: &Entity<RulesStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let Decoded { text, encoding, line_endings, lines, replaced } = decode(bytes);
         let language = language_for(name).unwrap_or("text");
         let shown = display_text(&text, line_endings);
@@ -41,10 +61,37 @@ impl TextView {
                 .soft_wrap(false)
                 .default_value(shown)
         });
-        Self {
+        let decorations =
+            editor.update(cx, |state, cx| state.create_decorations_collection(Vec::new(), cx));
+        let observe = cx.observe(rules, |this, _, cx| this.apply_rules(cx));
+        let mut view = Self {
+            name: name.to_string(),
             editor,
             status: TextStatus { encoding, line_endings, lines, replaced, language },
-        }
+            rules: rules.clone(),
+            decorations,
+            spans: Vec::new(),
+            sets: Vec::new(),
+            _observe_rules: observe,
+        };
+        view.apply_rules(cx);
+        view
+    }
+
+    /// Recompute the rule spans for the current rule file and hand them to the editor.
+    fn apply_rules(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value();
+        let rules = self.rules.read(cx);
+        let file = rules.file();
+        self.sets = file.sets_for(&self.name).into_iter().map(|i| file.sets[i].name.clone()).collect();
+        self.spans = file.spans(&self.name, &text);
+        let decorations: Vec<TextDecoration> = self
+            .spans
+            .iter()
+            .map(|span| TextDecoration::new(span.range.clone(), highlight_style(&file.rule(span).style)))
+            .collect();
+        self.decorations.set(decorations, cx);
+        cx.notify();
     }
 
     pub fn editor(&self) -> &Entity<EditorState> {
@@ -64,6 +111,47 @@ impl TextView {
     pub fn editor_lines(&self, cx: &App) -> usize {
         self.editor.read(cx).text().lines_len()
     }
+
+    /// The rule spans painted now, overlaps resolved, in text order.
+    pub fn rule_spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    /// The names of the rule sets that apply to this file.
+    pub fn rule_sets(&self) -> &[String] {
+        &self.sets
+    }
+
+    /// The byte ranges the editor's decoration layer holds for this view.
+    pub fn decoration_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        self.decorations.get_ranges(cx)
+    }
+}
+
+fn hsla(colour: Color) -> Hsla {
+    Rgba {
+        r: f32::from(colour.r) / 255.,
+        g: f32::from(colour.g) / 255.,
+        b: f32::from(colour.b) / 255.,
+        a: f32::from(colour.a) / 255.,
+    }
+    .into()
+}
+
+/// A rule's style as the editor paints it: unset colours leave the syntax colour.
+pub fn highlight_style(style: &Style) -> HighlightStyle {
+    HighlightStyle {
+        color: style.foreground.map(hsla),
+        background_color: style.background.map(hsla),
+        font_weight: style.bold.then_some(FontWeight::BOLD),
+        font_style: style.italic.then_some(FontStyle::Italic),
+        underline: style.underline.then(|| UnderlineStyle {
+            thickness: px(1.),
+            color: style.foreground.map(hsla),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +168,29 @@ mod tests {
         assert_eq!(display_text("a\nb", LineEndings::Lf), "a\nb");
         assert_eq!(display_text("", LineEndings::None), "");
         assert_eq!(display_text("caffè\rlatte", LineEndings::Cr), "caffè\nlatte");
+    }
+
+    #[test]
+    fn rule_styles_become_editor_styles_field_by_field() {
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let style = highlight_style(&Style {
+            foreground: Some(red),
+            background: None,
+            bold: true,
+            italic: false,
+            underline: true,
+        });
+        assert_eq!(style.color, Some(hsla(red)));
+        assert_eq!(style.background_color, None);
+        assert_eq!(style.font_weight, Some(FontWeight::BOLD));
+        assert_eq!(style.font_style, None);
+        assert_eq!(style.underline.map(|u| (u.thickness, u.color, u.wavy)), Some((px(1.), Some(hsla(red)), false)));
+        let plain = highlight_style(&Style::default());
+        assert_eq!(plain, HighlightStyle::default(), "an empty style changes nothing");
+        let translucent = hsla(Color { r: 0, g: 0, b: 255, a: 128 });
+        assert!((translucent.a - 128. / 255.).abs() < 1e-6);
+        let italic = highlight_style(&Style { italic: true, ..Style::default() });
+        assert_eq!(italic.font_style, Some(FontStyle::Italic));
     }
 }
 
@@ -118,6 +229,11 @@ impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = &self.status;
         let replaced = (s.replaced > 0).then(|| format!("{} undecodable", s.replaced));
+        let rules = if self.sets.is_empty() {
+            "no rules".to_string()
+        } else {
+            format!("rules: {}", self.sets.join(", "))
+        };
         v_flex()
             .size_full()
             .child(
@@ -145,6 +261,7 @@ impl Render for TextView {
                     .child(status_item("text-line-endings", s.line_endings.label()))
                     .child(status_item("text-lines", format!("{} lines", s.lines)))
                     .child(status_item("text-language", s.language))
+                    .child(status_item("text-rules", rules))
                     .children(replaced.map(|r| status_item("text-replaced", r))),
             )
     }

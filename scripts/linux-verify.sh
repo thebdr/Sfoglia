@@ -9,6 +9,8 @@
 # Optional steps, enabled by environment variables:
 #   TOGGLE_THEME=1   press Ctrl+Shift+T and capture ~/sfoglia-linux-dark.png, then press it again
 #   SCROLL_END=1     click into the text and press Ctrl+End, capture ~/sfoglia-linux-end.png
+#   RULES_PANEL=1    press Ctrl+Shift+H (the highlighting rules panel) and capture
+#                    ~/sfoglia-linux-rules.png; the panel stays open for the later captures
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -20,7 +22,8 @@ PNG="$HOME/sfoglia-linux.png"
 PNG2="$HOME/sfoglia-linux-dialog.png"
 PNGDARK="$HOME/sfoglia-linux-dark.png"
 PNGEND="$HOME/sfoglia-linux-end.png"
-: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND"
+PNGRULES="$HOME/sfoglia-linux-rules.png"
+: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
 
@@ -65,6 +68,10 @@ if [ -n "$WID" ]; then
   GEOM=$(xdotool getwindowgeometry --shell "$WID" 2>/dev/null | tr '\n' ' ')
   xdotool windowactivate --sync "$WID" 2>/dev/null; sleep 0.5
   shot "$PNG" "window id=$WID title='$TITLE' $GEOM"
+  if [ "${RULES_PANEL:-0}" = "1" ]; then
+    xdotool key --window "$WID" ctrl+shift+h; sleep 1.5
+    shot "$PNGRULES" "after Ctrl+Shift+H"
+  fi
   if [ "${TOGGLE_THEME:-0}" = "1" ]; then
     xdotool key --window "$WID" ctrl+shift+t; sleep 1.5
     shot "$PNGDARK" "after Ctrl+Shift+T"
@@ -98,7 +105,8 @@ else
 fi
 kill "$APP" 2>/dev/null; wait "$APP" 2>/dev/null
 log "app stopped"
-printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
+printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
   "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" \
-  "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" > "$RESULT"
+  "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" \
+  "$( [ -s "$PNGRULES" ] && echo yes || echo no)" > "$RESULT"
 cat "$RESULT"
