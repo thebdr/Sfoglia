@@ -665,6 +665,16 @@ mod tests {
         assert_eq!(text_encoding(b"caff\xe8 \x93latte\x94 \x96 3\x80\n"), Some(TextEncoding::Latin1));
         assert_eq!(text_encoding(b"caff\xe8 \x85 and so on"), Some(TextEncoding::Latin1));
         assert_eq!(text_encoding(b"caff\xe8\x08"), None, "backspace is a control byte");
+        // Tab, form feed and escape are whitespace and colour codes, allowed in single-byte text too.
+        assert_eq!(text_encoding(b"caff\xe8\tlatte\n"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"page one\x0ccaff\xe8\n"), Some(TextEncoding::Latin1));
+        assert_eq!(text_encoding(b"\x1b[31mcaff\xe8\x1b[0m\n"), Some(TextEncoding::Latin1));
+        assert_eq!(detect("Makefile", b"all:\n\tcaff\xe8\n").family, Some(Text));
+        assert_eq!(detect("colours.log", b"\x1b[32mok\x1b[0m caff\xe8\n").family, Some(Text));
+        for control in [0x00u8, 0x01, 0x07, 0x08, 0x0b, 0x0e, 0x1f, 0x7f] {
+            let sample = [b"caff\xe8 ".as_slice(), &[control], b" latte\n"].concat();
+            assert_eq!(text_encoding(&sample), None, "byte {control:#04x} is a control byte");
+        }
         assert_eq!(text_encoding(b"caff\xe8"), Some(TextEncoding::Utf8), "a trailing lead byte is a cut-off character");
         let latin_source = detect("main.rs", b"// caff\xe8 latte\nfn main() {}\n");
         assert_eq!(latin_source.content, Content::Text(TextEncoding::Latin1));
