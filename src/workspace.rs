@@ -23,9 +23,10 @@ use crate::generated::families::Family;
 use crate::hex::HexFile;
 use crate::rules;
 use crate::shell::{APP_NAME, title};
+use crate::viewers::data_view::{self, Collapse, CopyPath, Expand, PrettyPrint, SelectDown, SelectUp, ToggleNode, ToggleRaw};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
-use crate::viewers::{HexView, ImageView, RulesPanel, RulesStore, TextView};
+use crate::viewers::{DataView, HexView, ImageView, RulesPanel, RulesStore, TextView};
 
 actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs]);
 
@@ -46,6 +47,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("1", ZoomActual, Some(image_view::KEY_CONTEXT)),
         KeyBinding::new("0", ZoomFit, Some(image_view::KEY_CONTEXT)),
         KeyBinding::new("r", RotateQuarter, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("up", SelectUp, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("down", SelectDown, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("left", Collapse, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("right", Expand, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("enter", ToggleNode, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("space", ToggleNode, Some(data_view::TREE_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", data_view::FocusSearch, Some(data_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-c", CopyPath, Some(data_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-p", PrettyPrint, Some(data_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", ToggleRaw, Some(data_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -106,6 +117,8 @@ enum PanelView {
     Text(Entity<TextView>),
     /// The image viewer (C-009).
     Image(Entity<ImageView>),
+    /// The structured data viewer (C-010).
+    Data(Entity<DataView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -135,6 +148,11 @@ impl FilePanel {
                 Ok(bytes) => PanelView::Image(cx.new(|cx| ImageView::new(&info.path, &bytes, window, cx))),
                 Err(_) => PanelView::Info,
             }
+        } else if info.error.is_none() && info.route() == Route::Family(Family::DataTrees) {
+            match std::fs::read(&info.path) {
+                Ok(bytes) => PanelView::Data(cx.new(|cx| DataView::new(&info.path, &bytes, rules, window, cx))),
+                Err(_) => PanelView::Info,
+            }
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -148,6 +166,10 @@ impl FilePanel {
         // The tab's name and its close permission follow the text view's modified state.
         let observe_text = match &view {
             PanelView::Text(text) => Some(cx.observe(text, |_, _, cx| {
+                cx.emit(PanelEvent::LayoutChanged);
+                cx.notify();
+            })),
+            PanelView::Data(data) => Some(cx.observe(data, |_, _, cx| {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
@@ -168,9 +190,16 @@ impl FilePanel {
         }
         // An image view takes the focus as soon as its tab exists, so its keys work at once;
         // the dock itself focuses a panel only when a tab is selected later.
-        if let PanelView::Image(view) = &panel.view {
-            let focus = view.read(cx).focus_handle(cx);
-            window.focus(&focus, cx);
+        match &panel.view {
+            PanelView::Image(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Data(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Text(_) | PanelView::Info => {}
         }
         panel
     }
@@ -200,6 +229,23 @@ impl FilePanel {
         match &self.view {
             PanelView::Image(view) if !self.hex_shown => Some(view),
             _ => None,
+        }
+    }
+
+    /// The data viewer, when this tab shows one.
+    pub fn data_view(&self) -> Option<&Entity<DataView>> {
+        match &self.view {
+            PanelView::Data(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The text that Ctrl+S saves: the text viewer, or the data viewer's raw text once it exists.
+    pub fn editable_text(&self, cx: &App) -> Option<Entity<TextView>> {
+        match &self.view {
+            PanelView::Text(view) => Some(view.clone()),
+            PanelView::Data(view) => view.read(cx).text_view().cloned(),
+            PanelView::Image(_) | PanelView::Info => None,
         }
     }
 
@@ -251,6 +297,7 @@ impl FilePanel {
     pub fn is_dirty(&self, cx: &App) -> bool {
         match &self.view {
             PanelView::Text(text) => text.read(cx).is_dirty(),
+            PanelView::Data(data) => data.read(cx).is_dirty(cx),
             PanelView::Image(_) | PanelView::Info => false,
         }
     }
@@ -294,6 +341,7 @@ impl Focusable for FilePanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.view {
             PanelView::Image(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            PanelView::Data(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -334,6 +382,14 @@ impl Render for FilePanel {
                 .into_any_element();
         }
         if let PanelView::Image(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
+        if let PanelView::Data(view) = &self.view {
             return div()
                 .id("file-panel")
                 .track_focus(&self.focus_handle)
@@ -550,7 +606,7 @@ impl Workspace {
 
     /// Save the active tab's text (C-008). The outcome is shown in the view's status row.
     fn on_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).text_view().cloned()) {
+        if let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).editable_text(cx)) {
             let _ = view.update(cx, |view, cx| view.save(cx));
         }
     }

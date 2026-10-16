@@ -12,7 +12,7 @@ gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages"] }
 # Highlighting rules (C-006): regex patterns in a TOML file, scoped by file-name globs.
 regex = "1"
 globset = "0.4"
-toml = "1"
+toml = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 dirs = "6"
 # Hex view (C-007): the file is mapped, not read; search is memmem.
@@ -25,6 +25,10 @@ flate2 = "1"
 ttf-parser = "0.25"
 usvg = "0.46"
 resvg = "0.46"
+# Structured data trees (C-010): JSON in key order, XML as a read-only DOM, YAML through serde; TOML keeps its order.
+serde_json = { version = "1", features = ["preserve_order"] }
+roxmltree = "0.21"
+serde-saphyr = "1"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
@@ -35,3 +39,12 @@ png = "0.18"
 members = ["xtask"]
 # A bare `cargo test` must run the checklist freshness check in xtask too (C-002).
 default-members = [".", "xtask"]
+
+# Debug info: line tables for our crates, none for the dependencies. With full debug info the
+# test binaries' program databases reached half a gigabyte each and, once the data parsers of
+# C-010 joined, the MSVC linker refused them (LNK1140, program database limit exceeded).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

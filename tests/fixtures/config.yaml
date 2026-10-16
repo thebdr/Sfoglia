@@ -1,0 +1,6 @@
+name: Sfoglia
+tags:
+  - rust
+  - gpui
+server:
+  port: 8080

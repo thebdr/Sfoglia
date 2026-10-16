@@ -190,6 +190,12 @@ impl TextView {
         }
     }
 
+    /// The text was replaced from outside the editor (a pretty-print, C-010): the tab is
+    /// modified as after a keystroke.
+    pub fn note_edit(&mut self, cx: &mut Context<Self>) {
+        self.on_edited(cx);
+    }
+
     /// The decorations handed to the editor for the current spans, in span order.
     pub fn rule_decorations(&self) -> &[TextDecoration] {
         &self.painted

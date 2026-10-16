@@ -10,6 +10,7 @@ Legend: **done** = proven by a verified clause. **in progress** = clause exists,
 |---|---|---|---|---|---|
 | Source and text viewing with syntax highlighting | C-005 | done | no | user request 2026-10-13 | txt, log, text |
 | Images | C-009 | done | done | user request 2026-10-13 | aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, ff, gif, hdr, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, qoi, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm |
+| Structured data trees | C-010 | in progress | in progress | user request 2026-10-13 | json, jsonl, xml, yaml, yml, toml, ini |
 | Word-processing documents | P-007 | planned | later | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps |
 | PDF and XPS viewing | P-008 | planned | no | user request 2026-10-13 | pdf, oxps, xps |
 | Spreadsheets and delimited tables | P-010 | planned | planned | user request 2026-10-13 | csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm |
@@ -24,4 +25,3 @@ Legend: **done** = proven by a verified clause. **in progress** = clause exists,
 | Video playback through VLC | P-020 | planned | no | user request 2026-10-13 | 3g2, 3gp, asf, avi, bik, cam, ml20, dat, divx, dvr-ms, f4v, flv, gxf, hevc, m2t, m2ts, m2v, m4v, mk3d, mkv, mod, mov, mp4, mpg, mpeg, mts, mxf, nsv, nut, nuv, ogm, ogv, pmf, pmp, rm, rmvb, thp, tp, trp, ts, vob, webm, wmv, wtv, xesc, xmv, 4xm, amv, anim, anm, bfi, bmv, c93, cak, cmv, cpk, cin, cdxl, dct, dfa, drc, duk, dv, dxa, fli, flc, flic, gdv, h263, h264, jv, k3g, skm, lvf, lxf, mad, mmv, mv, mv8, mve, mpc, mvi, p64, pva, qt, rl2, roq, rpl, san, snm, sfd, smk, tgq, tgv, tmv, vb, vc1, vid, vmd, vp3, vp5, vp6, vp7, vqa, vsr, wve, yop |
 | Archives, with 7z read and write, as the seed of an archive manager | P-021 | planned | planned | user request 2026-10-13 | 7z, apk, arj, bz2, bzip2, cab, cbr, cbz, chm, cpio, dd, deb, deskthemepack, dmg, gz, gzip, hfs, iso, jar, lha, lzh, lzma, pk3, pk4, pkz, rar, rpm, tar, tar.lzma, taz, tar.z, tbz, tar.bz2, tbz2, tgz, tar.gz, txz, tar.xz, vhd, war, wim, xar, xz, z, zip, zipx |
 | Markdown rendering | P-022 | planned | planned | user request 2026-10-13 | md, markdown |
-| Structured data trees | P-023 | planned | planned | user request 2026-10-13 | json, jsonl, xml, yaml, yml, toml, ini |

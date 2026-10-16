@@ -272,7 +272,7 @@ pub fn language_for(name: &str) -> Option<&'static str> {
     let ext = file.rsplit_once('.')?.1.to_ascii_lowercase();
     let language = match ext.as_str() {
         "rs" => "rust",
-        "json" | "jsonc" | "json5" => "json",
+        "json" | "jsonc" | "json5" | "jsonl" => "json",
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
         "md" | "markdown" => "markdown",
@@ -290,6 +290,8 @@ pub fn language_for(name: &str) -> Option<&'static str> {
         "ts" | "mts" | "cts" => "typescript",
         "tsx" => "tsx",
         "html" | "htm" | "xhtml" => "html",
+        // No XML grammar in the kit: the HTML one colours tags, attributes and text alike (C-010).
+        "xml" => "html",
         "lua" => "lua",
         "mk" => "make",
         "php" => "php",
