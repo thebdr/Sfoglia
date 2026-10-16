@@ -122,6 +122,7 @@ fn binary_files_open_in_the_hex_view_and_any_file_toggles_to_it(cx: &mut TestApp
         assert!(panel.read(cx).hex_view().is_none());
     })
     .unwrap();
+    let _ = std::fs::remove_file(&office);
 }
 
 /// Go-to-offset and search move the list and mark the bytes; the status row says where.

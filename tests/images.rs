@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, px};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, ScrollDelta, TestAppContext, point, px};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use sfoglia::images;
 use sfoglia::viewers::image_view::Shown;
@@ -93,10 +93,9 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         let box_width = f32::from(window.find("image-box").bounds().size.width);
         assert!((box_width - 2000. * fit).abs() <= 1.5, "box {box_width} vs {}", 2000. * fit);
 
-        // 1 shows the image at 100 %: wider than the area, so it scrolls.
-        let focus = view.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
-        window.render_frame(cx);
+        // The dock handed the focus to the view, so the keys work at once: 1 shows the
+        // image at 100 %, wider than the area, so it pans by scrolling.
+        assert!(view.read(cx).focus_handle(cx).is_focused(window), "the image view holds focus when its tab shows");
         window.press("1", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).zoom(), Some(1.0));
@@ -104,6 +103,10 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         let box_width = f32::from(window.find("image-box").bounds().size.width);
         assert!((box_width - 2000.).abs() <= 1.5, "box {box_width}");
         assert!(box_width > f32::from(viewport.width), "the image is larger than its area and pans");
+        assert_eq!(view.read(cx).scroll_offset().x, px(0.));
+        window.scroll("image-scroll", ScrollDelta::Lines(point(-5., 0.)), cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).scroll_offset().x < px(0.), "the wheel pans the image: {:?}", view.read(cx).scroll_offset());
         // + and - step by a quarter; 0 fits again.
         window.press("+", cx);
         window.render_frame(cx);
@@ -153,6 +156,32 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         assert_eq!(window.find("image-zoom").label(), Some("fit, 100 %"));
         assert_eq!(window.find("image-size").label(), Some("1 × 1 pixels"));
         assert_eq!(window.find("image-bytes").label(), Some("67 bytes"));
+        // Ctrl+Shift+S asks for a new name through the save dialog.
+        assert!(dot.read(cx).focus_handle(cx).is_focused(window));
+        window.press("ctrl-shift-s", cx);
+    })
+    .unwrap();
+    let chord_copy = dir.join("chord.png");
+    cx.simulate_new_path_selection(|_| Some(chord_copy.clone()));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let back = images::decode(&std::fs::read(&chord_copy).unwrap(), "png").unwrap();
+        assert_eq!((back.width, back.height), (1, 1), "the dialog's name was written");
+        assert_eq!(back.frames[0].rgba, images::decode(&std::fs::read(fixture("dot.png")).unwrap(), "png").unwrap().frames[0].rgba);
+        assert!(window.find("image-message").label().unwrap_or_default().starts_with("saved "));
+        // A JPEG with EXIF: the fields in the stated order, one row each.
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("exif.jpg")], window, cx));
+        window.render_frame(cx);
+        let photo = workspace.read(cx).panels(cx)[2].read(cx).image_view().unwrap().clone();
+        assert_eq!(photo.read(cx).picture().unwrap().exif.len(), 10);
+        assert_eq!(window.find(("image-exif", 0usize)).label(), Some("Camera make: Sfoglia Cam"));
+        assert_eq!(window.find(("image-exif", 1usize)).label(), Some("Camera model: Model Nine"));
+        assert_eq!(window.find(("image-exif", 3usize)).label(), Some("Exposure: 1/250 s"));
+        assert_eq!(window.find(("image-exif", 4usize)).label(), Some("Aperture: f/2.8"));
+        assert_eq!(window.find(("image-exif", 9usize)).label(), Some("Description: A test frame"));
+        assert!(window.try_find(("image-exif", 10usize)).is_none());
+        assert_eq!(window.find("image-colour").label(), Some("RGB, 8 bits per channel"));
     })
     .unwrap();
 
@@ -171,10 +200,14 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
     cx.update_window(handle, |_, window, cx| {
         workspace.update(cx, |w, cx| w.open_paths(&[animated.clone()], window, cx));
         window.render_frame(cx);
-        let view = workspace.read(cx).panels(cx)[2].read(cx).image_view().unwrap().clone();
+        let view = workspace.read(cx).panels(cx)[3].read(cx).image_view().unwrap().clone();
         assert_eq!(view.read(cx).picture().unwrap().frames.len(), 2);
         assert_eq!(window.find("image-frames").label(), Some("2 frames"));
         assert_eq!(window.find("image-size").label(), Some("16 × 16 pixels"));
+        // Both frames, with their delays, reach the window's image, which plays them.
+        assert_eq!(view.read(cx).rendered_frame_delays(), [80, 120]);
+        let still = workspace.read(cx).panels(cx)[0].read(cx).image_view().unwrap().clone();
+        assert_eq!(still.read(cx).rendered_frame_delays().len(), 1);
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -210,7 +243,22 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         assert!(matches!(psd_view.read(cx).shown(), Shown::Unsupported));
         let broken_view = panels[2].read(cx).image_view().unwrap().clone();
         assert!(matches!(broken_view.read(cx).shown(), Shown::Failed(_)));
-        assert!(window.find("image-note").label().unwrap_or_default().starts_with("Cannot decode this file:"));
+        let note = window.find("image-note").label().unwrap_or_default().to_string();
+        assert!(note.starts_with("Cannot decode this file: "), "{note}");
+        assert!(note.len() > "Cannot decode this file: ".len() + 8, "the reason is spelled out: {note}");
+        // A broken SVG and a broken font fail the same way, each with its own reason.
+        let bad_svg = dir.join("bad.svg");
+        std::fs::write(&bad_svg, b"<svg xmlns='http://www.w3.org/2000/svg'><rect").unwrap();
+        let bad_font = dir.join("bad.ttf");
+        std::fs::write(&bad_font, b"not a font at all").unwrap();
+        workspace.update(cx, |w, cx| w.open_paths(&[bad_svg.clone()], window, cx));
+        window.render_frame(cx);
+        assert!(matches!(workspace.read(cx).panels(cx)[3].read(cx).image_view().unwrap().read(cx).shown(), Shown::Failed(_)));
+        assert!(window.find("image-note").label().unwrap_or_default().starts_with("Cannot decode this file: not an SVG the viewer renders"));
+        workspace.update(cx, |w, cx| w.open_paths(&[bad_font.clone()], window, cx));
+        window.render_frame(cx);
+        assert!(matches!(workspace.read(cx).panels(cx)[4].read(cx).image_view().unwrap().read(cx).shown(), Shown::Failed(_)));
+        assert!(window.find("image-note").label().unwrap_or_default().starts_with("Cannot decode this file: not a font the viewer reads"));
         workspace.update(cx, |w, cx| w.open_paths(&[psd.clone()], window, cx));
         window.render_frame(cx);
         assert_eq!(
@@ -236,6 +284,11 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         window.press("ctrl-shift-b", cx);
         window.render_frame(cx);
         assert!(panels[0].read(cx).image_view().is_some());
+        // Back from the bytes, the view has the focus again: the keys work without a click.
+        window.press("1", cx);
+        window.render_frame(cx);
+        assert_eq!(svg.read(cx).zoom(), Some(1.0));
+        assert_eq!(window.find("image-zoom").label(), Some("100 %"));
     })
     .unwrap();
 
@@ -244,7 +297,7 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         cx.update_window(handle, |_, window, cx| {
             workspace.update(cx, |w, cx| w.open_paths(&[font.clone()], window, cx));
             window.render_frame(cx);
-            let view = workspace.read(cx).panels(cx)[3].read(cx).image_view().expect("a font opens in the image viewer").clone();
+            let view = workspace.read(cx).panels(cx)[5].read(cx).image_view().expect("a font opens in the image viewer").clone();
             assert!(matches!(view.read(cx).shown(), Shown::Font { .. }));
             assert_eq!(window.find("image-font-family").label(), Some(family.as_str()));
             assert_eq!(window.find("image-font-glyphs").label(), Some(format!("{glyphs} glyphs").as_str()));

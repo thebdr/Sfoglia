@@ -166,6 +166,12 @@ impl FilePanel {
         if panel.info.error.is_none() && panel.info.route() == Route::Hex {
             panel.show_hex(window, cx);
         }
+        // An image view takes the focus as soon as its tab exists, so its keys work at once;
+        // the dock itself focuses a panel only when a tab is selected later.
+        if let PanelView::Image(view) = &panel.view {
+            let focus = view.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
         panel
     }
 
@@ -231,7 +237,8 @@ impl FilePanel {
     pub fn toggle_hex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hex_shown {
             self.hex_shown = false;
-            window.focus(&self.focus_handle, cx);
+            let focus = self.focus_handle(cx);
+            window.focus(&focus, cx);
             cx.notify();
         } else {
             self.show_hex(window, cx);
@@ -282,8 +289,13 @@ impl KitPanel for FilePanel {
 impl EventEmitter<PanelEvent> for FilePanel {}
 
 impl Focusable for FilePanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    /// The dock focuses the active panel through this: an image tab hands the focus to its
+    /// view, so the zoom and rotation keys work as soon as the tab shows.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match &self.view {
+            PanelView::Image(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            _ => self.focus_handle.clone(),
+        }
     }
 }
 

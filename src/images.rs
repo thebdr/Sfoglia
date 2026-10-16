@@ -111,15 +111,26 @@ pub fn colour_label(colour: ColorType) -> String {
     }
 }
 
+/// The format an extension names, for files whose bytes carry no signature; the image
+/// crate knows most spellings, but not `targa`, `cur` and `dib`.
+pub fn format_for_extension(extension: &str) -> Option<ImageFormat> {
+    match extension.to_ascii_lowercase().as_str() {
+        "targa" => Some(ImageFormat::Tga),
+        "cur" => Some(ImageFormat::Ico),
+        "dib" => Some(ImageFormat::Bmp),
+        other => ImageFormat::from_extension(other),
+    }
+}
+
 /// Decode a raster file: every frame of an animated GIF, APNG or WebP, one frame
 /// otherwise, plus the pixel format and EXIF fields. The format comes from the bytes'
-/// signature, or, for formats without one (TGA), from `extension`.
+/// signature, or, for formats without one (TGA, CUR), from `extension`.
 pub fn decode(bytes: &[u8], extension: &str) -> Result<Picture, String> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     if reader.format().is_none()
-        && let Some(by_extension) = ImageFormat::from_extension(extension.to_ascii_lowercase())
+        && let Some(by_extension) = format_for_extension(extension)
     {
         reader.set_format(by_extension);
     }
@@ -208,7 +219,9 @@ pub fn exif_fields(bytes: &[u8]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|(tag, name)| {
             let field = data.get_field(*tag, exif::In::PRIMARY)?;
-            let value = field.display_value().with_unit(&data).to_string();
+            let shown = field.display_value().with_unit(&data).to_string();
+            // Text fields display in quotes; the column shows the text itself.
+            let value = shown.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(&shown).to_string();
             (!value.is_empty()).then(|| (name.to_string(), value))
         })
         .collect()
@@ -296,7 +309,13 @@ mod tests {
     fn encoded(format: ImageFormat) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());
         let image = DynamicImage::ImageRgba8(pattern());
-        let image = if format == ImageFormat::Farbfeld { DynamicImage::ImageRgba16(image.to_rgba16()) } else { image };
+        // Encoders that take no 8-bit RGBA: 16-bit for Farbfeld, floats for EXR and HDR.
+        let image = match format {
+            ImageFormat::Farbfeld => DynamicImage::ImageRgba16(image.to_rgba16()),
+            ImageFormat::OpenExr => DynamicImage::ImageRgba32F(image.to_rgba32f()),
+            ImageFormat::Hdr => DynamicImage::ImageRgb32F(image.to_rgb32f()),
+            _ => image,
+        };
         image.write_to(&mut out, format).unwrap();
         out.into_inner()
     }
@@ -448,6 +467,302 @@ mod tests {
             .into_iter()
             .map(std::path::PathBuf::from)
             .find(|p| p.exists())
+    }
+
+    /// Sample bytes for every decodable extension, as a file with that extension would
+    /// hold them: the image crate's encoders where they exist, hand-written headers for
+    /// the rest (PNM family, DDS, CUR).
+    pub fn sample_for(extension: &str) -> Vec<u8> {
+        let rgba = pattern();
+        let rgb: Vec<u8> = rgba.pixels().flat_map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+        let grey: Vec<u8> = rgba.pixels().map(|p| p.0[0]).collect();
+        match extension {
+            "png" | "apng" => encoded(ImageFormat::Png),
+            "jpg" | "jpeg" | "jfif" => encoded(ImageFormat::Jpeg),
+            "gif" => encoded(ImageFormat::Gif),
+            "bmp" | "dib" => encoded(ImageFormat::Bmp),
+            "ico" => encoded(ImageFormat::Ico),
+            "cur" => {
+                // A cursor is an icon whose resource type is 2 and whose planes/bits fields
+                // are the hot spot.
+                let mut bytes = encoded(ImageFormat::Ico);
+                bytes[2] = 2;
+                bytes
+            }
+            "tif" | "tiff" => encoded(ImageFormat::Tiff),
+            "webp" => encoded(ImageFormat::WebP),
+            "tga" | "targa" => encoded(ImageFormat::Tga),
+            "qoi" => encoded(ImageFormat::Qoi),
+            "ff" => encoded(ImageFormat::Farbfeld),
+            "exr" => encoded(ImageFormat::OpenExr),
+            "hdr" => encoded(ImageFormat::Hdr),
+            "pbm" => {
+                // 1 bit per pixel, most significant bit first, rows padded to a byte.
+                let mut out = b"P4\n8 6\n".to_vec();
+                for y in 0..6u32 {
+                    let mut byte = 0u8;
+                    for x in 0..8u32 {
+                        if rgba.get_pixel(x, y).0[0] < 128 {
+                            byte |= 0x80 >> x;
+                        }
+                    }
+                    out.push(byte);
+                }
+                out
+            }
+            "pgm" => [b"P5\n8 6\n255\n".to_vec(), grey].concat(),
+            "ppm" | "pnm" => [b"P6\n8 6\n255\n".to_vec(), rgb].concat(),
+            "pam" => [b"P7\nWIDTH 8\nHEIGHT 6\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".to_vec(), rgba.into_raw()].concat(),
+            "dds" => {
+                // A 4 × 4 DXT1 texture: the 128-byte header, then one 8-byte block.
+                let mut out = b"DDS ".to_vec();
+                let mut u32s = vec![124u32, 0x0008_1007, 4, 4, 8, 0, 0];
+                u32s.extend([0u32; 11]);
+                u32s.extend([32u32, 0x4]);
+                out.extend(u32s.iter().flat_map(|v| v.to_le_bytes()));
+                out.extend(b"DXT1");
+                out.extend([0u32; 5].iter().flat_map(|v| v.to_le_bytes()));
+                out.extend([0x1000u32, 0, 0, 0, 0].iter().flat_map(|v| v.to_le_bytes()));
+                assert_eq!(out.len(), 128);
+                // colour0 = pure red (RGB565 0xF800), colour1 = pure blue (0x001F), all indices 0.
+                out.extend([0x00, 0xF8, 0x1F, 0x00, 0, 0, 0, 0]);
+                out
+            }
+            other => panic!("no sample for {other}"),
+        }
+    }
+
+    #[test]
+    fn every_decodable_extension_decodes_a_file_of_that_kind() {
+        for ext in RASTER {
+            let bytes = sample_for(ext);
+            let picture = decode(&bytes, ext).unwrap_or_else(|e| panic!(".{ext}: {e}"));
+            let expected = if *ext == "dds" { (4, 4) } else { (8, 6) };
+            assert_eq!((picture.width, picture.height), expected, ".{ext}");
+            assert!(!picture.frames.is_empty(), ".{ext}");
+            assert_eq!(picture.frames[0].rgba.len(), (expected.0 * expected.1 * 4) as usize, ".{ext}");
+        }
+        // The hand-written samples carry the pattern's values where the format can hold them.
+        let pam = decode(&sample_for("pam"), "pam").unwrap();
+        assert_eq!(pam.frames[0].rgba, pattern().into_raw(), "PAM is RGBA, lossless");
+        let ppm = decode(&sample_for("ppm"), "ppm").unwrap();
+        assert!(ppm.frames[0].rgba.chunks(4).zip(pattern().pixels()).all(|(a, b)| a[..3] == b.0[..3] && a[3] == 255));
+        let pgm = decode(&sample_for("pgm"), "pgm").unwrap();
+        assert_eq!(pgm.colour, "greyscale, 8 bits");
+        let pbm = decode(&sample_for("pbm"), "pbm").unwrap();
+        assert!(pbm.frames[0].rgba.chunks(4).all(|p| p[0] == 0 || p[0] == 255), "a bitmap is black and white");
+        let dds = decode(&sample_for("dds"), "dds").unwrap();
+        assert_eq!(&dds.frames[0].rgba[..4], &[255, 0, 0, 255], "the DXT1 block is red");
+        let cur = decode(&sample_for("cur"), "cur").unwrap();
+        assert_eq!(cur.frames[0].rgba, pattern().into_raw(), "a cursor decodes like its icon");
+        let targa = decode(&sample_for("targa"), "targa").unwrap();
+        assert_eq!(targa.frames[0].rgba, pattern().into_raw());
+        assert_eq!(format_for_extension("TARGA"), Some(ImageFormat::Tga));
+        assert_eq!(format_for_extension("cur"), Some(ImageFormat::Ico));
+        assert_eq!(format_for_extension("dib"), Some(ImageFormat::Bmp));
+        assert_eq!(format_for_extension("psd"), None);
+    }
+
+    /// Two frames, 8 × 6, the second with the red channel inverted.
+    fn two_frames() -> (RgbaImage, RgbaImage) {
+        let first = pattern();
+        let mut second = pattern();
+        for p in second.pixels_mut() {
+            p.0[0] = 255 - p.0[0];
+        }
+        (first, second)
+    }
+
+    #[test]
+    fn apng_and_animated_webp_decode_every_frame_with_its_delay() {
+        let (first, second) = two_frames();
+        // APNG through the png crate's animation support: 100 ms then 250 ms.
+        let mut apng = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut apng, 8, 6);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_animated(2, 0).unwrap();
+            encoder.set_frame_delay(1, 10).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(first.as_raw()).unwrap();
+            writer.set_frame_delay(1, 4).unwrap();
+            writer.write_image_data(second.as_raw()).unwrap();
+            writer.finish().unwrap();
+        }
+        let picture = decode(&apng, "apng").unwrap();
+        assert_eq!((picture.width, picture.height, picture.frames.len()), (8, 6, 2));
+        assert_eq!(picture.frames[0].rgba, first.as_raw().as_slice());
+        assert_eq!(picture.frames[1].rgba, second.as_raw().as_slice());
+        assert_eq!(picture.frames[0].delay_ms, 100);
+        assert_eq!(picture.frames[1].delay_ms, 250);
+        assert!(picture.is_animated());
+        // A still PNG through the same decoder stays one frame.
+        assert_eq!(decode(&encoded(ImageFormat::Png), "png").unwrap().frames.len(), 1);
+
+        // Animated WebP: two lossless frames in an ANIM/ANMF container, 80 ms then 120 ms.
+        let frame_chunk = |image: &RgbaImage| -> Vec<u8> {
+            let mut out = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(image.clone()).write_to(&mut out, ImageFormat::WebP).unwrap();
+            let bytes = out.into_inner();
+            assert_eq!(&bytes[12..16], b"VP8L", "a lossless still is one VP8L chunk");
+            bytes[12..].to_vec()
+        };
+        let u24 = |v: u32| [v as u8, (v >> 8) as u8, (v >> 16) as u8];
+        let mut body = Vec::new();
+        body.extend(b"WEBP");
+        body.extend(b"VP8X");
+        body.extend(10u32.to_le_bytes());
+        body.extend([0x12u8, 0, 0, 0]); // animation and alpha flags
+        body.extend(u24(8 - 1));
+        body.extend(u24(6 - 1));
+        body.extend(b"ANIM");
+        body.extend(6u32.to_le_bytes());
+        body.extend([0u8, 0, 0, 0, 0, 0]); // background, loop count 0 = forever
+        for (image, duration) in [(&first, 80u32), (&second, 120u32)] {
+            let data = frame_chunk(image);
+            body.extend(b"ANMF");
+            body.extend((16 + data.len() as u32).to_le_bytes());
+            body.extend(u24(0));
+            body.extend(u24(0));
+            body.extend(u24(8 - 1));
+            body.extend(u24(6 - 1));
+            body.extend(u24(duration));
+            body.push(0x02); // do not blend: each frame replaces the canvas
+            body.extend(&data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut webp = b"RIFF".to_vec();
+        webp.extend((body.len() as u32).to_le_bytes());
+        webp.extend(&body);
+        let picture = decode(&webp, "webp").unwrap();
+        assert_eq!((picture.width, picture.height, picture.frames.len()), (8, 6, 2));
+        assert_eq!(picture.frames[0].delay_ms, 80);
+        assert_eq!(picture.frames[1].delay_ms, 120);
+        // The animation decoder composites each frame onto its canvas, which rounds the
+        // channels by a unit; the lossless still in the other test is exact.
+        let close = |got: &[u8], want: &RgbaImage| {
+            got.chunks(4).zip(want.pixels()).all(|(g, w)| g.iter().zip(&w.0).all(|(a, b)| a.abs_diff(*b) <= 2))
+        };
+        assert!(close(&picture.frames[0].rgba, &first), "first WebP frame");
+        assert!(close(&picture.frames[1].rgba, &second), "second WebP frame");
+        assert_ne!(picture.frames[0].rgba, picture.frames[1].rgba);
+        assert_eq!(decode(&encoded(ImageFormat::WebP), "webp").unwrap().frames.len(), 1);
+    }
+
+    /// A JPEG of the pattern with an EXIF segment naming a camera and its settings.
+    pub fn exif_jpeg() -> Vec<u8> {
+        // Little-endian TIFF: IFD0 (6 entries) at 8, the Exif IFD (5 entries) at 86, data from 152.
+        /// The data area after the two IFDs, and the offset its next value lands at.
+        struct Blob {
+            data: Vec<u8>,
+            offset: u32,
+        }
+        impl Blob {
+            fn ascii(&mut self, text: &str) -> (u32, [u8; 4]) {
+                let bytes = format!("{text}\0").into_bytes();
+                let count = bytes.len() as u32;
+                let value = self.offset.to_le_bytes();
+                self.data.extend(&bytes);
+                if bytes.len() % 2 == 1 {
+                    self.data.push(0);
+                }
+                self.offset += (bytes.len() + bytes.len() % 2) as u32;
+                (count, value)
+            }
+            fn rational(&mut self, numer: u32, denom: u32) -> [u8; 4] {
+                let value = self.offset.to_le_bytes();
+                self.data.extend(numer.to_le_bytes());
+                self.data.extend(denom.to_le_bytes());
+                self.offset += 8;
+                value
+            }
+        }
+        fn entry(tag: u16, kind: u16, count: u32, value: [u8; 4]) -> [u8; 12] {
+            let mut e = [0u8; 12];
+            e[..2].copy_from_slice(&tag.to_le_bytes());
+            e[2..4].copy_from_slice(&kind.to_le_bytes());
+            e[4..8].copy_from_slice(&count.to_le_bytes());
+            e[8..].copy_from_slice(&value);
+            e
+        }
+        let mut blob = Blob { data: Vec::new(), offset: 152 };
+        let mut entries0: Vec<[u8; 12]> = Vec::new();
+        let mut entries_exif: Vec<[u8; 12]> = Vec::new();
+        let (n, v) = blob.ascii("A test frame");
+        entries0.push(entry(0x010E, 2, n, v));
+        let (n, v) = blob.ascii("Sfoglia Cam");
+        entries0.push(entry(0x010F, 2, n, v));
+        let (n, v) = blob.ascii("Model Nine");
+        entries0.push(entry(0x0110, 2, n, v));
+        entries0.push(entry(0x0112, 3, 1, [6, 0, 0, 0])); // orientation 6: rotate 90 CW
+        let (n, v) = blob.ascii("SfogliaTest");
+        entries0.push(entry(0x0131, 2, n, v));
+        entries0.push(entry(0x8769, 4, 1, 86u32.to_le_bytes()));
+        let exposure = blob.rational(1, 250);
+        entries_exif.push(entry(0x829A, 5, 1, exposure));
+        let aperture = blob.rational(28, 10);
+        entries_exif.push(entry(0x829D, 5, 1, aperture));
+        entries_exif.push(entry(0x8827, 3, 1, [144, 1, 0, 0])); // ISO 400
+        let (n, v) = blob.ascii("2026:10:16 12:34:56");
+        entries_exif.push(entry(0x9003, 2, n, v));
+        let focal = blob.rational(35, 1);
+        entries_exif.push(entry(0x920A, 5, 1, focal));
+        let data = blob.data;
+        let mut tiff: Vec<u8> = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+        tiff.extend((entries0.len() as u16).to_le_bytes());
+        for e in &entries0 {
+            tiff.extend(e);
+        }
+        tiff.extend(0u32.to_le_bytes());
+        assert_eq!(tiff.len(), 86);
+        tiff.extend((entries_exif.len() as u16).to_le_bytes());
+        for e in &entries_exif {
+            tiff.extend(e);
+        }
+        tiff.extend(0u32.to_le_bytes());
+        assert_eq!(tiff.len(), 152);
+        tiff.extend(&data);
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend(&tiff);
+        let jpeg = encoded(ImageFormat::Jpeg);
+        let mut out = vec![0xff, 0xd8, 0xff, 0xe1];
+        out.extend(((app1.len() + 2) as u16).to_be_bytes());
+        out.extend(&app1);
+        out.extend(&jpeg[2..]);
+        out
+    }
+
+    #[test]
+    fn exif_fields_are_read_in_the_stated_order() {
+        let jpeg = exif_jpeg();
+        // The headless tests read this JPEG as a fixture; regenerate it with
+        // SFOGLIA_WRITE_FIXTURES=1 when the builder changes.
+        if std::env::var_os("SFOGLIA_WRITE_FIXTURES").is_some() {
+            std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/exif.jpg"), &jpeg).unwrap();
+        }
+        let picture = decode(&jpeg, "jpg").unwrap();
+        assert_eq!((picture.width, picture.height), (8, 6));
+        let names: Vec<&str> = picture.exif.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Camera make", "Camera model", "Taken", "Exposure", "Aperture", "ISO", "Focal length", "Orientation", "Software", "Description"]
+        );
+        let value = |name: &str| picture.exif.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str()).unwrap();
+        assert_eq!(value("Camera make"), "Sfoglia Cam");
+        assert_eq!(value("Camera model"), "Model Nine");
+        assert_eq!(value("Taken"), "2026-10-16 12:34:56");
+        assert_eq!(value("Exposure"), "1/250 s");
+        assert_eq!(value("Aperture"), "f/2.8");
+        assert_eq!(value("ISO"), "400");
+        assert_eq!(value("Focal length"), "35 mm");
+        assert_eq!(value("Orientation"), "row 0 at right and column 0 at top");
+        assert_eq!(value("Software"), "SfogliaTest");
+        assert_eq!(value("Description"), "A test frame");
+        assert!(exif_fields(&encoded(ImageFormat::Jpeg)).is_empty(), "no segment, no fields");
+        assert!(exif_fields(&encoded(ImageFormat::Png)).is_empty());
     }
 }
 

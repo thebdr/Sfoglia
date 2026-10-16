@@ -28,6 +28,8 @@ resvg = "0.46"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
+# The tests write an APNG the image crate cannot encode (C-009).
+png = "0.18"
 
 [workspace]
 members = ["xtask"]

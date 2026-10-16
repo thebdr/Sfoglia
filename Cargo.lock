@@ -6277,6 +6277,7 @@ dependencies = [
  "kamadak-exif",
  "memchr",
  "memmap2",
+ "png 0.18.1",
  "regex",
  "resvg 0.46.0",
  "serde",

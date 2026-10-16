@@ -10,9 +10,9 @@ use std::sync::Arc;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Bounds, Context, FocusHandle, Focusable, IntoElement, ObjectFit, Pixels, Render,
-    RenderImage, Role, ScrollHandle, SharedString, Size, TestSupportExt, Window, actions, canvas,
-    div, img, px, size,
+    App, Bounds, Context, ElementId, FocusHandle, Focusable, IntoElement, ObjectFit, Pixels,
+    Render, RenderImage, Role, ScrollHandle, SharedString, Size, TestSupportExt, Window, actions,
+    canvas, div, img, px, size,
 };
 use image::{Delay, RgbaImage};
 
@@ -262,20 +262,21 @@ impl ImageView {
         self.rotate_quarter(cx);
     }
 
-    /// The facts the side column lists, as `(id, text)`.
-    pub fn facts(&self) -> Vec<(&'static str, String)> {
-        let mut facts = vec![("image-bytes", format!("{} bytes", self.file_len))];
+    /// The facts the side column lists, as `(element id, text)`; the EXIF rows are
+    /// `("image-exif", index)`.
+    pub fn facts(&self) -> Vec<(ElementId, String)> {
+        let mut facts: Vec<(ElementId, String)> = vec![("image-bytes".into(), format!("{} bytes", self.file_len))];
         match &self.shown {
             Shown::Raster { picture, rotation, .. } => {
-                facts.insert(0, ("image-size", format!("{} × {} pixels", picture.width, picture.height)));
-                facts.push(("image-colour", picture.colour.clone()));
+                facts.insert(0, ("image-size".into(), format!("{} × {} pixels", picture.width, picture.height)));
+                facts.push(("image-colour".into(), picture.colour.clone()));
                 facts.push((
-                    "image-frames",
+                    "image-frames".into(),
                     if picture.is_animated() { format!("{} frames", picture.frames.len()) } else { "still".to_string() },
                 ));
-                facts.push(("image-zoom", zoom_label(self.zoom, self.effective_zoom())));
+                facts.push(("image-zoom".into(), zoom_label(self.zoom, self.effective_zoom())));
                 facts.push((
-                    "image-rotation",
+                    "image-rotation".into(),
                     if *rotation == 0 {
                         "0°".to_string()
                     } else {
@@ -283,26 +284,45 @@ impl ImageView {
                         format!("{}°, drawn {w} × {h}", u16::from(*rotation) * 90)
                     },
                 ));
-                for (name, value) in &picture.exif {
-                    facts.push(("image-exif", format!("{name}: {value}")));
+                for (i, (name, value)) in picture.exif.iter().enumerate() {
+                    facts.push((("image-exif", i).into(), format!("{name}: {value}")));
                 }
             }
             Shown::Vector { size, .. } => {
-                facts.insert(0, ("image-size", format!("{} × {} pixels, from vectors", size.0, size.1)));
-                facts.push(("image-zoom", zoom_label(self.zoom, self.effective_zoom())));
+                facts.insert(0, ("image-size".into(), format!("{} × {} pixels, from vectors", size.0, size.1)));
+                facts.push(("image-zoom".into(), zoom_label(self.zoom, self.effective_zoom())));
             }
             Shown::Font { family, glyphs } => {
-                facts.push(("image-font-family", family.clone()));
-                facts.push(("image-font-glyphs", format!("{glyphs} glyphs")));
+                facts.push(("image-font-family".into(), family.clone()));
+                facts.push(("image-font-glyphs".into(), format!("{glyphs} glyphs")));
             }
             Shown::Unsupported => {
-                facts.push(("image-note", format!("No decoder for .{} yet; Ctrl+Shift+B shows the bytes.", extension_of(&self.name))));
+                facts.push(("image-note".into(), format!("No decoder for .{} yet; Ctrl+Shift+B shows the bytes.", extension_of(&self.name))));
             }
             Shown::Failed(error) => {
-                facts.push(("image-note", format!("Cannot decode this file: {error}")));
+                facts.push(("image-note".into(), format!("Cannot decode this file: {error}")));
             }
         }
         facts
+    }
+
+    /// The delays, in milliseconds, of the frames handed to the window, in order: what the
+    /// image element plays.
+    pub fn rendered_frame_delays(&self) -> Vec<u32> {
+        match &self.shown {
+            Shown::Raster { image, .. } | Shown::Vector { image, .. } => (0..image.frame_count())
+                .map(|i| {
+                    let (numer, denom) = image.delay(i).numer_denom_ms();
+                    if denom == 0 { 0 } else { numer / denom }
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// How far the picture area is scrolled (negative when panned right or down).
+    pub fn scroll_offset(&self) -> gpui_kit::Point<Pixels> {
+        self.scroll.offset()
     }
 }
 
@@ -348,9 +368,9 @@ impl Focusable for ImageView {
     }
 }
 
-fn fact_row(id: &'static str, text: String) -> impl IntoElement {
+fn fact_row(id: impl Into<ElementId>, text: String) -> impl IntoElement {
     div()
-        .id(id)
+        .id(id.into())
         .role(Role::Status)
         .test_support()
         .aria_label(text.clone())
