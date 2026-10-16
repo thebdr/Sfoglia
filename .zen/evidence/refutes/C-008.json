@@ -1,0 +1,58 @@
+{
+  "clause": "C-008",
+  "verdict": "holds",
+  "ranAt": "2026-10-16T19:02:37.353Z",
+  "headCommit": "e02edf3a42b5aa288a982e9d22cd8ecad93e6aeb",
+  "tests": [
+    {
+      "name": "saving_round_trips_every_encoding_and_line_ending",
+      "file": "src/text.rs",
+      "symbolSha": "9b4ffb28496fa1c34fb0a79a18bbc7023f8ba8e94e9ab9dbb71fab94af0cf6da"
+    },
+    {
+      "name": "an_edit_is_written_in_the_original_encoding_and_endings",
+      "file": "src/text.rs",
+      "symbolSha": "9b4ffb28496fa1c34fb0a79a18bbc7023f8ba8e94e9ab9dbb71fab94af0cf6da"
+    },
+    {
+      "name": "the_status_row_cycles_through_every_encoding_and_ending",
+      "file": "src/viewers/text_view.rs",
+      "symbolSha": "33049ccad6ba86dfc12764f6902b29217beae1839f94ecdf38fd246c66fc2b32"
+    },
+    {
+      "name": "typing_marks_the_tab_dirty_and_ctrl_s_writes_the_exact_bytes",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "undo_redo_cut_paste_and_replace_change_the_buffer_as_stated",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "a_file_changed_on_disk_is_offered_for_reload",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "a_modified_tab_cannot_be_closed_until_saved_or_reverted",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "a_mixed_endings_file_is_written_with_lf_and_says_so",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "a_file_with_undecodable_units_is_read_only",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    },
+    {
+      "name": "an_unreadable_file_keeps_the_edits_protected",
+      "file": "tests/edit.rs",
+      "symbolSha": "e2ed8a42131f369558ec29349cd0b6c0ea21e7cd758efde75358adfd3cd8e002"
+    }
+  ]
+}
