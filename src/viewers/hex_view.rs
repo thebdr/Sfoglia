@@ -297,7 +297,10 @@ impl Render for HexView {
         let mono = theme.mono_font_family.clone();
         let mono_size = theme.mono_font_size;
         let line_height = window.line_height();
-        let marked_bg = theme.accent;
+        // The mark must be seen at a glance in both themes: the primary colour and its
+        // foreground, not the accent, which is a faint grey.
+        let marked_bg = theme.primary;
+        let marked_fg = theme.primary_foreground;
         let muted = theme.muted_foreground;
         let rows = self.file.rows();
         let base_row = self.base_row;
@@ -384,11 +387,11 @@ impl Render for HexView {
                                     .child(div().text_color(muted).child(row.offset))
                                     .child(div().child("  "))
                                     .child(div().child(hex_before))
-                                    .child(div().bg(marked_bg).child(hex_marked))
+                                    .child(div().bg(marked_bg).text_color(marked_fg).rounded_sm().child(hex_marked))
                                     .child(div().child(hex_after))
                                     .child(div().child("  |"))
                                     .child(div().child(ascii_before))
-                                    .child(div().bg(marked_bg).child(ascii_marked))
+                                    .child(div().bg(marked_bg).text_color(marked_fg).rounded_sm().child(ascii_marked))
                                     .child(div().child(ascii_after))
                                     .child(div().child("|"))
                             })
