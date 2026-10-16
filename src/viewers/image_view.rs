@@ -78,7 +78,23 @@ impl ImageView {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let shown = match images::kind_of(&name) {
+        // The extension names the kind; a file the detector routed here by its bytes alone
+        // (no extension, or one nobody knows) is decoded by those bytes.
+        let kind = images::kind_of(&name).or_else(|| {
+            let listed_unsupported = images::UNSUPPORTED.contains(&extension.to_ascii_lowercase().as_str());
+            if listed_unsupported {
+                None
+            } else if images::decode(bytes, extension).is_ok() {
+                Some(Kind::Raster)
+            } else if images::svg_bytes(bytes).and_then(|svg| images::svg_tree(&svg)).is_ok() {
+                Some(Kind::Vector)
+            } else if images::font_facts(bytes).is_ok() {
+                Some(Kind::Font)
+            } else {
+                None
+            }
+        });
+        let shown = match kind {
             Some(Kind::Raster) => match images::decode(bytes, extension) {
                 Ok(picture) => {
                     let image = render_image(&picture, 0);

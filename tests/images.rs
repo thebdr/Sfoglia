@@ -274,6 +274,8 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         std::fs::write(&bad_font, b"not a font at all").unwrap();
         workspace.update(cx, |w, cx| w.open_paths(&[bad_svg.clone()], window, cx));
         window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["dot.svg", "layers.psd", "broken.png", "bad.svg"]);
         assert!(matches!(workspace.read(cx).panels(cx)[3].read(cx).image_view().unwrap().read(cx).shown(), Shown::Failed(_)));
         assert!(window.find("image-note").label().unwrap_or_default().starts_with("Cannot decode this file: not an SVG the viewer renders"));
         workspace.update(cx, |w, cx| w.open_paths(&[bad_font.clone()], window, cx));
@@ -286,6 +288,22 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
             window.find("image-note").label(),
             Some("No decoder for .psd yet; Ctrl+Shift+B shows the bytes.")
         );
+        // A PNG under no extension, or an unknown one, reaches the family by its bytes and
+        // decodes like any PNG.
+        let nameless = dir.join("photo");
+        std::fs::copy(fixture("dot.png"), &nameless).unwrap();
+        let odd = dir.join("picture.unknown");
+        std::fs::copy(fixture("dot.png"), &odd).unwrap();
+        workspace.update(cx, |w, cx| w.open_paths(&[nameless.clone(), odd.clone()], window, cx));
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        for ix in [5, 6] {
+            let view = panels[ix].read(cx).image_view().expect("routed by its bytes").clone();
+            assert!(matches!(view.read(cx).shown(), Shown::Raster { .. }), "panel {ix}");
+            assert_eq!(view.read(cx).drawn_size(), Some((1, 1)));
+        }
+        assert_eq!(window.find("image-size").label(), Some("1 × 1 pixels"));
+        assert!(window.try_find("image-note").is_none());
         // The SVG tab again, with its facts.
         workspace.update(cx, |w, cx| w.open_paths(&[fixture("dot.svg")], window, cx));
         window.render_frame(cx);
@@ -337,7 +355,7 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         cx.update_window(handle, |_, window, cx| {
             workspace.update(cx, |w, cx| w.open_paths(&[font.clone()], window, cx));
             window.render_frame(cx);
-            let view = workspace.read(cx).panels(cx)[5].read(cx).image_view().expect("a font opens in the image viewer").clone();
+            let view = workspace.read(cx).panels(cx)[7].read(cx).image_view().expect("a font opens in the image viewer").clone();
             assert!(matches!(view.read(cx).shown(), Shown::Font { .. }));
             assert_eq!(window.find("image-font-family").label(), Some(family.as_str()));
             assert_eq!(window.find("image-font-glyphs").label(), Some(format!("{glyphs} glyphs").as_str()));
