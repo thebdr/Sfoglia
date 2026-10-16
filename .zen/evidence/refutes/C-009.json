@@ -1,8 +1,8 @@
 {
   "clause": "C-009",
   "verdict": "holds",
-  "ranAt": "2026-10-16T20:52:56.004Z",
-  "headCommit": "47d3c0b2952b61179df1f193099ee076ef6b4d86",
+  "ranAt": "2026-10-16T22:42:55.175Z",
+  "headCommit": "4e5b1d896d67c62a3180028d63b2465883cb7e1d",
   "tests": [
     {
       "name": "every_listed_extension_has_a_kind_and_the_rest_are_named_unsupported",
@@ -52,12 +52,12 @@
     {
       "name": "images_open_fitted_zoom_rotate_and_show_their_facts",
       "file": "tests/images.rs",
-      "symbolSha": "fd781a07a6e69cf1e5ed6d185d91e4588833c48c37da937bb4ac139da8d4800f"
+      "symbolSha": "d94c48e5c15f2d661b9b091fc358edb003c8d9da21a628e6d2e1c7f0f03c66c1"
     },
     {
       "name": "vectors_fonts_and_unsupported_formats_are_told_apart",
       "file": "tests/images.rs",
-      "symbolSha": "fd781a07a6e69cf1e5ed6d185d91e4588833c48c37da937bb4ac139da8d4800f"
+      "symbolSha": "d94c48e5c15f2d661b9b091fc358edb003c8d9da21a628e6d2e1c7f0f03c66c1"
     }
   ]
 }
