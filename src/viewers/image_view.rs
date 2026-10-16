@@ -445,7 +445,14 @@ impl Render for ImageView {
             Shown::Font { family, .. } => Some(family.clone()),
             _ => None,
         };
-        let fitting = self.zoom.is_none();
+        // A picture is centred on each axis it fits in; on an axis it overflows it starts at the
+        // edge, so panning reaches every pixel.
+        let centred = match (drawn, self.viewport) {
+            (Some((w, h)), Some(viewport)) => {
+                (w as f32 * zoom <= f32::from(viewport.width), h as f32 * zoom <= f32::from(viewport.height))
+            }
+            _ => (true, true),
+        };
 
         // The picture area measures itself; the fit zoom follows its size.
         let measure = canvas(
@@ -534,7 +541,8 @@ impl Render for ImageView {
                             .overflow_scroll()
                             .track_scroll(&self.scroll)
                             .flex()
-                            .when(fitting, |area| area.items_center().justify_center())
+                            .when(centred.0, |area| area.justify_center())
+                            .when(centred.1, |area| area.items_center())
                             .child(measure)
                             .children(picture)
                             .children(specimen.map(|family| {

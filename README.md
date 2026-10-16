@@ -42,7 +42,7 @@ Where matches overlap, the higher priority wins; at equal priority the earlier s
 
 ## Images
 
-A raster image (PNG, APNG, JPEG, GIF, BMP, ICO, TIFF, WebP, TGA, PNM, DDS, EXR, HDR, QOI, Farbfeld) opens on a checkerboard, fitted to the view. Press `+` and `-` to zoom, `1` for 100 %, `0` to fit again, `R` to turn it a quarter; scroll to pan when it is larger than the view. Animated GIF, APNG and WebP play. The side column lists the dimensions, pixel format, frame count, file size and the EXIF fields the file carries. SVG renders as vectors and stays sharp at any zoom; a TrueType font shows a specimen in its own face. Ctrl+Shift+S saves the first frame as another raster format, chosen by the extension you give the new file. Image extensions without a decoder yet (PSD, HEIC, AVIF, JPEG 2000, JXL, EMF, WMF and others) say so in their tab.
+A raster image (PNG, APNG, JPEG, GIF, BMP, ICO, TIFF, WebP, TGA, PNM, DDS, EXR, HDR, QOI, Farbfeld) opens on a checkerboard, fitted to the view and centred. Press `+` and `-` to zoom, `1` for 100 %, `0` to fit again, `R` to turn it a quarter; scroll to pan when it is larger than the view. Animated GIF, APNG and WebP play. The side column lists the dimensions, pixel format, frame count, file size and the EXIF fields the file carries. SVG renders as vectors and stays sharp at any zoom; a TrueType font shows a specimen in its own face. Ctrl+Shift+S saves the first frame as another raster format, chosen by the extension you give the new file. Image extensions without a decoder yet (PSD, HEIC, AVIF, JPEG 2000, JXL, EMF, WMF and others) say so in their tab.
 
 ## Hex view
 

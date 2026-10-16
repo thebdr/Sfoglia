@@ -7,11 +7,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, ScrollDelta, TestAppContext, point, px};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Pixels, ScrollDelta, TestAppContext, point, px};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use sfoglia::images;
 use sfoglia::viewers::image_view::Shown;
 use sfoglia::{Workspace, window_options};
+
+/// The centre of an element, in pixels, for comparing where the picture sits in its area.
+fn centre(bounds: Bounds<Pixels>) -> (f32, f32) {
+    (
+        f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.,
+        f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.,
+    )
+}
 
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -103,6 +111,11 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         let box_width = f32::from(window.find("image-box").bounds().size.width);
         assert!((box_width - 2000.).abs() <= 1.5, "box {box_width}");
         assert!(box_width > f32::from(viewport.width), "the image is larger than its area and pans");
+        // Wider than its area, the picture starts at the left edge so panning reaches every column;
+        // it stays in the middle on the axis it fits in.
+        let (area, image_box) = (window.find("image-scroll").bounds(), window.find("image-box").bounds());
+        assert_eq!(image_box.origin.x, area.origin.x, "{image_box:?} in {area:?}");
+        assert!((centre(image_box).1 - centre(area).1).abs() <= 1.5, "{image_box:?} in {area:?}");
         assert_eq!(view.read(cx).scroll_offset().x, px(0.));
         window.scroll("image-scroll", ScrollDelta::Lines(point(-5., 0.)), cx);
         window.render_frame(cx);
@@ -119,6 +132,10 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         window.render_frame(cx);
         assert_eq!(view.read(cx).zoom(), None);
         assert!(window.find("image-zoom").label().unwrap_or_default().starts_with("fit, "));
+        // Fitted, it is in the middle on both axes.
+        let (area, image_box) = (window.find("image-scroll").bounds(), window.find("image-box").bounds());
+        assert!((centre(image_box).0 - centre(area).0).abs() <= 1.5, "{image_box:?} in {area:?}");
+        assert!((centre(image_box).1 - centre(area).1).abs() <= 1.5, "{image_box:?} in {area:?}");
         // R turns the image a quarter: the drawn size swaps, the file's size stays.
         window.press("r", cx);
         window.render_frame(cx);
@@ -352,6 +369,11 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         window.press("+", cx);
         window.render_frame(cx);
         assert_eq!(svg.read(cx).rendered_size(), Some((63, 47)), "156 %: 62.5 × 46.9 rounded");
+        // Zoomed but still smaller than its area, the picture sits in the middle on both axes.
+        let (area, image_box) = (window.find("image-scroll").bounds(), window.find("image-box").bounds());
+        assert!(image_box.size.width < area.size.width && image_box.size.height < area.size.height, "{image_box:?} in {area:?}");
+        assert!((centre(image_box).0 - centre(area).0).abs() <= 1.5, "{image_box:?} in {area:?}");
+        assert!((centre(image_box).1 - centre(area).1).abs() <= 1.5, "{image_box:?} in {area:?}");
         // Zooming out below the file's size keeps the file-size raster, scaled down on screen.
         window.press("0", cx);
         window.render_frame(cx);

@@ -9,7 +9,7 @@ Legend: **done** = proven by a verified clause. **in progress** = clause exists,
 | Family | Clause | Read | Write | Requested | Extensions |
 |---|---|---|---|---|---|
 | Source and text viewing with syntax highlighting | C-005 | done | no | user request 2026-10-13 | txt, log, text |
-| Images | C-009 | in progress | in progress | user request 2026-10-13 | aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, ff, gif, hdr, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, qoi, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm |
+| Images | C-009 | done | done | user request 2026-10-13 | aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, ff, gif, hdr, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, qoi, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm |
 | Word-processing documents | P-007 | planned | later | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps |
 | PDF and XPS viewing | P-008 | planned | no | user request 2026-10-13 | pdf, oxps, xps |
 | Spreadsheets and delimited tables | P-010 | planned | planned | user request 2026-10-13 | csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm |

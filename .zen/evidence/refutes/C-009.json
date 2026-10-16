@@ -1,0 +1,63 @@
+{
+  "clause": "C-009",
+  "verdict": "holds",
+  "ranAt": "2026-10-16T20:52:56.004Z",
+  "headCommit": "47d3c0b2952b61179df1f193099ee076ef6b4d86",
+  "tests": [
+    {
+      "name": "every_listed_extension_has_a_kind_and_the_rest_are_named_unsupported",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "every_decodable_extension_decodes_a_file_of_that_kind",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "raster_files_decode_to_exact_pixels_and_metadata",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "animated_gifs_decode_every_frame_with_its_delay",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "apng_and_animated_webp_decode_every_frame_with_its_delay",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "exif_fields_are_read_in_the_stated_order",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "save_as_round_trips_lossless_formats_and_refuses_the_rest",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "svgz_unpacks_and_fonts_name_their_family",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "svgs_rasterize_at_their_own_size_and_at_a_zoom",
+      "file": "src/images.rs",
+      "symbolSha": "3aa362967c6eaa8fff20e3c457f9ce4bb779a0bf3082af09a88ebe483b253568"
+    },
+    {
+      "name": "images_open_fitted_zoom_rotate_and_show_their_facts",
+      "file": "tests/images.rs",
+      "symbolSha": "fd781a07a6e69cf1e5ed6d185d91e4588833c48c37da937bb4ac139da8d4800f"
+    },
+    {
+      "name": "vectors_fonts_and_unsupported_formats_are_told_apart",
+      "file": "tests/images.rs",
+      "symbolSha": "fd781a07a6e69cf1e5ed6d185d91e4588833c48c37da937bb4ac139da8d4800f"
+    }
+  ]
+}
