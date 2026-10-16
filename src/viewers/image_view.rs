@@ -324,6 +324,41 @@ impl ImageView {
     pub fn scroll_offset(&self) -> gpui_kit::Point<Pixels> {
         self.scroll.offset()
     }
+
+    /// The size, in pixels, of the first frame handed to the window: turned for a raster,
+    /// rasterized at the zoom in effect for vectors.
+    pub fn rendered_size(&self) -> Option<(u32, u32)> {
+        match &self.shown {
+            Shown::Raster { image, .. } | Shown::Vector { image, .. } => {
+                let s = image.size(0);
+                Some((s.width.0 as u32, s.height.0 as u32))
+            }
+            _ => None,
+        }
+    }
+
+    /// One pixel of the first frame handed to the window, as the window holds it: BGRA.
+    pub fn rendered_pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        let (width, height) = self.rendered_size()?;
+        if x >= width || y >= height {
+            return None;
+        }
+        let image = match &self.shown {
+            Shown::Raster { image, .. } | Shown::Vector { image, .. } => image,
+            _ => return None,
+        };
+        let bytes = image.as_bytes(0)?;
+        let at = ((y * width + x) * 4) as usize;
+        bytes.get(at..at + 4).map(|p| [p[0], p[1], p[2], p[3]])
+    }
+
+    /// The zoom the vectors were last rasterized at.
+    pub fn rendered_zoom(&self) -> Option<f32> {
+        match &self.shown {
+            Shown::Vector { rendered_zoom, .. } => Some(*rendered_zoom),
+            _ => None,
+        }
+    }
 }
 
 fn extension_of(name: &str) -> String {

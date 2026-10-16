@@ -130,11 +130,32 @@ fn images_open_fitted_zoom_rotate_and_show_their_facts(cx: &mut TestAppContext) 
         let bounds = window.find("image-box").bounds();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         assert!((w / h - 400. / 2000.).abs() < 0.01, "the box is tall now: {w} × {h}");
-        for _ in 0..3 {
-            window.press("r", cx);
-        }
+        // The frames handed to the window are turned, not stretched: 400 × 2000, with the
+        // source's bottom-left pixel (0, 399) now at the top-left, in BGRA.
+        assert_eq!(view.read(cx).rendered_size(), Some((400, 2000)));
+        let source = |x: u32, y: u32| {
+            let p = wide_pixels.get_pixel(x, y).0;
+            [p[2], p[1], p[0], p[3]]
+        };
+        assert_eq!(view.read(cx).rendered_pixel(0, 0), Some(source(0, 399)));
+        assert_eq!(view.read(cx).rendered_pixel(399, 0), Some(source(0, 0)));
+        assert_eq!(view.read(cx).rendered_pixel(0, 1999), Some(source(1999, 399)));
+        // Two more turns: 180°, the same size as the file, every pixel at its opposite place.
+        window.press("r", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).rendered_size(), Some((2000, 400)));
+        assert_eq!(view.read(cx).rendered_pixel(1999, 399), Some(source(0, 0)));
+        assert_eq!(view.read(cx).rendered_pixel(0, 0), Some(source(1999, 399)));
+        assert_eq!(window.find("image-rotation").label(), Some("180°, drawn 2000 × 400"));
+        window.press("r", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).rendered_size(), Some((400, 2000)));
+        assert_eq!(view.read(cx).rendered_pixel(0, 0), Some(source(1999, 0)), "270°: the top-right comes first");
+        window.press("r", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).rotation(), 0);
+        assert_eq!(view.read(cx).rendered_size(), Some((2000, 400)));
+        assert_eq!(view.read(cx).rendered_pixel(0, 0), Some(source(0, 0)));
         assert_eq!(window.find("image-rotation").label(), Some("0°"));
         // The view's save writes a lossless BMP with identical pixels.
         let copy = dir.join("copy.bmp");
@@ -289,6 +310,25 @@ fn vectors_fonts_and_unsupported_formats_are_told_apart(cx: &mut TestAppContext)
         window.render_frame(cx);
         assert_eq!(svg.read(cx).zoom(), Some(1.0));
         assert_eq!(window.find("image-zoom").label(), Some("100 %"));
+        assert_eq!(svg.read(cx).rendered_size(), Some((40, 30)));
+        assert_eq!(svg.read(cx).rendered_zoom(), Some(1.0));
+        // Zooming vectors rasterizes them again at the zoom in effect, so they stay sharp:
+        // 125 % is 50 × 38 pixels with the circle's exact colour at the centre.
+        window.press("+", cx);
+        window.render_frame(cx);
+        assert_eq!(svg.read(cx).zoom(), Some(1.25));
+        assert_eq!(svg.read(cx).rendered_zoom(), Some(1.25));
+        assert_eq!(svg.read(cx).rendered_size(), Some((50, 38)));
+        assert_eq!(svg.read(cx).rendered_pixel(25, 19), Some([0xd8, 0x4e, 0x1d, 0xff]), "the blue circle, in BGRA");
+        assert_eq!(svg.read(cx).rendered_pixel(1, 1), Some([0x0a, 0x9f, 0xff, 0xff]), "the orange corner, in BGRA");
+        window.press("+", cx);
+        window.render_frame(cx);
+        assert_eq!(svg.read(cx).rendered_size(), Some((63, 47)), "156 %: 62.5 × 46.9 rounded");
+        // Zooming out below the file's size keeps the file-size raster, scaled down on screen.
+        window.press("0", cx);
+        window.render_frame(cx);
+        assert_eq!(svg.read(cx).rendered_zoom(), Some(1.0));
+        assert_eq!(svg.read(cx).rendered_size(), Some((40, 30)));
     })
     .unwrap();
 
