@@ -64,6 +64,15 @@
 - **Evidence:** .zen/evidence/C-008.md
 - **Status:** verified
 
+## C-009: Images
+- **Date:** 2026-10-14
+- **Source:** ingest (user-request-2026-10-13#images)
+- **Family:** images
+- **Description:** Extensions: aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, ff, gif, hdr, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, qoi, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm. A raster file the image crate decodes (png, apng, jpg, jpeg, jfif, gif, bmp, dib, ico, cur, tif, tiff, webp, tga, targa, pbm, pgm, ppm, pnm, pam, dds, exr, hdr, qoi, ff) shows on a checkerboard, fitted to the view, with zoom (+ and -, 1 for 100 %, 0 to fit again), pan by scrolling when it is larger than the view, rotation in quarter turns (R), animation playback for GIF, APNG and WebP, and a side column with the dimensions, pixel format, frame count, file size and the EXIF fields the file carries (camera make and model, time taken, exposure, aperture, ISO, focal length, orientation, software, description). SVG and svgz render as vectors through the window's renderer. A TrueType font (ttf) shows a specimen set in its own face, with its family name and glyph count. The other extensions of the family (aai, avif, cin, dcm, dicom, dfont, dpx, emf, emz, heic, heif, jls, jng, jp2, jpc, jpx, jxl, jxr, ora, pcd, pes, psb, psd, sfw, wmf, wmz, bw, cdg, miff, mvg, pcx, pix, ptx, rgb, rgba, sgi, txd, wbmp, xbm, xface, xpm) have no decoder yet; their tabs say so and show the bytes on Ctrl+Shift+B as any file does. A file that fails to decode says why. Write: Ctrl+Shift+S saves the first frame as another raster format, chosen by the new file name's extension (png, jpg, jpeg, gif, bmp, ico, tif, tiff, webp, tga, pnm, pam, qoi, ff, exr, hdr); png, bmp, tif, tiff, tga, qoi, ff, webp and pam keep every pixel.
+- **Verification:** automated → every_listed_extension_has_a_kind_and_the_rest_are_named_unsupported, raster_files_decode_to_exact_pixels_and_metadata, animated_gifs_decode_every_frame_with_its_delay, save_as_round_trips_lossless_formats_and_refuses_the_rest, svgz_unpacks_and_fonts_name_their_family, images_open_fitted_zoom_rotate_and_show_their_facts, vectors_fonts_and_unsupported_formats_are_told_apart | the decodable, vector, font and unsupported lists together equal the family's extension table; exact dimensions, pixel format and pixels for an 8 × 6 RGBA pattern through png, bmp, tiff, tga, qoi, ff and webp, JPEG within a drift bound and without alpha, greyscale named; a two-frame GIF with its delays; every lossless target decodes back to identical pixels and the lossy ones to the same size, an unknown extension is refused; svgz unpacks to its SVG, a system font names its family; a headless window where a PNG opens fitted with its facts in the side column, + - 1 0 change the zoom as stated, R turns the image and swaps the shown dimensions, Ctrl+Shift+S through the view's save writes a BMP with identical pixels, an SVG renders with the renderer's size, a font tab shows its family and glyph count, an unsupported extension shows the note and a corrupt file its error; manual: captures on Windows and Linux of a raster image with its facts and of an SVG, in both themes.
+- **Evidence:** .zen/evidence/C-009.md
+- **Status:** pending verification
+
 ## Pending Contract Deltas
 
 ### P-028: Closing the window asks about modified tabs
@@ -146,13 +155,6 @@
 - **Family:** cad
 - **Description:** Extensions: dwg, dxf. dxf is read and written: entities (line, polyline, lwpolyline, arc, circle, ellipse, text, mtext, insert with blocks, hatch outline, dimensions as geometry), layers with visibility and colour, pan, zoom and fit, and a layer panel. dwg opens through an external converter to dxf when one is present; native dwg reading is a later extension. Write: dxf round-trip preserving untouched entities where the format allows.
 - **Proposed verification:** automated: entity counts per layer and exact coordinates for fixtures of DXF R12 and R2018; a read, write, read round trip asserts an identical entity set.
-
-### P-017: Images
-- **Date:** 2026-10-14
-- **Source:** ingest (user-request-2026-10-13#images)
-- **Family:** images
-- **Description:** Extensions: aai, apng, avif, bmp, cin, dcm, dicom, dds, dfont, dpx, emf, emz, exr, gif, heic, heif, ico, jls, jng, jp2, jpc, jpx, jpg, jpeg, jfif, jxl, jxr, ora, pbm, pcd, pes, png, psb, psd, sfw, svg, svgz, tga, targa, tiff, tif, webp, wmf, wmz, bw, cdg, cur, dib, miff, mvg, pcx, pgm, pix, pam, pnm, ppm, ptx, rgb, rgba, sgi, ttf, txd, wbmp, xbm, xface, xpm. Raster images show with zoom, fit, pan, rotation, a checkerboard behind transparency, animation playback (gif, apng) and metadata (dimensions, colour depth, EXIF). SVG renders as vectors. Fonts (ttf, dfont) show a specimen. Formats without a maintained decoder (aai, cin, pcd, pes, sfw, jxr, cdg, txd, xface) stay listed as not supported until a decoder exists. Write: save-as between raster formats.
-- **Proposed verification:** automated: decode asserts exact dimensions and a pixel checksum per supported extension fixture; a save-as round trip asserts identical pixels for lossless targets.
 
 ### P-018: Camera RAW images
 - **Date:** 2026-10-14

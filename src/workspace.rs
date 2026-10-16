@@ -24,9 +24,10 @@ use crate::hex::HexFile;
 use crate::rules;
 use crate::shell::{APP_NAME, title};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
-use crate::viewers::{HexView, RulesPanel, RulesStore, TextView};
+use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
+use crate::viewers::{HexView, ImageView, RulesPanel, RulesStore, TextView};
 
-actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile]);
+actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
@@ -38,6 +39,13 @@ pub fn init(cx: &mut App) {
         // take the shift and stay reachable from inside its fields.
         KeyBinding::new("ctrl-shift-b", ToggleHexView, Some("Workspace")),
         KeyBinding::new("ctrl-s", SaveFile, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-s", SaveImageAs, Some("Workspace")),
+        KeyBinding::new("+", ZoomIn, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("=", ZoomIn, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("-", ZoomOut, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("1", ZoomActual, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("0", ZoomFit, Some(image_view::KEY_CONTEXT)),
+        KeyBinding::new("r", RotateQuarter, Some(image_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -96,6 +104,8 @@ enum PanelView {
     Info,
     /// The text viewer (C-005).
     Text(Entity<TextView>),
+    /// The image viewer (C-009).
+    Image(Entity<ImageView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -118,7 +128,14 @@ impl FilePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let view = if Self::opens_as_text(&info) {
+        // A family with a viewer of its own comes first (an SVG is text by content, yet an
+        // image); text content falls back to the text viewer while its family has none.
+        let view = if info.error.is_none() && info.route() == Route::Family(Family::Images) {
+            match std::fs::read(&info.path) {
+                Ok(bytes) => PanelView::Image(cx.new(|cx| ImageView::new(&info.path, &bytes, window, cx))),
+                Err(_) => PanelView::Info,
+            }
+        } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
                     cx.new(|cx| TextView::new(&info.path, &bytes, rules, window, cx)),
@@ -134,7 +151,7 @@ impl FilePanel {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
-            PanelView::Info => None,
+            PanelView::Image(_) | PanelView::Info => None,
         };
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
@@ -168,6 +185,14 @@ impl FilePanel {
     pub fn text_view(&self) -> Option<&Entity<TextView>> {
         match &self.view {
             PanelView::Text(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The image viewer, when this tab shows one.
+    pub fn image_view(&self) -> Option<&Entity<ImageView>> {
+        match &self.view {
+            PanelView::Image(view) if !self.hex_shown => Some(view),
             _ => None,
         }
     }
@@ -219,7 +244,7 @@ impl FilePanel {
     pub fn is_dirty(&self, cx: &App) -> bool {
         match &self.view {
             PanelView::Text(text) => text.read(cx).is_dirty(),
-            PanelView::Info => false,
+            PanelView::Image(_) | PanelView::Info => false,
         }
     }
 
@@ -289,6 +314,14 @@ impl Render for FilePanel {
                 .into_any_element();
         }
         if let PanelView::Text(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
+        if let PanelView::Image(view) = &self.view {
             return div()
                 .id("file-panel")
                 .track_focus(&self.focus_handle)
@@ -510,6 +543,24 @@ impl Workspace {
         }
     }
 
+    /// Save the active tab's image as another raster format (C-009): a Save dialog picks
+    /// the new name, whose extension chooses the format; the outcome shows in the facts.
+    fn on_save_image_as(&mut self, _: &SaveImageAs, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).image_view().cloned()) else {
+            return;
+        };
+        let directory = view.read(cx).path().parent().map(Path::to_path_buf).unwrap_or_default();
+        let receiver = cx.prompt_for_new_path(&directory, None);
+        cx.spawn_in(window, async move |_, cx| {
+            if let Ok(Ok(Some(path))) = receiver.await {
+                view.update(cx, |view, cx| {
+                    let _ = view.save_as(&path, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     fn on_open_files(&mut self, _: &OpenFiles, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -539,6 +590,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_rules))
             .on_action(cx.listener(Self::on_toggle_hex))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_save_image_as))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();

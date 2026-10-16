@@ -7,6 +7,8 @@
 pub enum Family {
     /// Source and text viewing with syntax highlighting (C-005).
     Text,
+    /// Images (C-009).
+    Images,
     /// Word-processing documents (P-007).
     WordProcessing,
     /// PDF and XPS viewing (P-008).
@@ -25,8 +27,6 @@ pub enum Family {
     Web,
     /// CAD drawings (P-016).
     Cad,
-    /// Images (P-017).
-    Images,
     /// Camera RAW images (P-018).
     CameraRaw,
     /// Audio playback (P-019).
@@ -45,6 +45,7 @@ impl Family {
     /// Every family, in contract order.
     pub const ALL: &[Family] = &[
         Family::Text,
+        Family::Images,
         Family::WordProcessing,
         Family::PdfXps,
         Family::Spreadsheets,
@@ -54,7 +55,6 @@ impl Family {
         Family::Email,
         Family::Web,
         Family::Cad,
-        Family::Images,
         Family::CameraRaw,
         Family::Audio,
         Family::Video,
@@ -67,6 +67,7 @@ impl Family {
     pub fn slug(self) -> &'static str {
         match self {
             Family::Text => "text",
+            Family::Images => "images",
             Family::WordProcessing => "word-processing",
             Family::PdfXps => "pdf-xps",
             Family::Spreadsheets => "spreadsheets",
@@ -76,7 +77,6 @@ impl Family {
             Family::Email => "email",
             Family::Web => "web",
             Family::Cad => "cad",
-            Family::Images => "images",
             Family::CameraRaw => "camera-raw",
             Family::Audio => "audio",
             Family::Video => "video",
@@ -90,6 +90,7 @@ impl Family {
     pub fn title(self) -> &'static str {
         match self {
             Family::Text => "Source and text viewing with syntax highlighting",
+            Family::Images => "Images",
             Family::WordProcessing => "Word-processing documents",
             Family::PdfXps => "PDF and XPS viewing",
             Family::Spreadsheets => "Spreadsheets and delimited tables",
@@ -99,7 +100,6 @@ impl Family {
             Family::Email => "Email messages",
             Family::Web => "Web pages",
             Family::Cad => "CAD drawings",
-            Family::Images => "Images",
             Family::CameraRaw => "Camera RAW images",
             Family::Audio => "Audio playback",
             Family::Video => "Video playback through VLC",
@@ -113,6 +113,7 @@ impl Family {
     pub fn clause(self) -> &'static str {
         match self {
             Family::Text => "C-005",
+            Family::Images => "C-009",
             Family::WordProcessing => "P-007",
             Family::PdfXps => "P-008",
             Family::Spreadsheets => "P-010",
@@ -122,7 +123,6 @@ impl Family {
             Family::Email => "P-014",
             Family::Web => "P-015",
             Family::Cad => "P-016",
-            Family::Images => "P-017",
             Family::CameraRaw => "P-018",
             Family::Audio => "P-019",
             Family::Video => "P-020",
@@ -239,6 +239,7 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("exr", &[Family::Images]),
     ("f4v", &[Family::Video]),
     ("fap", &[Family::Audio]),
+    ("ff", &[Family::Images]),
     ("fff", &[Family::CameraRaw]),
     ("flac", &[Family::Audio]),
     ("flc", &[Family::Video]),
@@ -254,6 +255,7 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("gzip", &[Family::Archives]),
     ("h263", &[Family::Video]),
     ("h264", &[Family::Video]),
+    ("hdr", &[Family::Images]),
     ("heic", &[Family::Images]),
     ("heif", &[Family::Images]),
     ("hevc", &[Family::Video]),
@@ -386,6 +388,7 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("pva", &[Family::Video]),
     ("pvf", &[Family::Audio]),
     ("qcp", &[Family::Audio]),
+    ("qoi", &[Family::Images]),
     ("qt", &[Family::Video]),
     ("ra", &[Family::Audio]),
     ("raf", &[Family::CameraRaw]),

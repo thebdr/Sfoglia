@@ -42,7 +42,10 @@ fn binary_files_open_in_the_hex_view_and_any_file_toggles_to_it(cx: &mut TestApp
     let (handle, workspace) = open_workspace(cx);
     let noise = fixture("noise.bin");
     let hello = fixture("hello.txt");
-    let dot = fixture("dot.png");
+    // An office extension has no viewer yet, so its tab shows the info rows; the body is
+    // binary (a ZIP header), or the text rule would open it in the editor.
+    let office = std::env::temp_dir().join(format!("sfoglia-office-{}.docx", std::process::id()));
+    std::fs::write(&office, b"PK\x03\x04 fake office file").unwrap();
 
     cx.update_window(handle, |_, window, cx| {
         workspace.update(cx, |w, cx| w.open_paths(&[noise.clone()], window, cx));
@@ -98,10 +101,10 @@ fn binary_files_open_in_the_hex_view_and_any_file_toggles_to_it(cx: &mut TestApp
         assert!(window.try_find("hex-status").is_none());
 
         // A file whose family has no viewer yet shows its info rows and toggles too.
-        workspace.update(cx, |w, cx| w.open_paths(&[dot.clone()], window, cx));
+        workspace.update(cx, |w, cx| w.open_paths(&[office.clone()], window, cx));
         window.render_frame(cx);
         let panel = workspace.read(cx).panels(cx)[2].clone();
-        assert_eq!(window.find("file-viewer").label(), Some("images"));
+        assert!(window.try_find("file-viewer").is_some(), "an office file shows its info rows for now");
         assert!(panel.read(cx).hex_view().is_none());
         let focus = panel.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
@@ -109,13 +112,13 @@ fn binary_files_open_in_the_hex_view_and_any_file_toggles_to_it(cx: &mut TestApp
         window.press("ctrl-shift-b", cx);
         window.render_frame(cx);
         assert!(panel.read(cx).hex_view().is_some());
-        assert_eq!(window.find("hex-rows").label(), Some("5 rows"));
+        assert_eq!(window.find("hex-rows").label(), Some("2 rows"));
         let first = window.find(hex_row(0)).label().unwrap_or_default().to_string();
-        assert!(first.starts_with("00000000  89 50 4e 47 0d 0a 1a 0a  "), "{first}");
+        assert!(first.starts_with("00000000  50 4b 03 04 20 66 61 6b  65 20 6f 66 66 69 63 65  |PK.. fake office|"), "{first}");
         assert!(window.try_find("file-viewer").is_none());
         window.press("ctrl-shift-b", cx);
         window.render_frame(cx);
-        assert_eq!(window.find("file-viewer").label(), Some("images"));
+        assert!(window.try_find("file-viewer").is_some());
         assert!(panel.read(cx).hex_view().is_none());
     })
     .unwrap();

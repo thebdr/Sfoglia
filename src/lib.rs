@@ -6,6 +6,7 @@
 pub mod detect;
 pub mod generated;
 pub mod hex;
+pub mod images;
 pub mod rules;
 pub mod shell;
 pub mod text;
@@ -14,4 +15,4 @@ pub mod workspace;
 
 pub use generated::families::Family;
 pub use shell::{APP_NAME, window_options};
-pub use workspace::{OpenFiles, SaveFile, ToggleHexView, ToggleHighlightRules, ToggleTheme, Workspace, init};
+pub use workspace::{OpenFiles, SaveFile, SaveImageAs, ToggleHexView, ToggleHighlightRules, ToggleTheme, Workspace, init};

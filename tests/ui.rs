@@ -137,10 +137,11 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         assert_eq!(open[1].size, Some(67));
         assert_eq!(open[0].error, None);
         assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("dot.png".into()));
-        assert_eq!(window.find("file-viewer").label(), Some("images"));
-        assert_eq!(window.find("file-name").label(), Some("dot.png"));
-        assert_eq!(window.find("file-size").label(), Some("67 bytes"));
-        assert_eq!(window.find("file-family").label(), Some("Images (images)"));
+        // The image opens in the image viewer (C-009) rather than the info rows.
+        assert!(workspace.read(cx).panels(cx)[1].read(cx).image_view().is_some());
+        assert!(window.try_find("file-viewer").is_none());
+        assert_eq!(window.find("image-size").label(), Some("1 × 1 pixels"));
+        assert_eq!(window.find("image-bytes").label(), Some("67 bytes"));
 
         // Reopening the first file activates its tab; nothing is added. A text file shows
         // the text viewer (C-005) rather than the info rows.
@@ -204,7 +205,7 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
         assert_eq!(names, ["hello.txt", "renamed-png.txt", "does-not-exist.txt", "dot.png"]);
         assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("dot.png".into()));
-        assert_eq!(window.find("file-name").label(), Some("dot.png"));
+        assert_eq!(window.find("image-size").label(), Some("1 × 1 pixels"));
         assert_eq!(workspace.read(cx).panels(cx).len(), 4);
     })
     .unwrap();
@@ -252,7 +253,7 @@ fn text_files_open_in_the_editor_with_their_status_and_theme_switches(cx: &mut T
         assert_eq!(latin.read(cx).status().encoding, Encoding::Latin1);
         assert_eq!(latin.read(cx).status().language, "text");
         assert!(panels[2].read(cx).text_view().is_none(), "a PNG is not text");
-        assert_eq!(window.find("file-viewer").label(), Some("images"));
+        assert!(panels[2].read(cx).image_view().is_some(), "a PNG opens in the image viewer");
 
         // CR-only and mixed endings: the editor lays out as many lines as the status row
         // counts, and the rendered row names the endings.

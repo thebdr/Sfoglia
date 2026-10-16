@@ -18,6 +18,13 @@ dirs = "6"
 # Hex view (C-007): the file is mapped, not read; search is memmem.
 memmap2 = "0.9"
 memchr = "2"
+# Images (C-009): the same decoders the kit's GPUI enables, EXIF, gzip for svgz, font names.
+image = { version = "0.25", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+kamadak-exif = "0.6"
+flate2 = "1"
+ttf-parser = "0.25"
+usvg = "0.46"
+resvg = "0.46"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
