@@ -1,23 +1,45 @@
-//! The text viewer (C-005): a read-only code editor with line numbers and syntax
-//! highlighting, and a status row naming the encoding, line endings, line count and
-//! language. The user's highlighting rules (C-006) paint over the syntax colours as
-//! editor decorations and follow every change to the rule file.
+//! The text viewer (C-005): a code editor with line numbers and syntax highlighting, and
+//! a status row naming the encoding, line endings, line count and language. The user's
+//! highlighting rules (C-006) paint over the syntax colours as editor decorations and
+//! follow every change to the rule file. The text is editable and saved back in the
+//! file's own encoding and line endings (C-008); the file on disk is watched for changes
+//! made elsewhere.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{
-    Editor, EditorState, RopeExt as _, TextDecoration, TextDecorationCollection,
+    Editor, EditorState, InputEvent, RopeExt as _, TextDecoration, TextDecorationCollection,
 };
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Context, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement, Render, Rgba,
-    Role, SharedString, Subscription, TestSupportExt, UnderlineStyle, Window, div, px, relative,
+    Role, SharedString, Subscription, Task, TestSupportExt, UnderlineStyle, Window, div, px,
+    relative,
 };
 
 use crate::rules::{Color, Span, Style};
-use crate::text::{Decoded, Encoding, LineEndings, decode, language_for};
+use crate::text::{Decoded, Encoding, LineEndings, decode, encode, language_for};
 use crate::viewers::RulesStore;
+
+/// How often the file on disk is compared with what was read (C-008).
+pub const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The encodings a save may use, in the order the status row cycles through them.
+pub const ENCODINGS: [Encoding; 6] = [
+    Encoding::Utf8,
+    Encoding::Utf8Bom,
+    Encoding::Utf16Le,
+    Encoding::Utf16Be,
+    Encoding::Latin1,
+    Encoding::Windows1252,
+];
+
+/// The line endings a save may use, in the order the status row cycles through them.
+pub const LINE_ENDINGS: [LineEndings; 3] = [LineEndings::Lf, LineEndings::CrLf, LineEndings::Cr];
 
 /// What the status row says about the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,31 +52,61 @@ pub struct TextStatus {
     pub language: &'static str,
 }
 
+/// The file on disk as last read or written: enough to notice another writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl DiskStamp {
+    fn of(path: &Path) -> Option<DiskStamp> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(DiskStamp { modified: meta.modified().ok(), len: meta.len() })
+    }
+}
+
 pub struct TextView {
+    path: PathBuf,
     name: String,
     editor: Entity<EditorState>,
     status: TextStatus,
+    /// The encoding and line endings the next save writes.
+    save_encoding: Encoding,
+    save_endings: LineEndings,
+    /// Whether the text may be edited: a file with undecodable units is read-only.
+    editable: bool,
+    dirty: bool,
+    /// What the last save or failed save said.
+    message: Option<String>,
+    on_disk: Option<DiskStamp>,
+    changed_on_disk: bool,
     rules: Entity<RulesStore>,
     decorations: TextDecorationCollection,
     /// What the collection was last given: one decoration per span, in span order.
     painted: Vec<TextDecoration>,
     spans: Vec<Span>,
     sets: Vec<String>,
-    _observe_rules: Subscription,
+    _subscriptions: Vec<Subscription>,
+    _watch: Task<()>,
 }
 
 impl TextView {
-    /// Decode `bytes` as the file named `name` and put the text in a read-only editor,
-    /// painted by the rule sets that name the file.
+    /// Decode `bytes` as the file at `path` and put the text in an editor, painted by the
+    /// rule sets that name the file.
     pub fn new(
-        name: &str,
+        path: &Path,
         bytes: &[u8],
         rules: &Entity<RulesStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
         let Decoded { text, encoding, line_endings, lines, replaced } = decode(bytes);
-        let language = language_for(name).unwrap_or("text");
+        let language = language_for(&name).unwrap_or("text");
         let shown = display_text(&text, line_endings);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -66,16 +118,38 @@ impl TextView {
         let decorations =
             editor.update(cx, |state, cx| state.create_decorations_collection(Vec::new(), cx));
         let observe = cx.observe(rules, |this, _, cx| this.apply_rules(cx));
+        let on_change = cx.subscribe_in(&editor, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.on_edited(cx);
+            }
+        });
+        let watch = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DISK_CHECK_INTERVAL).await;
+                if this.update(cx, |this, cx| this.check_disk(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let mut view = Self {
-            name: name.to_string(),
+            path: path.to_path_buf(),
+            name,
             editor,
             status: TextStatus { encoding, line_endings, lines, replaced, language },
+            save_encoding: encoding,
+            save_endings: line_endings,
+            editable: replaced == 0,
+            dirty: false,
+            message: None,
+            on_disk: DiskStamp::of(path),
+            changed_on_disk: false,
             rules: rules.clone(),
             decorations,
             painted: Vec::new(),
             spans: Vec::new(),
             sets: Vec::new(),
-            _observe_rules: observe,
+            _subscriptions: vec![observe, on_change],
+            _watch: watch,
         };
         view.apply_rules(cx);
         view
@@ -97,6 +171,25 @@ impl TextView {
         cx.notify();
     }
 
+    /// The editor's text changed: the tab is modified, the line count follows, and the
+    /// rule spans are recomputed.
+    fn on_edited(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
+        self.message = None;
+        let rope = self.editor.read(cx).text();
+        self.status.lines = if rope.len() == 0 { 0 } else { rope.lines_len() };
+        self.apply_rules(cx);
+    }
+
+    /// Compare the file on disk with what was last read or written.
+    fn check_disk(&mut self, cx: &mut Context<Self>) {
+        let now = DiskStamp::of(&self.path);
+        if now != self.on_disk && !self.changed_on_disk {
+            self.changed_on_disk = true;
+            cx.notify();
+        }
+    }
+
     /// The decorations handed to the editor for the current spans, in span order.
     pub fn rule_decorations(&self) -> &[TextDecoration] {
         &self.painted
@@ -108,6 +201,40 @@ impl TextView {
 
     pub fn status(&self) -> &TextStatus {
         &self.status
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Whether the text has changes not yet saved.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Whether the text may be edited.
+    pub fn is_editable(&self) -> bool {
+        self.editable
+    }
+
+    /// Whether another program changed the file since it was read or written.
+    pub fn changed_on_disk(&self) -> bool {
+        self.changed_on_disk
+    }
+
+    /// What the last save, or failed save, said.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    /// The encoding the next save writes.
+    pub fn save_encoding(&self) -> Encoding {
+        self.save_encoding
+    }
+
+    /// The line endings the next save writes (`Mixed` and `None` write LF).
+    pub fn save_line_endings(&self) -> LineEndings {
+        self.save_endings
     }
 
     /// The text as the editor holds it.
@@ -133,6 +260,125 @@ impl TextView {
     /// The byte ranges the editor's decoration layer holds for this view.
     pub fn decoration_ranges(&self, cx: &App) -> Vec<Range<usize>> {
         self.decorations.get_ranges(cx)
+    }
+
+    /// Choose the encoding the next save writes; the tab is modified by the choice.
+    pub fn set_save_encoding(&mut self, encoding: Encoding, cx: &mut Context<Self>) {
+        if self.save_encoding != encoding {
+            self.save_encoding = encoding;
+            self.dirty = true;
+            self.message = None;
+            cx.notify();
+        }
+    }
+
+    /// Choose the line endings the next save writes; the tab is modified by the choice.
+    pub fn set_save_line_endings(&mut self, endings: LineEndings, cx: &mut Context<Self>) {
+        if self.save_endings != endings {
+            self.save_endings = endings;
+            self.dirty = true;
+            self.message = None;
+            cx.notify();
+        }
+    }
+
+    fn cycle_encoding(&mut self, cx: &mut Context<Self>) {
+        if !self.editable {
+            return;
+        }
+        let at = ENCODINGS.iter().position(|&e| e == self.save_encoding).unwrap_or(0);
+        self.set_save_encoding(ENCODINGS[(at + 1) % ENCODINGS.len()], cx);
+    }
+
+    fn cycle_line_endings(&mut self, cx: &mut Context<Self>) {
+        if !self.editable {
+            return;
+        }
+        let next = match LINE_ENDINGS.iter().position(|&e| e == self.save_endings) {
+            Some(at) => LINE_ENDINGS[(at + 1) % LINE_ENDINGS.len()],
+            // Mixed or none: the first choice is LF, what such a file is written with anyway.
+            None => LineEndings::Lf,
+        };
+        self.set_save_line_endings(next, cx);
+    }
+
+    /// Write the text in the chosen encoding and line endings. An untouched file is left
+    /// alone. A character the encoding cannot hold, or a write error, is reported and
+    /// the file is not touched.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if !self.editable {
+            let error = "this file has undecodable units and is read-only".to_string();
+            self.message = Some(error.clone());
+            cx.notify();
+            return Err(error);
+        }
+        if !self.dirty {
+            return Ok(());
+        }
+        let text = self.editor.read(cx).value();
+        let bytes = match encode(&text, self.save_encoding, self.save_endings) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let message = error.message(self.save_encoding);
+                self.message = Some(message.clone());
+                cx.notify();
+                return Err(message);
+            }
+        };
+        if let Err(error) = std::fs::write(&self.path, &bytes) {
+            let message = format!("cannot write {}: {error}", self.path.display());
+            self.message = Some(message.clone());
+            cx.notify();
+            return Err(message);
+        }
+        self.on_disk = DiskStamp::of(&self.path);
+        self.changed_on_disk = false;
+        self.dirty = false;
+        self.status.encoding = self.save_encoding;
+        self.status.line_endings = if self.save_endings == LineEndings::Mixed || self.save_endings == LineEndings::None {
+            crate::text::line_endings(&text).0
+        } else {
+            self.save_endings
+        };
+        if self.save_endings == LineEndings::Mixed {
+            self.save_endings = LineEndings::Lf;
+        }
+        self.message = Some(format!("saved, {} bytes", bytes.len()));
+        cx.notify();
+        Ok(())
+    }
+
+    /// Read the file again and show it, dropping the edits.
+    pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => {
+                let Decoded { text, encoding, line_endings, lines, replaced } = decode(&bytes);
+                let shown = display_text(&text, line_endings);
+                self.editor.update(cx, |state, cx| state.set_value(shown, window, cx));
+                self.status.encoding = encoding;
+                self.status.line_endings = line_endings;
+                self.status.lines = lines;
+                self.status.replaced = replaced;
+                self.save_encoding = encoding;
+                self.save_endings = line_endings;
+                self.editable = replaced == 0;
+                self.on_disk = DiskStamp::of(&self.path);
+                self.message = None;
+            }
+            Err(error) => {
+                self.message = Some(format!("cannot read {}: {error}", self.path.display()));
+            }
+        }
+        self.dirty = false;
+        self.changed_on_disk = false;
+        self.apply_rules(cx);
+    }
+
+    /// Keep the edits although the file changed on disk; the next save overwrites it.
+    pub fn keep_mine(&mut self, cx: &mut Context<Self>) {
+        self.changed_on_disk = false;
+        self.on_disk = DiskStamp::of(&self.path);
+        cx.notify();
     }
 }
 
@@ -200,6 +446,20 @@ mod tests {
         let italic = highlight_style(&Style { italic: true, ..Style::default() });
         assert_eq!(italic.font_style, Some(FontStyle::Italic));
     }
+
+    #[test]
+    fn the_status_row_cycles_through_every_encoding_and_ending() {
+        assert_eq!(ENCODINGS.len(), 6);
+        assert_eq!(ENCODINGS.iter().map(|e| e.label()).collect::<Vec<_>>(),
+            ["UTF-8", "UTF-8 with BOM", "UTF-16 LE", "UTF-16 BE", "Latin-1", "Windows-1252"]);
+        assert_eq!(LINE_ENDINGS.iter().map(|e| e.label()).collect::<Vec<_>>(), ["LF", "CRLF", "CR"]);
+        assert_eq!(endings_label(LineEndings::Mixed, LineEndings::Mixed), "mixed, saves as LF");
+        assert_eq!(endings_label(LineEndings::Lf, LineEndings::Lf), "LF");
+        assert_eq!(endings_label(LineEndings::Lf, LineEndings::CrLf), "CRLF (was LF)");
+        assert_eq!(endings_label(LineEndings::None, LineEndings::None), "none");
+        assert_eq!(encoding_label(Encoding::Latin1, Encoding::Latin1), "Latin-1");
+        assert_eq!(encoding_label(Encoding::Latin1, Encoding::Utf8), "UTF-8 (was Latin-1)");
+    }
 }
 
 /// The text as the editor shows it. The editor breaks lines on LF only, so a lone CR
@@ -223,6 +483,26 @@ pub fn display_text(text: &str, line_endings: LineEndings) -> String {
     String::from_utf8(out).expect("only ASCII CR bytes were replaced")
 }
 
+/// What the status row says about the encoding: the one the next save writes, and the
+/// one the file was read with when they differ.
+pub fn encoding_label(read: Encoding, save: Encoding) -> String {
+    if read == save {
+        save.label().to_string()
+    } else {
+        format!("{} (was {})", save.label(), read.label())
+    }
+}
+
+/// What the status row says about the line endings, likewise; mixed endings say what a
+/// save writes.
+pub fn endings_label(read: LineEndings, save: LineEndings) -> String {
+    match (read, save) {
+        (LineEndings::Mixed, LineEndings::Mixed) => "mixed, saves as LF".to_string(),
+        (read, save) if read == save => save.label().to_string(),
+        (read, save) => format!("{} (was {})", save.label(), read.label()),
+    }
+}
+
 fn status_item(id: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
     let value = value.into();
     div()
@@ -233,20 +513,74 @@ fn status_item(id: &'static str, value: impl Into<SharedString>) -> impl IntoEle
         .child(value)
 }
 
+/// A clickable test-supported wrapper around a small button.
+fn small_button(id: &'static str, label: &'static str, on_click: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .aria_label(label)
+        .child(Button::new(ElementIdSuffix(id)).label(label).xsmall().on_click(move |_, window, cx| on_click(window, cx)))
+}
+
+/// A distinct id for the button inside a wrapper that carries the test id.
+struct ElementIdSuffix(&'static str);
+
+impl From<ElementIdSuffix> for gpui_kit::ElementId {
+    fn from(id: ElementIdSuffix) -> Self {
+        (id.0, 1usize).into()
+    }
+}
+
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let s = &self.status;
-        let replaced = (s.replaced > 0).then(|| format!("{} undecodable", s.replaced));
+        let replaced = (s.replaced > 0).then(|| format!("{} undecodable, read-only", s.replaced));
         let rules = if self.sets.is_empty() {
             "no rules".to_string()
         } else {
             format!("rules: {}", self.sets.join(", "))
         };
+        let encoding = encoding_label(s.encoding, self.save_encoding);
+        let endings = endings_label(s.line_endings, self.save_endings);
+        let state = if self.dirty { "modified" } else { "saved" };
+        let message = self.message.clone();
+        let changed = self.changed_on_disk;
+        let dirty = self.dirty;
+        let this = cx.entity();
+        let this_reload = this.clone();
+        let this_keep = this.clone();
+        let this_revert = this.clone();
+        let this_encoding = this.clone();
+        let this_endings = this;
         v_flex()
             .size_full()
+            .when(changed, |view| {
+                view.child(
+                    h_flex()
+                        .id("text-changed-on-disk")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label("The file changed on disk.")
+                        .flex_shrink_0()
+                        .gap_3()
+                        .px_3()
+                        .py_1()
+                        .bg(cx.theme().warning.opacity(0.15))
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .text_sm()
+                        .child("The file changed on disk.")
+                        .child(small_button("text-reload", "Reload", move |window, cx| {
+                            this_reload.update(cx, |view, cx| view.reload(window, cx));
+                        }))
+                        .child(small_button("text-keep", "Keep mine", move |_, cx| {
+                            this_keep.update(cx, |view, cx| view.keep_mine(cx));
+                        })),
+                )
+            })
             .child(
                 Editor::new(&self.editor)
-                    .readonly(true)
+                    .readonly(!self.editable)
                     .bordered(false)
                     .aria_label("file-text")
                     .h(relative(1.))
@@ -265,12 +599,41 @@ impl Render for TextView {
                     .border_color(cx.theme().border)
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(status_item("text-encoding", s.encoding.label()))
-                    .child(status_item("text-line-endings", s.line_endings.label()))
+                    .child(
+                        div()
+                            .id("text-encoding")
+                            .role(Role::Button)
+                            .test_support()
+                            .aria_label(encoding.clone())
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| {
+                                this_encoding.update(cx, |view, cx| view.cycle_encoding(cx));
+                            })
+                            .child(encoding),
+                    )
+                    .child(
+                        div()
+                            .id("text-line-endings")
+                            .role(Role::Button)
+                            .test_support()
+                            .aria_label(endings.clone())
+                            .cursor_pointer()
+                            .on_click(move |_, _, cx| {
+                                this_endings.update(cx, |view, cx| view.cycle_line_endings(cx));
+                            })
+                            .child(endings),
+                    )
                     .child(status_item("text-lines", format!("{} lines", s.lines)))
                     .child(status_item("text-language", s.language))
                     .child(status_item("text-rules", rules))
-                    .children(replaced.map(|r| status_item("text-replaced", r))),
+                    .children(replaced.map(|r| status_item("text-replaced", r)))
+                    .child(status_item("text-dirty", state))
+                    .when(dirty, |row| {
+                        row.child(small_button("text-revert", "Revert", move |window, cx| {
+                            this_revert.update(cx, |view, cx| view.reload(window, cx));
+                        }))
+                    })
+                    .children(message.map(|m| status_item("text-message", m))),
             )
     }
 }

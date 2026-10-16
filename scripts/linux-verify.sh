@@ -14,6 +14,9 @@
 #   HEX_SEARCH=text  in the hex view: press Ctrl+Shift+F, type the text, press Return and
 #                    capture ~/sfoglia-linux-hex.png with the hit marked
 #   HEX_BYTES=1      with HEX_SEARCH: press Ctrl+M first, so the text is hexadecimal pairs
+#   EDIT=1           click into the text, type "X" (the tab shows its marker), then append a
+#                    line to the first FILE from outside and capture ~/sfoglia-linux-edit.png
+#                    once the changed-on-disk bar has appeared
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -27,7 +30,8 @@ PNGDARK="$HOME/sfoglia-linux-dark.png"
 PNGEND="$HOME/sfoglia-linux-end.png"
 PNGRULES="$HOME/sfoglia-linux-rules.png"
 PNGHEX="$HOME/sfoglia-linux-hex.png"
-: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX"
+PNGEDIT="$HOME/sfoglia-linux-edit.png"
+: > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX" "$PNGEDIT"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
 
@@ -85,6 +89,14 @@ if [ -n "$WID" ]; then
     xdotool key Return; sleep 1.5
     shot "$PNGHEX" "after Ctrl+Shift+F, '$HEX_SEARCH', Return"
   fi
+  if [ "${EDIT:-0}" = "1" ] && [ "$#" -gt 0 ]; then
+    eval "$GEOM"
+    xdotool mousemove $((X + WIDTH / 3)) $((Y + HEIGHT / 3)) click 1; sleep 0.5
+    xdotool type --delay 40 "X"; sleep 0.5
+    printf 'changed elsewhere\n' >> "$HOME/Sfoglia/$1"
+    sleep 2.5
+    shot "$PNGEDIT" "after typing X and a change on disk to $1"
+  fi
   if [ "${TOGGLE_THEME:-0}" = "1" ]; then
     xdotool key --window "$WID" ctrl+shift+t; sleep 1.5
     shot "$PNGDARK" "after Ctrl+Shift+T"
@@ -118,8 +130,9 @@ else
 fi
 kill "$APP" 2>/dev/null; wait "$APP" 2>/dev/null
 log "app stopped"
-printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s hex=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
+printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s hex=%s edit=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
   "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" \
   "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" \
-  "$( [ -s "$PNGRULES" ] && echo yes || echo no)" "$( [ -s "$PNGHEX" ] && echo yes || echo no)" > "$RESULT"
+  "$( [ -s "$PNGRULES" ] && echo yes || echo no)" "$( [ -s "$PNGHEX" ] && echo yes || echo no)" \
+  "$( [ -s "$PNGEDIT" ] && echo yes || echo no)" > "$RESULT"
 cat "$RESULT"

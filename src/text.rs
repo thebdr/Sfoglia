@@ -128,6 +128,106 @@ fn decode_utf16(body: &[u8], unit: fn([u8; 2]) -> u16) -> (String, usize) {
     (text, replaced)
 }
 
+/// A character that an encoding cannot hold, and the line it is on (C-008).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeError {
+    pub character: char,
+    pub line: usize,
+}
+
+impl EncodeError {
+    pub fn message(&self, encoding: Encoding) -> String {
+        format!(
+            "{} cannot hold {:?} (U+{:04X}) on line {}; choose another encoding",
+            encoding.label(),
+            self.character,
+            self.character as u32,
+            self.line
+        )
+    }
+}
+
+/// `text` with every line break (CRLF, LF or lone CR) written as `ending`. `Mixed` and
+/// `None` write LF: a file whose breaks disagreed is written uniformly once edited.
+pub fn with_line_endings(text: &str, ending: LineEndings) -> String {
+    let ending = match ending {
+        LineEndings::CrLf => "\r\n",
+        LineEndings::Cr => "\r",
+        LineEndings::Lf | LineEndings::Mixed | LineEndings::None => "\n",
+    };
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                out.push_str(&text[start..i]);
+                out.push_str(ending);
+                i += if bytes.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+                start = i;
+            }
+            b'\n' => {
+                out.push_str(&text[start..i]);
+                out.push_str(ending);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&text[start..]);
+    out
+}
+
+/// The bytes of `text` in `encoding`, every line break as `ending`: the byte-order mark
+/// the encoding carries, then the text. A character the encoding cannot hold is an error
+/// naming it and its line.
+pub fn encode(text: &str, encoding: Encoding, ending: LineEndings) -> Result<Vec<u8>, EncodeError> {
+    let text = with_line_endings(text, ending);
+    match encoding {
+        Encoding::Utf8 => Ok(text.into_bytes()),
+        Encoding::Utf8Bom => {
+            let mut out = vec![0xef, 0xbb, 0xbf];
+            out.extend_from_slice(text.as_bytes());
+            Ok(out)
+        }
+        Encoding::Utf16Le => {
+            let mut out = vec![0xff, 0xfe];
+            out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            Ok(out)
+        }
+        Encoding::Utf16Be => {
+            let mut out = vec![0xfe, 0xff];
+            out.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+            Ok(out)
+        }
+        Encoding::Latin1 | Encoding::Windows1252 => {
+            let mut out = Vec::with_capacity(text.len());
+            let mut line = 1;
+            for c in text.chars() {
+                let byte = match (encoding, c as u32) {
+                    (_, code) if code < 0x80 => Some(code as u8),
+                    (Encoding::Latin1, code) if code <= 0xff => Some(code as u8),
+                    (Encoding::Windows1252, code) if (0xa0..=0xff).contains(&code) => Some(code as u8),
+                    (Encoding::Windows1252, _) => {
+                        CP1252_HIGH.iter().position(|&h| h == c).map(|i| 0x80 + i as u8)
+                    }
+                    _ => None,
+                };
+                match byte {
+                    Some(byte) => out.push(byte),
+                    None => return Err(EncodeError { character: c, line }),
+                }
+                if c == '\n' || (c == '\r' && ending == LineEndings::Cr) {
+                    line += 1;
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// The kind of line endings in `text`, and the editor's line count: one more than the
 /// number of line breaks, zero for an empty text.
 pub fn line_endings(text: &str) -> (LineEndings, usize) {
@@ -316,5 +416,75 @@ mod tests {
         for language in LANGUAGES {
             assert!(!language.is_empty());
         }
+    }
+
+    /// C-008: decoding then encoding with the encoding and ending found gives the bytes back.
+    #[test]
+    fn saving_round_trips_every_encoding_and_line_ending() {
+        for name in ["hello.txt", "utf8-bom.txt", "bom-only.txt", "empty.txt", "utf16le.txt", "utf16be.txt",
+                     "latin1.txt", "latin1.rs", "cr-only.txt", "no-final-newline.txt", "sample.rs", "data.json"] {
+            let bytes = fixture(name);
+            let d = decode(&bytes);
+            assert_eq!(encode(&d.text, d.encoding, d.line_endings), Ok(bytes), "{name}");
+        }
+        let windows: &[u8] = b"caff\xe8 \x93latte\x94 \x96 3\x80\r\na\x81b\x8d\x8f\x90\x9dc\r\n";
+        let d = decode(windows);
+        assert_eq!(d.encoding, Encoding::Windows1252);
+        assert_eq!(encode(&d.text, Encoding::Windows1252, LineEndings::CrLf), Ok(windows.to_vec()));
+        let utf16: Vec<u8> = [0xff, 0xfe].into_iter().chain("é\r\n😀".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let d = decode(&utf16);
+        assert_eq!(encode(&d.text, Encoding::Utf16Le, LineEndings::CrLf), Ok(utf16));
+        // Mixed endings are written as LF once the file is saved; the ending can be changed.
+        let d = decode(&fixture("mixed-endings.txt"));
+        assert_eq!(d.text, "one\r\ntwo\nthree\r\n");
+        assert_eq!(encode(&d.text, Encoding::Utf8, LineEndings::Mixed), Ok(b"one\ntwo\nthree\n".to_vec()));
+        assert_eq!(encode(&d.text, Encoding::Utf8, LineEndings::CrLf), Ok(b"one\r\ntwo\r\nthree\r\n".to_vec()));
+        assert_eq!(encode("a\nb\r\nc\rd", Encoding::Utf8, LineEndings::Cr), Ok(b"a\rb\rc\rd".to_vec()));
+        assert_eq!(encode("no break", Encoding::Utf8, LineEndings::None), Ok(b"no break".to_vec()));
+        assert_eq!(with_line_endings("\r\n\n\r", LineEndings::CrLf), "\r\n\r\n\r\n");
+        // Changing the encoding: the mark follows, and so does the byte order.
+        assert_eq!(encode("hi\n", Encoding::Utf8Bom, LineEndings::Lf), Ok(b"\xef\xbb\xbfhi\n".to_vec()));
+        assert_eq!(encode("hi", Encoding::Utf16Be, LineEndings::Lf), Ok(b"\xfe\xff\x00h\x00i".to_vec()));
+        assert_eq!(encode("caffè", Encoding::Latin1, LineEndings::Lf), Ok(b"caff\xe8".to_vec()));
+        assert_eq!(encode("3\u{20AC}", Encoding::Windows1252, LineEndings::Lf), Ok(b"3\x80".to_vec()));
+        // A character the encoding cannot hold is refused, with its line.
+        assert_eq!(
+            encode("ok\n3\u{20AC}", Encoding::Latin1, LineEndings::Lf),
+            Err(EncodeError { character: '\u{20AC}', line: 2 })
+        );
+        assert_eq!(
+            encode("a\rb\r😀", Encoding::Latin1, LineEndings::Cr),
+            Err(EncodeError { character: '😀', line: 3 })
+        );
+        assert_eq!(
+            encode("x\u{85}", Encoding::Windows1252, LineEndings::Lf),
+            Err(EncodeError { character: '\u{85}', line: 1 }),
+            "U+0085 is not a Windows-1252 character: that byte is the ellipsis"
+        );
+        assert_eq!(encode("x\u{85}", Encoding::Latin1, LineEndings::Lf), Ok(b"x\x85".to_vec()));
+        assert_eq!(
+            EncodeError { character: '\u{20AC}', line: 2 }.message(Encoding::Latin1),
+            "Latin-1 cannot hold '€' (U+20AC) on line 2; choose another encoding"
+        );
+    }
+
+    /// C-008: exact bytes after a known edit, in the file's own encoding and endings.
+    #[test]
+    fn an_edit_is_written_in_the_original_encoding_and_endings() {
+        let d = decode(&fixture("utf16le.txt"));
+        let edited = d.text.replace("hi", "hi there");
+        let expected: Vec<u8> = [0xff, 0xfe].into_iter().chain("hi there\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(encode(&edited, d.encoding, d.line_endings), Ok(expected));
+        let d = decode(&fixture("latin1.txt"));
+        let edited = format!("{}seconda riga\n", d.text);
+        assert_eq!(encode(&edited, d.encoding, d.line_endings), Ok(b"caff\xe8 latte \xe0 Roma\nseconda riga\n".to_vec()));
+        let d = decode(&fixture("utf8-bom.txt"));
+        let edited = d.text.replace("bom", "mark");
+        assert_eq!(encode(&edited, d.encoding, d.line_endings), Ok(b"\xef\xbb\xbfmark then text\n".to_vec()));
+        // The editor shows a CR-only file with LF breaks (C-005); saving writes CR again.
+        let d = decode(&fixture("cr-only.txt"));
+        let shown = d.text.replace('\r', "\n");
+        let edited = shown.replace("beta", "BETA");
+        assert_eq!(encode(&edited, d.encoding, d.line_endings), Ok(b"alpha\rBETA\rgamma".to_vec()));
     }
 }

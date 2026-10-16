@@ -271,17 +271,18 @@ fn text_files_open_in_the_editor_with_their_status_and_theme_switches(cx: &mut T
         let view = workspace.read(cx).panels(cx)[4].read(cx).text_view().cloned().unwrap();
         assert_eq!(view.read(cx).status().lines, 4);
         assert_eq!(view.read(cx).editor_lines(cx), 4);
-        assert_eq!(window.find("text-line-endings").label(), Some("mixed"));
+        assert_eq!(window.find("text-line-endings").label(), Some("mixed, saves as LF"));
         assert_eq!(window.find("text-lines").label(), Some("4 lines"));
         assert_eq!(window.find("text-encoding").label(), Some("UTF-8"));
-        // The editor is read-only: typing into it changes nothing.
+        // The editor accepts edits (C-008); nothing reaches the file until a save.
         let editor = view.read(cx).editor().clone();
         let focus = editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         window.render_frame(cx);
-        assert!(!editor.read(cx).is_editable(), "the viewer's editor is read-only");
+        assert!(editor.read(cx).is_editable(), "the viewer's editor is editable");
         window.input("XYZ", cx);
-        assert_eq!(view.read(cx).text(cx).as_ref(), "one\r\ntwo\nthree\r\n");
+        assert_eq!(view.read(cx).text(cx).as_ref(), "XYZone\r\ntwo\nthree\r\n");
+        assert_eq!(std::fs::read_to_string(&mixed).unwrap(), "one\r\ntwo\nthree\r\n", "the fixture is untouched");
 
         // Latin-1 source and a Latin-1 file without extension reach the editor too, with
         // the language of their name; the other encodings and endings show their labels.

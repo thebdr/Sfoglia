@@ -14,4 +14,4 @@ pub mod workspace;
 
 pub use generated::families::Family;
 pub use shell::{APP_NAME, window_options};
-pub use workspace::{OpenFiles, ToggleHexView, ToggleHighlightRules, ToggleTheme, Workspace, init};
+pub use workspace::{OpenFiles, SaveFile, ToggleHexView, ToggleHighlightRules, ToggleTheme, Workspace, init};

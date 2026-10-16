@@ -14,8 +14,8 @@ use gpui_kit::component::dock::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
-    KeyBinding, PathPromptOptions, Render, Role, SharedString, TestSupportExt, Window, actions,
-    div, px,
+    KeyBinding, PathPromptOptions, Render, Role, SharedString, Subscription, TestSupportExt,
+    Window, actions, div, px,
 };
 
 use crate::detect::{Content, Detection, Route, SNIFF_BYTES, detect};
@@ -26,7 +26,7 @@ use crate::shell::{APP_NAME, title};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::{HexView, RulesPanel, RulesStore, TextView};
 
-actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView]);
+actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
@@ -37,6 +37,7 @@ pub fn init(cx: &mut App) {
         // The kit's inputs bind ctrl-f, ctrl-g and ctrl-h themselves, so the hex chords
         // take the shift and stay reachable from inside its fields.
         KeyBinding::new("ctrl-shift-b", ToggleHexView, Some("Workspace")),
+        KeyBinding::new("ctrl-s", SaveFile, Some("Workspace")),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -106,6 +107,8 @@ pub struct FilePanel {
     hex: Option<Entity<HexView>>,
     hex_shown: bool,
     hex_error: Option<String>,
+    /// Keeps the tab in step with the text view's modified state (C-008).
+    _observe_text: Option<Subscription>,
 }
 
 impl FilePanel {
@@ -118,12 +121,20 @@ impl FilePanel {
         let view = if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
-                    cx.new(|cx| TextView::new(&info.name, &bytes, rules, window, cx)),
+                    cx.new(|cx| TextView::new(&info.path, &bytes, rules, window, cx)),
                 ),
                 Err(_) => PanelView::Info,
             }
         } else {
             PanelView::Info
+        };
+        // The tab's name and its close permission follow the text view's modified state.
+        let observe_text = match &view {
+            PanelView::Text(text) => Some(cx.observe(text, |_, _, cx| {
+                cx.emit(PanelEvent::LayoutChanged);
+                cx.notify();
+            })),
+            PanelView::Info => None,
         };
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
@@ -132,6 +143,7 @@ impl FilePanel {
             hex: None,
             hex_shown: false,
             hex_error: None,
+            _observe_text: observe_text,
         };
         // A binary nobody claims opens as hex straight away.
         if panel.info.error.is_none() && panel.info.route() == Route::Hex {
@@ -202,19 +214,43 @@ impl FilePanel {
     }
 }
 
+impl FilePanel {
+    /// Whether the file has edits not yet saved (C-008).
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        match &self.view {
+            PanelView::Text(text) => text.read(cx).is_dirty(),
+            PanelView::Info => false,
+        }
+    }
+
+    /// The tab's name: the file name, with a dot while it has unsaved edits.
+    fn tab_label(&self, cx: &App) -> String {
+        if self.is_dirty(cx) {
+            format!("{} •", self.info.name)
+        } else {
+            self.info.name.clone()
+        }
+    }
+}
+
 impl BasePanel for FilePanel {
     fn panel_name(&self) -> &'static str {
         "sfoglia-file"
     }
+
+    /// A modified tab stays open until it is saved or reverted.
+    fn closable(&self, cx: &App) -> bool {
+        !self.is_dirty(cx)
+    }
 }
 
 impl KitPanel for FilePanel {
-    fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.info.name.clone().into())
+    fn tab_name(&self, cx: &App) -> Option<SharedString> {
+        Some(self.tab_label(cx).into())
     }
 
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        SharedString::from(self.info.name.clone())
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        SharedString::from(self.tab_label(cx))
     }
 }
 
@@ -467,6 +503,13 @@ impl Workspace {
         }
     }
 
+    /// Save the active tab's text (C-008). The outcome is shown in the view's status row.
+    fn on_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).text_view().cloned()) {
+            let _ = view.update(cx, |view, cx| view.save(cx));
+        }
+    }
+
     fn on_open_files(&mut self, _: &OpenFiles, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -495,6 +538,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_rules))
             .on_action(cx.listener(Self::on_toggle_hex))
+            .on_action(cx.listener(Self::on_save))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();

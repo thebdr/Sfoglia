@@ -12,7 +12,11 @@ Give paths on the command line, press Ctrl+O for the Open dialog, or drop files 
 
 ## Text and source files
 
-Any text file opens in a read-only editor with line numbers; source files are highlighted by language (35 grammars, from Rust and JSON to SQL and Zig). The status row under the text names the encoding (UTF-8, UTF-8 with BOM, UTF-16 LE or BE, or Latin-1 or Windows-1252 when the bytes are not valid UTF-8), the line endings, the line count and the language. Ctrl+Shift+T switches between the light and the dark theme.
+Any text file opens in an editor with line numbers; source files are highlighted by language (35 grammars, from Rust and JSON to SQL and Zig). The status row under the text names the encoding (UTF-8, UTF-8 with BOM, UTF-16 LE or BE, or Latin-1 or Windows-1252 when the bytes are not valid UTF-8), the line endings, the line count and the language. Ctrl+Shift+T switches between the light and the dark theme.
+
+## Editing and saving
+
+The text is editable: type, cut, copy and paste, undo and redo, and find and replace with the editor's own panel (Ctrl+F, Ctrl+H). A modified tab shows • after its name and will not close until you save (Ctrl+S) or click Revert in the status row. Saving writes the file back in the encoding, byte-order mark and line endings it was read with; click the encoding or the line-endings item in the status row to choose another for the next save. A character the chosen encoding cannot hold stops the save and names the character and its line. A file with mixed line endings is written with LF once edited, as its status row says. When another program changes the file on disk, a bar offers to reload it or to keep your edits.
 
 ## Highlighting rules
 
