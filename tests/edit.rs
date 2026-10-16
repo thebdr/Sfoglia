@@ -492,3 +492,77 @@ fn a_file_with_undecodable_units_is_read_only(cx: &mut TestAppContext) {
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Reload or Revert on a file that can no longer be read keeps the edits on screen, says
+/// why, leaves the tab modified and unclosable, and the next save recreates the file.
+#[gpui_kit::test]
+fn an_unreadable_file_keeps_the_edits_protected(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("edit-deleted");
+    let other = copy_fixture("data.json", &dir);
+    let hello = copy_fixture("hello.txt", &dir);
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[other.clone(), hello.clone()], window, cx));
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[1].read(cx).text_view().unwrap().clone();
+        let focus = view.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("Q", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Another program deletes the file: the bar comes up; Reload cannot read it.
+    std::fs::remove_file(&hello).unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[1].clone();
+        let view = panel.read(cx).text_view().unwrap().clone();
+        assert!(window.try_find("text-changed-on-disk").is_some(), "a deleted file is a change on disk");
+        window.click("text-reload", cx);
+        window.render_frame(cx);
+        let message = window.find("text-message").label().unwrap_or_default().to_string();
+        assert!(message.starts_with("cannot read "), "{message}");
+        assert_eq!(view.read(cx).text(cx).as_ref(), "QSfoglia reads anything.\nSecond line.\n", "the edits stay");
+        assert!(view.read(cx).is_dirty(), "and stay protected");
+        assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt •"));
+        assert!(!panel.read(cx).closable(cx));
+        assert!(window.try_find("text-changed-on-disk").is_none());
+        assert!(!hello.exists());
+        // Ctrl+S recreates the file with the screen text.
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "QSfoglia reads anything.\nSecond line.\n");
+        assert!(!view.read(cx).is_dirty());
+        // The same through Revert, with the file gone again.
+        let focus = view.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("R", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    std::fs::remove_file(&hello).unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[1].clone();
+        let view = panel.read(cx).text_view().unwrap().clone();
+        assert!(view.read(cx).is_dirty());
+        window.click("text-revert", cx);
+        window.render_frame(cx);
+        assert!(window.find("text-message").label().unwrap_or_default().starts_with("cannot read "));
+        // The caret stayed after the Q, so the R follows it.
+        assert_eq!(view.read(cx).text(cx).as_ref(), "QRSfoglia reads anything.\nSecond line.\n");
+        assert!(view.read(cx).is_dirty());
+        assert!(!panel.read(cx).closable(cx));
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "QRSfoglia reads anything.\nSecond line.\n");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

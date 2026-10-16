@@ -350,7 +350,9 @@ impl TextView {
         Ok(())
     }
 
-    /// Read the file again and show it, dropping the edits.
+    /// Read the file again and show it, dropping the edits. When the file can no longer
+    /// be read (deleted, locked), the text on screen stays, says why, and counts as
+    /// modified, so nothing is lost and the next save writes it back.
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match std::fs::read(&self.path) {
             Ok(bytes) => {
@@ -364,14 +366,15 @@ impl TextView {
                 self.save_encoding = encoding;
                 self.save_endings = line_endings;
                 self.editable = replaced == 0;
-                self.on_disk = DiskStamp::of(&self.path);
                 self.message = None;
+                self.dirty = false;
             }
             Err(error) => {
                 self.message = Some(format!("cannot read {}: {error}", self.path.display()));
+                self.dirty = true;
             }
         }
-        self.dirty = false;
+        self.on_disk = DiskStamp::of(&self.path);
         self.changed_on_disk = false;
         self.apply_rules(cx);
     }
