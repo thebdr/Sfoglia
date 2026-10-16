@@ -411,10 +411,29 @@ impl<'de, 'a> Visitor<'de> for Builder<'a> {
             close(nodes, ix, 0);
             return Ok(());
         };
-        // A number arrives as a one-entry map under serde_json's private key: keep its text.
+        // A number arrives as a one-entry map under serde_json's private key, its text as a
+        // string. An object that really has that key is told apart by what follows: anything
+        // but that one string that reads as a number.
         if first == JSON_NUMBER_TOKEN {
-            let text: String = map.next_value()?;
-            push(nodes, depth, key, Kind::Number, text);
+            let ix = push(nodes, depth, key, Kind::Object, String::new());
+            map.next_value_seed(Builder { nodes: &mut *nodes, key: first, depth: depth + 1 })?;
+            let mut count = 1;
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value_seed(Builder { nodes: &mut *nodes, key, depth: depth + 1 })?;
+                count += 1;
+            }
+            let number = count == 1
+                && nodes.len() == ix + 2
+                && nodes[ix + 1].kind == Kind::String
+                && is_json_number(&nodes[ix + 1].value);
+            if number {
+                let text = nodes.pop().map(|n| n.value).unwrap_or_default();
+                nodes[ix].kind = Kind::Number;
+                nodes[ix].value = text;
+                nodes[ix].end = ix + 1;
+            } else {
+                close(nodes, ix, count);
+            }
             return Ok(());
         }
         let ix = push(nodes, depth, key, Kind::Object, String::new());
@@ -439,12 +458,18 @@ fn json_message(error: &serde_json::Error) -> String {
     }
 }
 
-fn json_error(error: serde_json::Error, line_offset: usize) -> ParseError {
-    ParseError {
-        line: error.line() + line_offset,
-        column: error.column().max(1),
-        message: json_message(&error),
-    }
+/// serde_json counts columns in bytes; the editor and the status row count characters.
+fn json_error(error: serde_json::Error, text: &str, line_offset: usize) -> ParseError {
+    let line_text = text.lines().nth(error.line().saturating_sub(1)).unwrap_or("");
+    let byte_column = error.column().max(1);
+    let column = line_text.get(..byte_column - 1).map_or(byte_column, |before| before.chars().count() + 1);
+    ParseError { line: error.line() + line_offset, column, message: json_message(&error) }
+}
+
+/// Whether `text` is one JSON number and nothing else.
+fn is_json_number(text: &str) -> bool {
+    text.starts_with(|c: char| c == '-' || c.is_ascii_digit())
+        && serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
 }
 
 fn parse_json_value(text: &str, nodes: &mut Vec<Node>, key: &str, depth: u32) -> Result<(), serde_json::Error> {
@@ -454,7 +479,7 @@ fn parse_json_value(text: &str, nodes: &mut Vec<Node>, key: &str, depth: u32) ->
 }
 
 fn parse_json(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
-    parse_json_value(text, nodes, "$", 0).map_err(|e| json_error(e, 0))
+    parse_json_value(text, nodes, "$", 0).map_err(|e| json_error(e, text, 0))
 }
 
 /// One record per non-blank line under a root `$` array; a bad line is reported by its number.
@@ -465,7 +490,7 @@ fn parse_json_lines(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError>
         if line.trim().is_empty() {
             continue;
         }
-        parse_json_value(line, nodes, &count.to_string(), 1).map_err(|e| json_error(e, line_ix))?;
+        parse_json_value(line, nodes, &count.to_string(), 1).map_err(|e| json_error(e, line, line_ix))?;
         count += 1;
     }
     close(nodes, root, count);
@@ -477,7 +502,7 @@ fn check_json(text: &str, line_offset: usize) -> Result<(), ParseError> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer)
         .and_then(|_| deserializer.end())
-        .map_err(|e| json_error(e, line_offset))
+        .map_err(|e| json_error(e, text, line_offset))
 }
 
 /// Re-space valid JSON token by token: every string, number and literal keeps its own text
@@ -748,12 +773,20 @@ fn parse_toml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
 
 // ---- XML: elements, attributes, text, comments and processing instructions ----
 
-/// The name as written: with its prefix when the element or attribute has one.
-fn xml_name(node: roxmltree::Node, namespace: Option<&str>, local: &str) -> String {
-    match namespace.and_then(|uri| node.lookup_prefix(uri)) {
-        Some(prefix) if !prefix.is_empty() => format!("{prefix}:{local}"),
-        _ => local.to_string(),
-    }
+/// An element's name as written in the file, prefix included: the namespace lookup cannot
+/// tell two prefixes bound to one URI apart, the source text can.
+fn xml_element_name(node: roxmltree::Node) -> String {
+    let input = node.document().input_text();
+    let range = node.range();
+    let after = &input[(range.start + 1).min(input.len())..range.end.min(input.len())];
+    after.split(|c: char| c.is_whitespace() || c == '/' || c == '>').next().unwrap_or_default().to_string()
+}
+
+/// An attribute's name as written in the file, prefix included.
+fn xml_attribute_name(input: &str, attribute: &roxmltree::Attribute) -> String {
+    let range = attribute.range();
+    let text = &input[range.start.min(input.len())..range.end.min(input.len())];
+    text.split('=').next().unwrap_or_default().trim().to_string()
 }
 
 fn xml_children<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Vec<roxmltree::Node<'a, 'input>> {
@@ -767,11 +800,11 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
     match node.node_type() {
         NodeType::Root => {}
         NodeType::Element => {
-            let name = xml_name(node, node.tag_name().namespace(), node.tag_name().name());
-            let ix = push(nodes, depth, name, Kind::Element, String::new());
+            let ix = push(nodes, depth, xml_element_name(node), Kind::Element, String::new());
             let mut count = 0;
+            let input = node.document().input_text();
             for attribute in node.attributes() {
-                let name = xml_name(node, attribute.namespace(), attribute.name());
+                let name = xml_attribute_name(input, &attribute);
                 push(nodes, depth + 1, format!("@{name}"), Kind::Attribute, attribute.value().to_string());
                 count += 1;
             }
@@ -897,35 +930,81 @@ pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
         }
         Format::Xml => pretty_xml(text),
         Format::Yaml => pretty_yaml(text),
-        Format::Toml => {
-            let table = load_toml(text)?;
-            toml::to_string_pretty(&table).map_err(|e| ParseError { line: 1, column: 1, message: e.to_string() })
-        }
+        Format::Toml => pretty_toml(text),
         Format::Ini => pretty_ini(text),
     }
 }
 
-/// The `<!DOCTYPE ...>` of `text`, internal subset included, as written.
-fn xml_doctype(text: &str) -> Option<&str> {
-    let start = text.find("<!DOCTYPE")?;
-    let rest = &text[start..];
-    let end = match (rest.find('['), rest.find('>')) {
-        (Some(bracket), Some(close)) if bracket < close => rest.find("]>").map(|e| e + 2)?,
-        (_, Some(close)) => close + 1,
-        _ => return None,
-    };
-    Some(&rest[..end])
+/// The XML declaration and the DOCTYPE of the prolog, as written: a scan of what comes
+/// before the root element, skipping processing instructions and comments.
+fn xml_prolog(text: &str) -> (Option<&str>, Option<&str>) {
+    let mut declaration = None;
+    let mut doctype = None;
+    let mut rest = text;
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix("<?xml").filter(|after| after.starts_with(char::is_whitespace)) {
+            let Some(end) = after.find("?>") else { break };
+            let end = "<?xml".len() + end + "?>".len();
+            declaration = Some(&trimmed[..end]);
+            rest = &trimmed[end..];
+        } else if trimmed.starts_with("<?") {
+            let Some(end) = trimmed.find("?>") else { break };
+            rest = &trimmed[end + 2..];
+        } else if trimmed.starts_with("<!--") {
+            let Some(end) = trimmed.find("-->") else { break };
+            rest = &trimmed[end + 3..];
+        } else if trimmed.starts_with("<!DOCTYPE") {
+            let Some(end) = doctype_end(trimmed) else { break };
+            doctype = Some(&trimmed[..end]);
+            rest = &trimmed[end..];
+        } else {
+            break;
+        }
+    }
+    (declaration, doctype)
+}
+
+/// Where a `<!DOCTYPE ...>` that starts `text` ends: after its `>`, or after the `>` that
+/// follows its internal subset's `]`; quoted strings and comments are skipped.
+fn doctype_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = "<!DOCTYPE".len();
+    let mut in_subset = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'<' if text[i..].starts_with("<!--") => i = text[i..].find("-->").map(|e| i + e + 3)?,
+            b'[' if !in_subset => {
+                in_subset = true;
+                i += 1;
+            }
+            b']' if in_subset => {
+                in_subset = false;
+                i += 1;
+            }
+            b'>' if !in_subset => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 fn pretty_xml(text: &str) -> Result<String, ParseError> {
     let document = load_xml(text)?;
     let mut out = String::new();
-    if text.trim_start().starts_with("<?xml") {
-        let end = text.find("?>").map_or(0, |e| e + 2);
-        out.push_str(text[..end].trim_start());
+    let (declaration, doctype) = xml_prolog(text);
+    if let Some(declaration) = declaration {
+        out.push_str(declaration);
         out.push('\n');
     }
-    if let Some(doctype) = xml_doctype(text) {
+    if let Some(doctype) = doctype {
         out.push_str(doctype);
         out.push('\n');
     }
@@ -943,6 +1022,9 @@ fn escape_xml(text: &str, attribute: bool) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' if attribute => out.push_str("&quot;"),
+            '\t' if attribute => out.push_str("&#9;"),
+            '\n' if attribute => out.push_str("&#10;"),
+            '\r' if attribute => out.push_str("&#13;"),
             _ => out.push(c),
         }
     }
@@ -968,7 +1050,8 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
     match node.node_type() {
         NodeType::Root => {}
         NodeType::Element => {
-            let name = xml_name(node, node.tag_name().namespace(), node.tag_name().name());
+            let name = xml_element_name(node);
+            let input = node.document().input_text();
             out.push_str(&indent);
             out.push('<');
             out.push_str(&name);
@@ -979,7 +1062,7 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
                 }
             }
             for attribute in node.attributes() {
-                let attribute_name = xml_name(node, attribute.namespace(), attribute.name());
+                let attribute_name = xml_attribute_name(input, &attribute);
                 out.push_str(&format!(" {attribute_name}=\"{}\"", escape_xml(attribute.value(), true)));
             }
             let children = xml_children(node);
@@ -1014,6 +1097,61 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
                 }
             }
         }
+    }
+}
+
+/// The file's own layout through the TOML document model: keys and tables keep their order
+/// and values their spelling, the whitespace is the canonical one; comments do not survive.
+fn pretty_toml(text: &str) -> Result<String, ParseError> {
+    load_toml(text)?;
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error: toml_edit::TomlError| ParseError { line: 1, column: 1, message: error.message().to_string() })?;
+    fmt_toml_table(document.as_table_mut());
+    let out = document.to_string();
+    let mut out = out.trim_start_matches('\n').to_string();
+    if !out.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn fmt_toml_table(table: &mut toml_edit::Table) {
+    table.fmt();
+    table.decor_mut().clear();
+    for (_, item) in table.iter_mut() {
+        fmt_toml_item(item);
+    }
+}
+
+fn fmt_toml_item(item: &mut toml_edit::Item) {
+    match item {
+        toml_edit::Item::Table(table) => fmt_toml_table(table),
+        toml_edit::Item::ArrayOfTables(tables) => {
+            for table in tables.iter_mut() {
+                fmt_toml_table(table);
+            }
+        }
+        toml_edit::Item::Value(value) => fmt_toml_value(value),
+        toml_edit::Item::None => {}
+    }
+}
+
+fn fmt_toml_value(value: &mut toml_edit::Value) {
+    match value {
+        toml_edit::Value::InlineTable(table) => {
+            table.fmt();
+            for (_, value) in table.iter_mut() {
+                fmt_toml_value(value);
+            }
+        }
+        toml_edit::Value::Array(array) => {
+            array.fmt();
+            for value in array.iter_mut() {
+                fmt_toml_value(value);
+            }
+        }
+        other => other.decor_mut().clear(),
     }
 }
 
@@ -1146,6 +1284,15 @@ mod tests {
         // Duplicate keys are two nodes, as the file has them.
         let twice = Tree::parse(Format::Json, r#"{"a": 1, "a": 2}"#).unwrap();
         assert_eq!(rows(&twice), vec![(0, "$", "object", "2 entries"), (1, "a", "number", "1"), (1, "a", "number", "2")]);
+        // An object whose first key is serde_json's own number marker is still an object, unless its one
+        // value is a string that reads as a number (serde_json's own value type has the same limit).
+        let marker = "$serde_json::private::Number";
+        let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": 5}}")).unwrap();
+        assert_eq!(rows(&object), vec![(0, "$", "object", "1 entry"), (1, marker, "number", "5")]);
+        let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": \"abc\"}}")).unwrap();
+        assert_eq!(rows(&object), vec![(0, "$", "object", "1 entry"), (1, marker, "string", "abc")]);
+        let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": \"1\", \"b\": 2}}")).unwrap();
+        assert_eq!(rows(&object), vec![(0, "$", "object", "2 entries"), (1, marker, "string", "1"), (1, "b", "number", "2")]);
     }
 
     #[test]
@@ -1242,6 +1389,11 @@ mod tests {
             ]
         );
         assert_eq!(spaced.path(3), "/a:r/a:x/@b:id");
+        // Two prefixes bound to one URI, and the default namespace beside a prefix: the names stay as written.
+        let twice = Tree::parse(Format::Xml, "<a:r xmlns:a=\"u\" xmlns:b=\"u\"><b:x/></a:r>").unwrap();
+        assert_eq!(rows(&twice), vec![(0, "a:r", "element", "1 entry"), (1, "b:x", "element", "0 entries")]);
+        let shared = Tree::parse(Format::Xml, "<r xmlns=\"u\" xmlns:p=\"u\" p:k=\"1\"><p:c/></r>").unwrap();
+        assert_eq!(rows(&shared), vec![(0, "r", "element", "2 entries"), (1, "@p:k", "attribute", "1"), (1, "p:c", "element", "0 entries")]);
     }
 
     #[test]
@@ -1445,6 +1597,26 @@ mod tests {
         assert_eq!((error.line, error.column), (1, 7));
         let error = pretty(Format::JsonLines, "{\"a\": 1}\n{\"a\": 1} x\n").unwrap_err();
         assert_eq!((error.line, error.column), (2, 10));
+        // TOML keeps the file's order and the values' spelling: dotted keys and inline tables stay where they are.
+        let toml_order = "a.b.c = 1\nf = 1e3\npoint = {x=1}\nz = 2\n";
+        let pretty_order = pretty(Format::Toml, toml_order).unwrap();
+        assert_eq!(pretty_order, "a.b.c = 1\nf = 1e3\npoint = { x = 1 }\nz = 2\n");
+        assert_eq!(Tree::parse(Format::Toml, &pretty_order).unwrap().nodes, Tree::parse(Format::Toml, toml_order).unwrap().nodes);
+        // XML: a processing instruction at the start is not the declaration, a DOCTYPE inside a comment is
+        // not a DOCTYPE, an internal subset may end in `] >`, two prefixes for one URI keep their names, and
+        // whitespace in attribute values is written as character references.
+        for (xml_in, xml_out) in [
+            ("<?xml-stylesheet href=\"a\"?><r/>", "<?xml-stylesheet href=\"a\"?>\n<r/>\n"),
+            ("<!-- see <!DOCTYPE in docs --><r/>", "<!-- see <!DOCTYPE in docs -->\n<r/>\n"),
+            ("<!DOCTYPE r [<!ENTITY e \"a>b\"> ] ><r>&e;</r>", "<!DOCTYPE r [<!ENTITY e \"a>b\"> ] >\n<r>a&gt;b</r>\n"),
+            ("<a:r xmlns:a=\"u\" xmlns:b=\"u\"><b:x/></a:r>", "<a:r xmlns:a=\"u\" xmlns:b=\"u\">\n  <b:x/>\n</a:r>\n"),
+            ("<r xmlns=\"u\" xmlns:p=\"u\" p:k=\"1\"><p:c/></r>", "<r xmlns=\"u\" xmlns:p=\"u\" p:k=\"1\">\n  <p:c/>\n</r>\n"),
+            ("<a k=\"x&#9;y&#10;z\"/>", "<a k=\"x&#9;y&#10;z\"/>\n"),
+        ] {
+            let pretty_xml = pretty(Format::Xml, xml_in).unwrap();
+            assert_eq!(pretty_xml, xml_out, "{xml_in}");
+            assert_eq!(Tree::parse(Format::Xml, &pretty_xml).unwrap().nodes, Tree::parse(Format::Xml, xml_in).unwrap().nodes, "{xml_in}");
+        }
     }
 
     #[test]
@@ -1453,15 +1625,20 @@ mod tests {
         assert_eq!((json.line, json.column, json.message.as_str()), (4, 1, "expected value"));
         assert_eq!(json.to_string(), "line 4, column 1: expected value");
         let xml = Tree::parse(Format::Xml, "<a>\n  <b>\n</a>\n").unwrap_err();
-        assert_eq!(xml.line, 3, "{xml}");
-        assert!(xml.column >= 1, "{xml}");
+        assert_eq!((xml.line, xml.column), (3, 1), "{xml}");
         assert!(!xml.message.contains(" at "), "{xml}");
         let yaml = Tree::parse(Format::Yaml, "a: 1\nb: [1, 2\nc: 3\n").unwrap_err();
-        assert!(yaml.line >= 2, "{yaml}");
-        assert!(yaml.column >= 1 && !yaml.message.is_empty(), "{yaml}");
+        assert_eq!((yaml.line, yaml.column), (3, 2), "{yaml}");
+        assert!(!yaml.message.is_empty(), "{yaml}");
+        let twice = Tree::parse(Format::Yaml, "a: 1\na: 2\n").unwrap_err();
+        assert_eq!((twice.line, twice.column), (2, 1), "{twice}");
+        assert!(twice.message.contains("duplicate"), "{twice}");
         let toml = Tree::parse(Format::Toml, "a = 1\n[server\nhost = 1\n").unwrap_err();
-        assert_eq!(toml.line, 2, "{toml}");
-        assert!(toml.column >= 1 && !toml.message.is_empty(), "{toml}");
+        assert_eq!((toml.line, toml.column), (2, 8), "{toml}");
+        assert!(!toml.message.is_empty(), "{toml}");
+        // Columns count characters, as the editor does, not bytes.
+        let accented = Tree::parse(Format::Json, "{\"é\": }").unwrap_err();
+        assert_eq!((accented.line, accented.column), (1, 7), "{accented}");
         let ini = Tree::parse(Format::Ini, "[a]\nb = 1\n\nbroken line\n").unwrap_err();
         assert_eq!((ini.line, ini.column), (4, 1));
         // CRLF endings count lines the same way.

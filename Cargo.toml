@@ -30,6 +30,7 @@ resvg = "0.46"
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 roxmltree = "0.21"
 saphyr = "0.2"
+toml_edit = "0.25"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
