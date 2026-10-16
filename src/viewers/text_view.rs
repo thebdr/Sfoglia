@@ -335,14 +335,16 @@ impl TextView {
         self.changed_on_disk = false;
         self.dirty = false;
         self.status.encoding = self.save_encoding;
-        self.status.line_endings = if self.save_endings == LineEndings::Mixed || self.save_endings == LineEndings::None {
-            crate::text::line_endings(&text).0
-        } else {
-            self.save_endings
+        // The file now holds what was written: the chosen ending, LF for a mixed or
+        // break-less file that gained breaks, none when it has no break at all.
+        let has_break = text.contains('\n') || text.contains('\r');
+        let written = match self.save_endings {
+            _ if !has_break => LineEndings::None,
+            LineEndings::Mixed | LineEndings::None => LineEndings::Lf,
+            chosen => chosen,
         };
-        if self.save_endings == LineEndings::Mixed {
-            self.save_endings = LineEndings::Lf;
-        }
+        self.status.line_endings = written;
+        self.save_endings = written;
         self.message = Some(format!("saved, {} bytes", bytes.len()));
         cx.notify();
         Ok(())
@@ -374,10 +376,13 @@ impl TextView {
         self.apply_rules(cx);
     }
 
-    /// Keep the edits although the file changed on disk; the next save overwrites it.
+    /// Keep the text on screen although the file changed on disk: it now differs from the
+    /// file, so it counts as modified, and the next save overwrites the file.
     pub fn keep_mine(&mut self, cx: &mut Context<Self>) {
         self.changed_on_disk = false;
         self.on_disk = DiskStamp::of(&self.path);
+        self.dirty = true;
+        self.message = None;
         cx.notify();
     }
 }

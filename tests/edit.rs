@@ -296,6 +296,29 @@ fn a_file_changed_on_disk_is_offered_for_reload(cx: &mut TestAppContext) {
         assert!(window.try_find("text-changed-on-disk").is_none());
     })
     .unwrap();
+    // Keep mine on a tab without edits: the text on screen now differs from the file, so
+    // it counts as modified and the next save puts it back.
+    std::fs::write(&hello, "third writer\n").unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[0].clone();
+        let view = panel.read(cx).text_view().unwrap().clone();
+        assert!(!view.read(cx).is_dirty());
+        assert!(window.try_find("text-changed-on-disk").is_some());
+        window.click("text-keep", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).is_dirty(), "the kept text differs from the file");
+        assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt •"));
+        assert_eq!(window.find("text-dirty").label(), Some("modified"));
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "third writer\n", "nothing written yet");
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&hello).unwrap(), "Zchanged elsewhere\n", "the next save overwrites");
+        assert!(!view.read(cx).is_dirty());
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -364,6 +387,107 @@ fn a_modified_tab_cannot_be_closed_until_saved_or_reverted(cx: &mut TestAppConte
         window.render_frame(cx);
         let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
         assert_eq!(names, ["data.json"], "the reverted tab closes");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose line endings were mixed is written with LF once edited, and its status
+/// row then says LF; choosing CRLF writes CRLF.
+#[gpui_kit::test]
+fn a_mixed_endings_file_is_written_with_lf_and_says_so(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("edit-mixed");
+    let mixed = copy_fixture("mixed-endings.txt", &dir);
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[mixed.clone()], window, cx));
+        window.render_frame(cx);
+        assert_eq!(window.find("text-line-endings").label(), Some("mixed, saves as LF"));
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        let focus = view.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("X", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read(&mixed).unwrap(), b"Xone\ntwo\nthree\n");
+        assert_eq!(window.find("text-line-endings").label(), Some("LF"), "the file now holds LF");
+        assert_eq!(view.read(cx).status().line_endings, sfoglia::text::LineEndings::Lf);
+        assert!(!view.read(cx).is_dirty());
+        // CRLF chosen: the item says what was read until the save, then just CRLF.
+        window.click("text-line-endings", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("text-line-endings").label(), Some("CRLF (was LF)"));
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read(&mixed).unwrap(), b"Xone\r\ntwo\r\nthree\r\n");
+        assert_eq!(window.find("text-line-endings").label(), Some("CRLF"));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file with undecodable units is read-only: typing, replacing, the status-row choices
+/// and Ctrl+S leave the buffer and the file as they are, and the status row says why.
+#[gpui_kit::test]
+fn a_file_with_undecodable_units_is_read_only(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("edit-undecodable");
+    let path = dir.join("lone-surrogate.txt");
+    // UTF-16 LE: "h", a lone high surrogate, "i".
+    let bytes: Vec<u8> = vec![0xff, 0xfe, 0x68, 0x00, 0x00, 0xd8, 0x69, 0x00];
+    std::fs::write(&path, &bytes).unwrap();
+
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[path.clone()], window, cx));
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[0].clone();
+        let view = panel.read(cx).text_view().expect("UTF-16 text opens in the text viewer").clone();
+        assert_eq!(view.read(cx).text(cx).as_ref(), "h\u{fffd}i");
+        assert!(!view.read(cx).is_editable());
+        let editor = view.read(cx).editor().clone();
+        assert!(!editor.read(cx).is_editable(), "the editor itself is read-only");
+        assert_eq!(window.find("text-replaced").label(), Some("1 undecodable, read-only"));
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("Q", cx);
+        assert_eq!(view.read(cx).text(cx).as_ref(), "h\u{fffd}i", "typing changes nothing");
+        editor.update(cx, |state, cx| {
+            state.open_search(true, cx);
+            state.set_search_query("h", false, cx);
+            assert_eq!(state.replace_all_search_matches("H", window, cx), 0, "nothing is replaced");
+            state.close_search(cx);
+        });
+        assert_eq!(view.read(cx).text(cx).as_ref(), "h\u{fffd}i");
+        window.click("text-encoding", cx);
+        window.click("text-line-endings", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("text-encoding").label(), Some("UTF-16 LE"), "the choices do not move");
+        assert_eq!(window.find("text-line-endings").label(), Some("none"));
+        assert!(!view.read(cx).is_dirty());
+        assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("lone-surrogate.txt"));
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("text-message").label(), Some("this file has undecodable units and is read-only"));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the file is untouched");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let view = workspace.read(cx).panels(cx)[0].read(cx).text_view().unwrap().clone();
+        assert!(!view.read(cx).is_dirty(), "no change event came from the read-only editor");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
