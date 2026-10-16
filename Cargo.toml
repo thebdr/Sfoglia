@@ -25,10 +25,11 @@ flate2 = "1"
 ttf-parser = "0.25"
 usvg = "0.46"
 resvg = "0.46"
-# Structured data trees (C-010): JSON in key order, XML as a read-only DOM, YAML through serde; TOML keeps its order.
-serde_json = { version = "1", features = ["preserve_order"] }
+# Structured data trees (C-010): JSON in key order with its numbers' own text, XML as a read-only DOM, YAML as a
+# typed document tree, TOML in file order.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 roxmltree = "0.21"
-serde-saphyr = "1"
+saphyr = "0.2"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }

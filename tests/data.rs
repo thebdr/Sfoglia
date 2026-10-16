@@ -139,14 +139,21 @@ fn a_json_tree_opens_expands_collapses_navigates_searches_and_copies_paths(cx: &
         window.render_frame(cx);
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("$.nested.a.b[1].c"));
         assert_eq!(label(window, "data-message"), "copied $.nested.a.b[1].c");
-        // A click selects a row; a click on its glyph closes it.
+        // A click on a container's row selects it and closes it (it was open); a click on its glyph opens it again.
         window.click(("data-row", 7usize), cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).selected_node(), Some(7));
-        window.click(("data-glyph", 7usize), cx);
-        window.render_frame(cx);
         assert!(!view.read(cx).is_expanded(7));
         assert_eq!(view.read(cx).visible_nodes(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+        window.click(("data-glyph", 7usize), cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).is_expanded(7));
+        assert_eq!(view.read(cx).visible_nodes(), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        // A click on a leaf's row only selects it.
+        window.click(("data-row", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).selected_node(), Some(1));
+        assert_eq!(view.read(cx).visible_nodes().len(), 13);
         // Ctrl+Shift+F focuses the search field.
         window.press("ctrl-shift-f", cx);
         window.render_frame(cx);
@@ -165,6 +172,9 @@ fn a_json_tree_opens_expands_collapses_navigates_searches_and_copies_paths(cx: &
         assert!(view.read(cx).visible_nodes().contains(&12), "the match's ancestors are open");
         assert_eq!(label(window, "data-message"), "match 1 of 1");
         assert_eq!(label(window, "data-path"), "$.nested.a.b[1].c");
+        // The matching row is marked, the others are not.
+        assert_eq!(label(window, ("data-row", 12usize)), "5|c|string|deep|found");
+        assert_eq!(label(window, ("data-row", 11usize)), "4|1|object|1 entry");
         // A search is case-insensitive over keys and values, and wraps around.
         window.press("ctrl-a", cx);
         window.input("E", cx);
@@ -177,6 +187,8 @@ fn a_json_tree_opens_expands_collapses_navigates_searches_and_copies_paths(cx: &
         assert_eq!(view.read(cx).matches(), &[0, 1, 2, 3, 6, 7, 8, 9, 11, 12]);
         assert_eq!(label(window, "data-message"), "match 1 of 10");
         assert_eq!(view.read(cx).selected_node(), Some(0));
+        assert_eq!(label(window, ("data-row", 0usize)), "0|$|object|5 entries|found");
+        assert_eq!(label(window, ("data-row", 4usize)), "2|0|string|rust");
         window.press("enter", cx);
     })
     .unwrap();
@@ -200,6 +212,7 @@ fn a_json_tree_opens_expands_collapses_navigates_searches_and_copies_paths(cx: &
         window.render_frame(cx);
         assert_eq!(view.read(cx).matches(), &[] as &[usize]);
         assert_eq!(label(window, "data-message"), "no node matches \"nothing here\"");
+        assert_eq!(label(window, ("data-row", 0usize)), "0|$|object|5 entries", "no row is marked any more");
     })
     .unwrap();
 }
@@ -397,4 +410,49 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
         }
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_50_mb_json_file_opens_searches_and_scrolls_to_the_match(cx: &mut TestAppContext) {
+    // One fixed name, removed at the end: a leftover would fill the disk on the next run.
+    let path = std::env::temp_dir().join("sfoglia-data-big.json");
+    let (text, nodes, deep_path) = sfoglia::data::big_json(50 * 1024 * 1024);
+    std::fs::write(&path, &text).unwrap();
+    drop(text);
+    let records = (nodes - 3) / 10;
+    let last_name = format!("record-{}", records - 1);
+    let (handle, _panel, view) = open_data(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tree().unwrap().len(), nodes);
+        assert_eq!(label(window, "data-summary"), format!("JSON, {nodes} nodes, 5 levels"));
+        assert_eq!(view.read(cx).visible_nodes(), &[0, 1, nodes - 1]);
+        assert_eq!(label(window, ("data-row", 1usize)), format!("1|records|array|{records} entries"));
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        window.input(&last_name, cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // count, note, score, ok, tags[2], tags[1], tags[0], tags, then the name
+        let name_node = nodes - 1 - 8;
+        assert_eq!(view.read(cx).matches(), &[name_node]);
+        assert_eq!(view.read(cx).selected_node(), Some(name_node));
+        assert_eq!(label(window, "data-path"), format!("$.records[{}].name", records - 1));
+        assert_eq!(label(window, "data-message"), "match 1 of 1");
+        let row = view.read(cx).visible_nodes().iter().position(|&n| n == name_node).expect("the match is a row");
+        assert!(row > 1000, "the match sits deep in the list: row {row}");
+        let top = view.read(cx).top_row();
+        let height = f32::from(window.find("data-tree").bounds().size.height);
+        let fitting = (height / 24.).floor() as usize;
+        assert!(top <= row && row < top + fitting, "row {row} is scrolled into view: top {top}, {fitting} rows fit");
+        assert_eq!(label(window, ("data-row", row)), format!("3|name|string|{last_name}|found"));
+        // The tag the parser test names is four nodes further down.
+        assert_eq!(view.read(cx).tree().unwrap().path(name_node + 4), deep_path);
+    })
+    .unwrap();
+    std::fs::remove_file(&path).ok();
 }

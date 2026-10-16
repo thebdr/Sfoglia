@@ -144,6 +144,20 @@ impl DataView {
         self.selected_node().map(|node| tree.path(node))
     }
 
+    /// The row at the top of the list: from the scroll offset and the row height the last
+    /// layout measured (the handle's own top-index helper reads bounds a uniform list never records).
+    pub fn top_row(&self) -> usize {
+        let state = self.scroll.0.borrow();
+        let rows = self.visible.len();
+        let Some(size) = state.last_item_size else { return 0 };
+        if rows == 0 {
+            return 0;
+        }
+        let row_height = f32::from(size.contents.height) / rows as f32;
+        let scrolled = -f32::from(state.base_handle.offset().y);
+        ((scrolled / row_height).round().max(0.) as usize).min(rows - 1)
+    }
+
     fn select_row(&mut self, row: usize, strategy: ScrollStrategy, cx: &mut Context<Self>) {
         if row < self.visible.len() {
             self.selected = Some(row);
@@ -402,10 +416,11 @@ impl DataView {
         self.text.as_ref().is_some_and(|text| text.read(cx).is_dirty())
     }
 
-    /// The row's three columns and depth, as the test support reads them.
-    fn row_label(tree: &Tree, node: usize) -> String {
+    /// The row's depth and three columns, and whether the search marked it, as the test support reads them.
+    fn row_label(tree: &Tree, node: usize, marked: bool) -> String {
         let n = &tree.nodes[node];
-        format!("{}|{}|{}|{}", n.depth, n.key, n.kind.label(), preview(&n.value))
+        let found = if marked { "|found" } else { "" };
+        format!("{}|{}|{}|{}{found}", n.depth, n.key, n.kind.label(), preview(&n.value))
     }
 }
 
@@ -507,7 +522,7 @@ impl Render for DataView {
                                         .id(("data-row", row))
                                         .test_support()
                                         .role(Role::Row)
-                                        .aria_label(Self::row_label(tree, node))
+                                        .aria_label(Self::row_label(tree, node, marked))
                                         .h(px(24.))
                                         .px_3()
                                         .gap_2()
@@ -516,6 +531,7 @@ impl Render for DataView {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             window.focus(&this.rows_focus, cx);
                                             this.select_row(row, ScrollStrategy::Top, cx);
+                                            this.toggle(node, cx);
                                         }))
                                         .child(div().w(px(16. * n.depth as f32)).flex_shrink_0())
                                         .child(
@@ -593,6 +609,7 @@ impl Render for DataView {
             .child(
                 div()
                     .id("data-tree")
+                    .test_support()
                     .key_context(TREE_CONTEXT)
                     .track_focus(&self.rows_focus)
                     .on_action(cx.listener(Self::on_select_up))

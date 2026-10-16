@@ -263,9 +263,7 @@ impl Tree {
         self.nodes
             .iter()
             .enumerate()
-            .filter(|(_, node)| {
-                node.key.to_lowercase().contains(&needle) || node.value.to_lowercase().contains(&needle)
-            })
+            .filter(|(_, node)| contains_ignoring_case(&node.key, &needle) || contains_ignoring_case(&node.value, &needle))
             .map(|(ix, _)| ix)
             .collect()
     }
@@ -273,6 +271,18 @@ impl Tree {
     /// One line about the tree for the status row.
     pub fn summary(&self) -> String {
         format!("{}, {} nodes, {} levels", self.format.label(), self.len(), self.levels())
+    }
+}
+
+/// Whether `text` contains the already lower-cased `needle`; ASCII text is compared in place.
+fn contains_ignoring_case(text: &str, needle: &str) -> bool {
+    if text.is_ascii() && needle.is_ascii() {
+        let text = text.as_bytes();
+        let needle = needle.as_bytes();
+        needle.len() <= text.len()
+            && text.windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
+    } else {
+        text.to_lowercase().contains(needle)
     }
 }
 
@@ -305,7 +315,19 @@ fn float_text(value: f64) -> String {
     format!("{value:?}")
 }
 
+/// The 1-based line and column of a byte offset.
+fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(text.len());
+    let before = &text[..offset];
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    (line, column)
+}
+
 // ---- JSON and JSON Lines: a serde seed that builds the arena while the parser runs ----
+
+/// The map key under which serde_json hands over a number's own text (`arbitrary_precision`).
+const JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
 /// Builds one value (and its subtree) straight into the arena, without an intermediate tree.
 struct Builder<'a> {
@@ -384,8 +406,20 @@ impl<'de, 'a> Visitor<'de> for Builder<'a> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let Builder { nodes, key, depth } = self;
+        let Some(first) = map.next_key::<String>()? else {
+            let ix = push(nodes, depth, key, Kind::Object, String::new());
+            close(nodes, ix, 0);
+            return Ok(());
+        };
+        // A number arrives as a one-entry map under serde_json's private key: keep its text.
+        if first == JSON_NUMBER_TOKEN {
+            let text: String = map.next_value()?;
+            push(nodes, depth, key, Kind::Number, text);
+            return Ok(());
+        }
         let ix = push(nodes, depth, key, Kind::Object, String::new());
-        let mut count = 0;
+        map.next_value_seed(Builder { nodes: &mut *nodes, key: first, depth: depth + 1 })?;
+        let mut count = 1;
         while let Some(key) = map.next_key::<String>()? {
             map.next_value_seed(Builder { nodes: &mut *nodes, key, depth: depth + 1 })?;
             count += 1;
@@ -438,60 +472,228 @@ fn parse_json_lines(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError>
     Ok(())
 }
 
-// ---- YAML: through serde into a JSON value, then a walk ----
+/// Check that `text` is one JSON value and nothing else, with the parser's own position.
+fn check_json(text: &str, line_offset: usize) -> Result<(), ParseError> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer)
+        .and_then(|_| deserializer.end())
+        .map_err(|e| json_error(e, line_offset))
+}
 
-fn walk_json_value(value: &serde_json::Value, nodes: &mut Vec<Node>, key: String, depth: u32) {
-    use serde_json::Value;
+/// Re-space valid JSON token by token: every string, number and literal keeps its own text
+/// (duplicate keys and long numbers included). `indent` is `Some` for the pretty form,
+/// `None` for one compact line.
+fn respace_json(text: &str, indent: Option<&str>) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut depth = 0usize;
+    let newline = |out: &mut String, depth: usize| {
+        if let Some(unit) = indent {
+            out.push('\n');
+            for _ in 0..depth {
+                out.push_str(unit);
+            }
+        }
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => break,
+                        _ => i += 1,
+                    }
+                }
+                i = (i + 1).min(bytes.len());
+                out.push_str(&text[start..i]);
+            }
+            open @ (b'{' | b'[') => {
+                out.push(open as char);
+                let close = if open == b'{' { b'}' } else { b']' };
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == close {
+                    out.push(close as char);
+                    i = j + 1;
+                } else {
+                    depth += 1;
+                    newline(&mut out, depth);
+                    i += 1;
+                }
+            }
+            close @ (b'}' | b']') => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(close as char);
+                i += 1;
+            }
+            b',' => {
+                out.push(',');
+                newline(&mut out, depth);
+                i += 1;
+            }
+            b':' => {
+                out.push(':');
+                if indent.is_some() {
+                    out.push(' ');
+                }
+                i += 1;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ => {
+                let start = i;
+                while i < bytes.len() && !b"{}[],:\"".contains(&bytes[i]) && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                out.push_str(&text[start..i]);
+            }
+        }
+    }
+    out
+}
+
+// ---- YAML: the document tree, with its typed keys ----
+
+use saphyr::{LoadableYamlNode as _, Scalar, Yaml};
+
+/// A scalar as the tree shows it: the kind and the text.
+fn yaml_scalar(scalar: &Scalar) -> (Kind, String) {
+    match scalar {
+        Scalar::Null => (Kind::Null, "null".to_string()),
+        Scalar::Boolean(b) => (Kind::Boolean, b.to_string()),
+        Scalar::Integer(i) => (Kind::Number, i.to_string()),
+        Scalar::FloatingPoint(f) => (Kind::Number, yaml_float_text(f.into_inner())),
+        Scalar::String(s) => (Kind::String, s.to_string()),
+    }
+}
+
+/// YAML's own spelling of a float: `.inf`, `-.inf` and `.nan` for the non-finite ones.
+fn yaml_float_text(value: f64) -> String {
+    if value.is_nan() {
+        ".nan".to_string()
+    } else if value.is_infinite() {
+        if value > 0. { ".inf".to_string() } else { "-.inf".to_string() }
+    } else {
+        float_text(value)
+    }
+}
+
+/// The text of a mapping key: its scalar, or its whole form for a complex key.
+fn yaml_key_text(key: &Yaml) -> String {
+    match key {
+        Yaml::Value(scalar) => yaml_scalar(scalar).1,
+        Yaml::Representation(text, _, _) => text.to_string(),
+        Yaml::Tagged(_, inner) => yaml_key_text(inner),
+        other => {
+            let mut out = String::new();
+            let _ = saphyr::YamlEmitter::new(&mut out).dump(other);
+            out.trim_start_matches("---").trim().replace('\n', " ")
+        }
+    }
+}
+
+fn walk_yaml(value: &Yaml, nodes: &mut Vec<Node>, key: String, depth: u32) {
     match value {
-        Value::Null => {
+        Yaml::Value(scalar) => {
+            let (kind, text) = yaml_scalar(scalar);
+            push(nodes, depth, key, kind, text);
+        }
+        Yaml::Representation(text, _, _) => {
+            push(nodes, depth, key, Kind::String, text.to_string());
+        }
+        Yaml::Tagged(_, inner) => walk_yaml(inner, nodes, key, depth),
+        Yaml::Alias(_) | Yaml::BadValue => {
             push(nodes, depth, key, Kind::Null, "null".to_string());
         }
-        Value::Bool(b) => {
-            push(nodes, depth, key, Kind::Boolean, b.to_string());
-        }
-        Value::Number(n) => {
-            push(nodes, depth, key, Kind::Number, n.to_string());
-        }
-        Value::String(s) => {
-            push(nodes, depth, key, Kind::String, s.clone());
-        }
-        Value::Array(items) => {
+        Yaml::Sequence(items) => {
             let ix = push(nodes, depth, key, Kind::Array, String::new());
             for (i, item) in items.iter().enumerate() {
-                walk_json_value(item, nodes, i.to_string(), depth + 1);
+                walk_yaml(item, nodes, i.to_string(), depth + 1);
             }
             close(nodes, ix, items.len());
         }
-        Value::Object(map) => {
+        Yaml::Mapping(map) => {
             let ix = push(nodes, depth, key, Kind::Object, String::new());
-            for (k, v) in map {
-                walk_json_value(v, nodes, k.clone(), depth + 1);
+            for (k, v) in map.iter() {
+                walk_yaml(v, nodes, yaml_key_text(k), depth + 1);
             }
             close(nodes, ix, map.len());
         }
     }
 }
 
+fn load_yaml(text: &str) -> Result<Vec<Yaml<'_>>, ParseError> {
+    Yaml::load_from_str(text).map_err(|error| {
+        let marker = error.marker();
+        ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
+    })
+}
+
+/// One document is the root `$`; a stream of several is a root `$` with one entry each.
 fn parse_yaml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
-    let value: serde_json::Value = serde_saphyr::from_str(text).map_err(|error| {
-        let (line, column) = error
-            .location()
-            .map(|at| (at.line() as usize, at.column() as usize))
-            .unwrap_or((1, 1));
-        ParseError { line: line.max(1), column: column.max(1), message: yaml_message(&error.to_string()) }
-    })?;
-    walk_json_value(&value, nodes, "$".to_string(), 0);
+    let documents = load_yaml(text)?;
+    match documents.as_slice() {
+        [] => {
+            push(nodes, 0, "$".to_string(), Kind::Null, "null".to_string());
+        }
+        [document] => walk_yaml(document, nodes, "$".to_string(), 0),
+        documents => {
+            let ix = push(nodes, 0, "$".to_string(), Kind::Array, String::new());
+            for (i, document) in documents.iter().enumerate() {
+                walk_yaml(document, nodes, i.to_string(), 1);
+            }
+            close(nodes, ix, documents.len());
+        }
+    }
     Ok(())
 }
 
-/// The first line of a YAML error, without the snippet the crate appends.
-fn yaml_message(text: &str) -> String {
-    let first = text.lines().next().unwrap_or(text).trim();
-    let first = first.strip_prefix("error: ").unwrap_or(first);
-    match first.find(" at line ") {
-        Some(at) => first[..at].trim_end_matches(',').to_string(),
-        None => first.to_string(),
+/// The emitter writes non-finite floats as Rust does; give it their YAML spelling instead.
+fn yaml_for_emit(value: &Yaml<'_>) -> Yaml<'static> {
+    match value {
+        Yaml::Value(Scalar::FloatingPoint(f)) if !f.is_finite() => {
+            Yaml::Representation(yaml_float_text(f.into_inner()).into(), saphyr::ScalarStyle::Plain, None)
+        }
+        Yaml::Value(scalar) => Yaml::Value(match scalar {
+            Scalar::Null => Scalar::Null,
+            Scalar::Boolean(b) => Scalar::Boolean(*b),
+            Scalar::Integer(i) => Scalar::Integer(*i),
+            Scalar::FloatingPoint(f) => Scalar::FloatingPoint(*f),
+            Scalar::String(s) => Scalar::String(s.to_string().into()),
+        }),
+        Yaml::Representation(text, style, tag) => {
+            Yaml::Representation(text.to_string().into(), *style, tag.as_ref().map(|t| std::borrow::Cow::Owned(t.clone().into_owned())))
+        }
+        Yaml::Tagged(tag, inner) => Yaml::Tagged(std::borrow::Cow::Owned(tag.clone().into_owned()), Box::new(yaml_for_emit(inner))),
+        Yaml::Alias(a) => Yaml::Alias(*a),
+        Yaml::BadValue => Yaml::BadValue,
+        Yaml::Sequence(items) => Yaml::Sequence(items.iter().map(yaml_for_emit).collect()),
+        Yaml::Mapping(map) => Yaml::Mapping(map.iter().map(|(k, v)| (yaml_for_emit(k), yaml_for_emit(v))).collect()),
     }
+}
+
+fn pretty_yaml(text: &str) -> Result<String, ParseError> {
+    let documents = load_yaml(text)?;
+    let mut out = String::new();
+    for (i, document) in documents.iter().enumerate() {
+        let mut dumped = String::new();
+        saphyr::YamlEmitter::new(&mut dumped)
+            .dump(&yaml_for_emit(document))
+            .map_err(|e| ParseError { line: 1, column: 1, message: e.to_string() })?;
+        // The emitter opens every document with `---`; the first keeps it only when the file had it.
+        if i == 0 && !text.trim_start().starts_with("---") {
+            dumped = dumped.strip_prefix("---\n").unwrap_or(&dumped).to_string();
+        }
+        out.push_str(dumped.trim_end_matches('\n'));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 // ---- TOML: the typed value tree, in file order ----
@@ -531,43 +733,50 @@ fn walk_toml_value(value: &toml::Value, nodes: &mut Vec<Node>, key: String, dept
     }
 }
 
-fn parse_toml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
-    let table: toml::Table = text.parse().map_err(|error: toml::de::Error| {
+fn load_toml(text: &str) -> Result<toml::Table, ParseError> {
+    text.parse().map_err(|error: toml::de::Error| {
         let (line, column) = error.span().map(|span| line_column(text, span.start)).unwrap_or((1, 1));
         ParseError { line, column, message: error.message().to_string() }
-    })?;
+    })
+}
+
+fn parse_toml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
+    let table = load_toml(text)?;
     walk_toml_value(&toml::Value::Table(table), nodes, "$".to_string(), 0);
     Ok(())
 }
 
-/// The 1-based line and column of a byte offset.
-fn line_column(text: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(text.len());
-    let before = &text[..offset];
-    let line = before.matches('\n').count() + 1;
-    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    (line, column)
+// ---- XML: elements, attributes, text, comments and processing instructions ----
+
+/// The name as written: with its prefix when the element or attribute has one.
+fn xml_name(node: roxmltree::Node, namespace: Option<&str>, local: &str) -> String {
+    match namespace.and_then(|uri| node.lookup_prefix(uri)) {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}:{local}"),
+        _ => local.to_string(),
+    }
 }
 
-// ---- XML: elements, attributes, text, comments and processing instructions ----
+fn xml_children<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Vec<roxmltree::Node<'a, 'input>> {
+    node.children()
+        .filter(|child| !(child.is_text() && child.text().is_some_and(|t| t.trim().is_empty())))
+        .collect()
+}
 
 fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
     use roxmltree::NodeType;
     match node.node_type() {
         NodeType::Root => {}
         NodeType::Element => {
-            let ix = push(nodes, depth, node.tag_name().name().to_string(), Kind::Element, String::new());
+            let name = xml_name(node, node.tag_name().namespace(), node.tag_name().name());
+            let ix = push(nodes, depth, name, Kind::Element, String::new());
             let mut count = 0;
             for attribute in node.attributes() {
-                push(nodes, depth + 1, format!("@{}", attribute.name()), Kind::Attribute, attribute.value().to_string());
+                let name = xml_name(node, attribute.namespace(), attribute.name());
+                push(nodes, depth + 1, format!("@{name}"), Kind::Attribute, attribute.value().to_string());
                 count += 1;
             }
-            let children: Vec<roxmltree::Node> = node
-                .children()
-                .filter(|child| !(child.is_text() && child.text().is_some_and(|t| t.trim().is_empty())))
-                .collect();
-            let only_text = children.len() == 1 && children[0].is_text();
-            if only_text {
+            let children = xml_children(node);
+            if children.len() == 1 && children[0].is_text() {
                 let text = children[0].text().unwrap_or_default().trim().to_string();
                 let end = nodes.len();
                 nodes[ix].end = end;
@@ -599,11 +808,16 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
     }
 }
 
-fn parse_xml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
-    let document = roxmltree::Document::parse(text).map_err(|error| {
+fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
+    let options = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    roxmltree::Document::parse_with_options(text, options).map_err(|error| {
         let at = error.pos();
         ParseError { line: at.row as usize, column: at.col as usize, message: xml_message(&error.to_string()) }
-    })?;
+    })
+}
+
+fn parse_xml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
+    let document = load_xml(text)?;
     for child in document.root().children() {
         walk_xml(child, nodes, 0);
     }
@@ -664,8 +878,8 @@ fn parse_ini(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
 pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
     match format {
         Format::Json => {
-            let value: serde_json::Value = serde_json::from_str(text).map_err(|e| json_error(e, 0))?;
-            let mut out = serde_json::to_string_pretty(&value).map_err(|e| json_error(e, 0))?;
+            check_json(text, 0)?;
+            let mut out = respace_json(text, Some("  "));
             out.push('\n');
             Ok(out)
         }
@@ -675,42 +889,44 @@ pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let value: serde_json::Value = serde_json::from_str(line).map_err(|e| json_error(e, line_ix))?;
-                out.push_str(&serde_json::to_string(&value).map_err(|e| json_error(e, line_ix))?);
+                check_json(line, line_ix)?;
+                out.push_str(&respace_json(line, None));
                 out.push('\n');
             }
             Ok(out)
         }
         Format::Xml => pretty_xml(text),
-        Format::Yaml => {
-            let value: serde_json::Value = serde_saphyr::from_str(text).map_err(|error| {
-                let (line, column) =
-                    error.location().map(|at| (at.line() as usize, at.column() as usize)).unwrap_or((1, 1));
-                ParseError { line: line.max(1), column: column.max(1), message: yaml_message(&error.to_string()) }
-            })?;
-            serde_saphyr::to_string(&value)
-                .map_err(|e| ParseError { line: 1, column: 1, message: e.to_string() })
-        }
+        Format::Yaml => pretty_yaml(text),
         Format::Toml => {
-            let table: toml::Table = text.parse().map_err(|error: toml::de::Error| {
-                let (line, column) = error.span().map(|span| line_column(text, span.start)).unwrap_or((1, 1));
-                ParseError { line, column, message: error.message().to_string() }
-            })?;
+            let table = load_toml(text)?;
             toml::to_string_pretty(&table).map_err(|e| ParseError { line: 1, column: 1, message: e.to_string() })
         }
         Format::Ini => pretty_ini(text),
     }
 }
 
+/// The `<!DOCTYPE ...>` of `text`, internal subset included, as written.
+fn xml_doctype(text: &str) -> Option<&str> {
+    let start = text.find("<!DOCTYPE")?;
+    let rest = &text[start..];
+    let end = match (rest.find('['), rest.find('>')) {
+        (Some(bracket), Some(close)) if bracket < close => rest.find("]>").map(|e| e + 2)?,
+        (_, Some(close)) => close + 1,
+        _ => return None,
+    };
+    Some(&rest[..end])
+}
+
 fn pretty_xml(text: &str) -> Result<String, ParseError> {
-    let document = roxmltree::Document::parse(text).map_err(|error| {
-        let at = error.pos();
-        ParseError { line: at.row as usize, column: at.col as usize, message: xml_message(&error.to_string()) }
-    })?;
+    let document = load_xml(text)?;
     let mut out = String::new();
     if text.trim_start().starts_with("<?xml") {
         let end = text.find("?>").map_or(0, |e| e + 2);
         out.push_str(text[..end].trim_start());
+        out.push('\n');
+    }
+    if let Some(doctype) = xml_doctype(text) {
+        out.push_str(doctype);
         out.push('\n');
     }
     for child in document.root().children() {
@@ -733,34 +949,52 @@ fn escape_xml(text: &str, attribute: bool) -> String {
     out
 }
 
+/// The namespace declarations this element makes: those in scope here and not on its parent.
+fn xml_declarations(node: roxmltree::Node) -> Vec<(Option<String>, String)> {
+    let inherited: Vec<(Option<&str>, &str)> = node
+        .parent_element()
+        .map(|parent| parent.namespaces().map(|ns| (ns.name(), ns.uri())).collect())
+        .unwrap_or_default();
+    node.namespaces()
+        .filter(|ns| ns.name() != Some("xml"))
+        .filter(|ns| !inherited.contains(&(ns.name(), ns.uri())))
+        .map(|ns| (ns.name().map(str::to_string), ns.uri().to_string()))
+        .collect()
+}
+
 fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
     use roxmltree::NodeType;
     let indent = "  ".repeat(depth);
     match node.node_type() {
         NodeType::Root => {}
         NodeType::Element => {
+            let name = xml_name(node, node.tag_name().namespace(), node.tag_name().name());
             out.push_str(&indent);
             out.push('<');
-            out.push_str(node.tag_name().name());
-            for attribute in node.attributes() {
-                out.push_str(&format!(" {}=\"{}\"", attribute.name(), escape_xml(attribute.value(), true)));
+            out.push_str(&name);
+            for (prefix, uri) in xml_declarations(node) {
+                match prefix {
+                    Some(prefix) => out.push_str(&format!(" xmlns:{prefix}=\"{}\"", escape_xml(&uri, true))),
+                    None => out.push_str(&format!(" xmlns=\"{}\"", escape_xml(&uri, true))),
+                }
             }
-            let children: Vec<roxmltree::Node> = node
-                .children()
-                .filter(|child| !(child.is_text() && child.text().is_some_and(|t| t.trim().is_empty())))
-                .collect();
+            for attribute in node.attributes() {
+                let attribute_name = xml_name(node, attribute.namespace(), attribute.name());
+                out.push_str(&format!(" {attribute_name}=\"{}\"", escape_xml(attribute.value(), true)));
+            }
+            let children = xml_children(node);
             if children.is_empty() {
                 out.push_str("/>\n");
             } else if children.len() == 1 && children[0].is_text() {
                 out.push('>');
                 out.push_str(&escape_xml(children[0].text().unwrap_or_default().trim(), false));
-                out.push_str(&format!("</{}>\n", node.tag_name().name()));
+                out.push_str(&format!("</{name}>\n"));
             } else {
                 out.push_str(">\n");
                 for child in children {
                     write_xml(child, depth + 1, out);
                 }
-                out.push_str(&format!("{indent}</{}>\n", node.tag_name().name()));
+                out.push_str(&format!("{indent}</{name}>\n"));
             }
         }
         NodeType::Text => {
@@ -789,7 +1023,7 @@ fn pretty_ini(text: &str) -> Result<String, ParseError> {
     let mut nodes = Vec::new();
     parse_ini(text, &mut nodes)?;
     let mut out = String::new();
-    for (line_ix, raw) in text.lines().enumerate() {
+    for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() {
             continue;
@@ -805,11 +1039,32 @@ fn pretty_ini(text: &str) -> Result<String, ParseError> {
         } else {
             let at = line.find(['=', ':']).unwrap_or(line.len());
             let (key, value) = (line[..at].trim(), line[at + 1..].trim());
-            let _ = line_ix;
             out.push_str(&format!("{key} = {value}\n"));
         }
     }
     Ok(out)
+}
+
+/// A JSON document of about `target` bytes for the tests: `records`, each with ten nodes,
+/// and a count. Gives the text, the node count and the path of the last record's last tag.
+pub fn big_json(target: usize) -> (String, usize, String) {
+    let mut text = String::with_capacity(target + 1024);
+    text.push_str("{\"records\": [");
+    let note = "x".repeat(300);
+    let mut records = 0;
+    while text.len() < target {
+        if records > 0 {
+            text.push(',');
+        }
+        text.push_str(&format!(
+            "{{\"id\": {records}, \"name\": \"record-{records}\", \"tags\": [\"alpha\", \"beta\", \"gamma\"], \"ok\": true, \"score\": {records}.5, \"note\": \"{note}\"}}"
+        ));
+        records += 1;
+    }
+    text.push_str(&format!("], \"count\": {records}}}"));
+    // root, records, count, and ten nodes per record (object, id, name, tags, 3 tags, ok, score, note)
+    let nodes = 3 + records * 10;
+    (text, nodes, format!("$.records[{}].tags[2]", records - 1))
 }
 
 #[cfg(test)]
@@ -877,15 +1132,20 @@ mod tests {
         assert_eq!(tree.roots(), vec![0]);
         assert_eq!(tree.levels(), 6);
         assert_eq!(tree.summary(), "JSON, 15 nodes, 6 levels");
-        // Scalars at the root, and floats that print as floats.
+        // Scalars at the root; numbers keep the file's own digits, however long.
         let scalar = Tree::parse(Format::Json, "42").unwrap();
         assert_eq!(rows(&scalar), vec![(0, "$", "number", "42")]);
-        let float = Tree::parse(Format::Json, "[1.0, 2.5e10, -0.0]").unwrap();
-        assert_eq!(float.nodes[1].value, "1.0");
-        assert_eq!(float.nodes[2].value, "25000000000.0");
-        assert_eq!(float.nodes[3].value, "-0.0");
+        let numbers = Tree::parse(Format::Json, "[1.0, 2.5e10, -0.0, 12345678901234567890123, 0.1000]").unwrap();
+        assert_eq!(numbers.nodes[1].value, "1.0");
+        assert_eq!(numbers.nodes[2].value, "2.5e+10", "the exponent gets its sign, the digits stay");
+        assert_eq!(numbers.nodes[3].value, "-0.0");
+        assert_eq!(numbers.nodes[4].value, "12345678901234567890123");
+        assert_eq!(numbers.nodes[5].value, "0.1000");
         let empty = Tree::parse(Format::Json, r#"{"a": [], "b": {}}"#).unwrap();
         assert_eq!(rows(&empty), vec![(0, "$", "object", "2 entries"), (1, "a", "array", "0 entries"), (1, "b", "object", "0 entries")]);
+        // Duplicate keys are two nodes, as the file has them.
+        let twice = Tree::parse(Format::Json, r#"{"a": 1, "a": 2}"#).unwrap();
+        assert_eq!(rows(&twice), vec![(0, "$", "object", "2 entries"), (1, "a", "number", "1"), (1, "a", "number", "2")]);
     }
 
     #[test]
@@ -911,6 +1171,9 @@ mod tests {
         assert_eq!(error.message, "expected value");
         let empty = Tree::parse(Format::JsonLines, "\n\n").unwrap();
         assert_eq!(rows(&empty), vec![(0, "$", "array", "0 entries")]);
+        // Records may be scalars or arrays too.
+        let mixed = Tree::parse(Format::JsonLines, "1\n[true]\n\"s\"\n").unwrap();
+        assert_eq!(rows(&mixed), vec![(0, "$", "array", "3 entries"), (1, "0", "number", "1"), (1, "1", "array", "1 entry"), (2, "0", "boolean", "true"), (1, "2", "string", "s")]);
     }
 
     const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -952,6 +1215,7 @@ mod tests {
                 (1, "empty", "element", "0 entries"),
             ]
         );
+        assert_eq!(tree.nodes[6].end, 8, "a text-only element with attributes ends after them");
         assert_eq!(tree.roots(), vec![0, 1]);
         assert_eq!(tree.path(0), "/comment()");
         assert_eq!(tree.path(1), "/catalogue");
@@ -962,6 +1226,22 @@ mod tests {
         assert_eq!(tree.path(14), "/catalogue/note/text()[2]");
         assert_eq!(tree.path(15), "/catalogue/processing-instruction()");
         assert_eq!(tree.path(16), "/catalogue/empty");
+        // A DOCTYPE is allowed, and prefixed names keep their prefixes.
+        let typed = Tree::parse(Format::Xml, "<?xml version=\"1.0\"?>\n<!DOCTYPE note SYSTEM \"note.dtd\">\n<note><to>x</to></note>\n").unwrap();
+        assert_eq!(rows(&typed), vec![(0, "note", "element", "1 entry"), (1, "to", "element", "x")]);
+        let spaced = Tree::parse(Format::Xml, "<a:r xmlns:a=\"urn:a\" xmlns:b=\"urn:b\" xmlns=\"urn:d\"><a:x a:id=\"1\" b:id=\"2\" xml:lang=\"en\"/><y/></a:r>").unwrap();
+        assert_eq!(
+            rows(&spaced),
+            vec![
+                (0, "a:r", "element", "2 entries"),
+                (1, "a:x", "element", "3 entries"),
+                (2, "@a:id", "attribute", "1"),
+                (2, "@b:id", "attribute", "2"),
+                (2, "@xml:lang", "attribute", "en"),
+                (1, "y", "element", "0 entries"),
+            ]
+        );
+        assert_eq!(spaced.path(3), "/a:r/a:x/@b:id");
     }
 
     #[test]
@@ -982,6 +1262,28 @@ mod tests {
             ]
         );
         assert_eq!(tree.path(4), "$.alpha[1]");
+        // Typed keys, non-finite floats, anchors and a stream of documents.
+        let typed = Tree::parse(Format::Yaml, "200: ok\ntrue: yes\nbase: &b\n  k: 1\ncopy: *b\ninf: .inf\nnan: .nan\n").unwrap();
+        assert_eq!(
+            rows(&typed),
+            vec![
+                (0, "$", "object", "6 entries"),
+                (1, "200", "string", "ok"),
+                (1, "true", "string", "yes"),
+                (1, "base", "object", "1 entry"),
+                (2, "k", "number", "1"),
+                (1, "copy", "object", "1 entry"),
+                (2, "k", "number", "1"),
+                (1, "inf", "number", ".inf"),
+                (1, "nan", "number", ".nan"),
+            ]
+        );
+        assert_eq!(typed.path(1), "$[\"200\"]");
+        let stream = Tree::parse(Format::Yaml, "a: 1\n---\nb: 2\n").unwrap();
+        assert_eq!(rows(&stream), vec![(0, "$", "array", "2 entries"), (1, "0", "object", "1 entry"), (2, "a", "number", "1"), (1, "1", "object", "1 entry"), (2, "b", "number", "2")]);
+        assert_eq!(stream.path(4), "$[1].b");
+        let scalar = Tree::parse(Format::Yaml, "just text\n").unwrap();
+        assert_eq!(rows(&scalar), vec![(0, "$", "string", "just text")]);
         let toml = "zeta = 1\nalpha = [\"x\", 2.5, true]\nwhen = 2026-10-17T08:00:00Z\n\n[server]\nhost = \"localhost\"\nport = 8080\n\n[[items]]\nname = \"a\"\n\n[[items]]\nname = \"b\"\n";
         let tree = Tree::parse(Format::Toml, toml).unwrap();
         assert_eq!(
@@ -1006,28 +1308,31 @@ mod tests {
         );
         assert_eq!(tree.path(14), "$.items[1].name");
         assert_eq!(tree.path(9), "$.server.port");
+        let inline = Tree::parse(Format::Toml, "point = { x = 1, y = 2 }\n").unwrap();
+        assert_eq!(rows(&inline), vec![(0, "$", "table", "1 entry"), (1, "point", "table", "2 entries"), (2, "x", "integer", "1"), (2, "y", "integer", "2")]);
     }
 
     #[test]
     fn ini_sections_keys_and_the_bad_line() {
-        let ini = "; a comment\nname = top\n\n[server]\nhost = localhost\nport: 8080\n# another\n\n[empty]\n\n[paths]\nroot = C:\\data\n";
+        let ini = "; a comment\nname = top\n\n[server]\nhost = localhost\nport: 8080\nurl = http://x/y?a=b\n# another\n\n[empty]\n\n[paths]\nroot = C:\\data\n";
         let tree = Tree::parse(Format::Ini, ini).unwrap();
         assert_eq!(
             rows(&tree),
             vec![
                 (0, "name", "key", "top"),
-                (0, "server", "section", "2 entries"),
+                (0, "server", "section", "3 entries"),
                 (1, "host", "key", "localhost"),
                 (1, "port", "key", "8080"),
+                (1, "url", "key", "http://x/y?a=b"),
                 (0, "empty", "section", "0 entries"),
                 (0, "paths", "section", "1 entry"),
                 (1, "root", "key", "C:\\data"),
             ]
         );
-        assert_eq!(tree.roots(), vec![0, 1, 4, 5]);
+        assert_eq!(tree.roots(), vec![0, 1, 5, 6]);
         assert_eq!(tree.path(0), "name");
         assert_eq!(tree.path(3), "server.port");
-        assert_eq!(tree.path(6), "paths.root");
+        assert_eq!(tree.path(7), "paths.root");
         let error = Tree::parse(Format::Ini, "[a]\nkey = 1\nnonsense\n").unwrap_err();
         assert_eq!((error.line, error.column), (3, 1));
         assert_eq!(error.message, "expected `key = value` or `[section]`");
@@ -1082,25 +1387,51 @@ mod tests {
         let xml = Tree::parse(Format::Xml, XML).unwrap();
         assert_eq!(xml.search("B2"), vec![9]);
         assert_eq!(xml.search("@"), vec![2, 4, 7, 9]);
+        let accented = Tree::parse(Format::Json, r#"{"Città": "ÉCOLE"}"#).unwrap();
+        assert_eq!(accented.search("città"), vec![1]);
+        assert_eq!(accented.search("école"), vec![1]);
     }
 
     #[test]
     fn pretty_print_reformats_every_format_and_keeps_its_tree() {
-        let json = pretty(Format::Json, "{\"b\":[1,{\"c\":null}],\"a\":\"x\"}").unwrap();
+        let compact = "{\"b\":[1,{\"c\":null}],\"a\":\"x\"}";
+        let json = pretty(Format::Json, compact).unwrap();
         assert_eq!(json, "{\n  \"b\": [\n    1,\n    {\n      \"c\": null\n    }\n  ],\n  \"a\": \"x\"\n}\n");
-        assert_eq!(Tree::parse(Format::Json, &json).unwrap().nodes, Tree::parse(Format::Json, "{\"b\":[1,{\"c\":null}],\"a\":\"x\"}").unwrap().nodes);
-        let lines = pretty(Format::JsonLines, "{ \"id\" : 1 , \"t\":[ ] }\n\n  {\"id\":2}\n").unwrap();
-        assert_eq!(lines, "{\"id\":1,\"t\":[]}\n{\"id\":2}\n");
+        assert_eq!(Tree::parse(Format::Json, &json).unwrap().nodes, Tree::parse(Format::Json, compact).unwrap().nodes);
+        // Duplicate keys, long numbers, escapes and empty containers come through untouched.
+        let tricky = "{\"a\" : 1,\"a\":2, \"big\":12345678901234567890123,\"s\":\"q\\\"{}[],:\", \"e\":{ } ,\"f\":[ ]}";
+        let pretty_tricky = pretty(Format::Json, tricky).unwrap();
+        assert_eq!(
+            pretty_tricky,
+            "{\n  \"a\": 1,\n  \"a\": 2,\n  \"big\": 12345678901234567890123,\n  \"s\": \"q\\\"{}[],:\",\n  \"e\": {},\n  \"f\": []\n}\n"
+        );
+        assert_eq!(Tree::parse(Format::Json, &pretty_tricky).unwrap().nodes, Tree::parse(Format::Json, tricky).unwrap().nodes);
+        assert_eq!(pretty(Format::Json, "  [ ]\n").unwrap(), "[]\n");
+        let lines = pretty(Format::JsonLines, "{ \"id\" : 1 , \"t\":[ ] }\n\n  {\"id\":2, \"id\":3}\n").unwrap();
+        assert_eq!(lines, "{\"id\":1,\"t\":[]}\n{\"id\":2,\"id\":3}\n");
         let xml = pretty(Format::Xml, XML).unwrap();
         assert_eq!(
             xml,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- the catalogue -->\n<catalogue year=\"2026\">\n  <book id=\"b1\">\n    <title>Leafing</title>\n    <price currency=\"EUR\">12.50</price>\n  </book>\n  <book id=\"b2\">\n    <title>Pages &amp; Bytes</title>\n  </book>\n  <note>\n    mixed\n    <b>content</b>\n    here\n  </note>\n  <?render fast?>\n  <empty/>\n</catalogue>\n"
         );
         assert_eq!(Tree::parse(Format::Xml, &xml).unwrap().nodes, Tree::parse(Format::Xml, XML).unwrap().nodes);
-        let yaml_in = "zeta: 1\nalpha: [x, 2.5]\nmid:   text\n";
+        // A DOCTYPE and namespace declarations are written out, so the pretty form is still well-formed.
+        let typed = "<?xml version=\"1.0\"?><!DOCTYPE note [<!ENTITY e \"x\">]><note>&e;</note>";
+        assert_eq!(pretty(Format::Xml, typed).unwrap(), "<?xml version=\"1.0\"?>\n<!DOCTYPE note [<!ENTITY e \"x\">]>\n<note>x</note>\n");
+        let spaced = "<a:r xmlns:a=\"urn:a\" xmlns=\"urn:d\"><a:x a:id=\"1\" xml:lang=\"en\"/><y xmlns:b=\"urn:b\" b:k=\"v\"/></a:r>";
+        let pretty_spaced = pretty(Format::Xml, spaced).unwrap();
+        assert_eq!(
+            pretty_spaced,
+            "<a:r xmlns:a=\"urn:a\" xmlns=\"urn:d\">\n  <a:x a:id=\"1\" xml:lang=\"en\"/>\n  <y xmlns:b=\"urn:b\" b:k=\"v\"/>\n</a:r>\n"
+        );
+        assert_eq!(Tree::parse(Format::Xml, &pretty_spaced).unwrap().nodes, Tree::parse(Format::Xml, spaced).unwrap().nodes);
+        let yaml_in = "zeta: 1\nalpha: [x, 2.5]\n200:   ok\ntrue: yes\ninf: .inf\n";
         let yaml = pretty(Format::Yaml, yaml_in).unwrap();
+        // The emitter quotes what would read as another type (`yes`, `inf`); the data is the same.
+        assert_eq!(yaml, "zeta: 1\nalpha:\n  - x\n  - 2.5\n200: ok\ntrue: \"yes\"\n\"inf\": .inf\n");
         assert_eq!(Tree::parse(Format::Yaml, &yaml).unwrap().nodes, Tree::parse(Format::Yaml, yaml_in).unwrap().nodes);
-        assert!(yaml.starts_with("zeta: 1\nalpha:\n"), "{yaml}");
+        let stream = pretty(Format::Yaml, "---\na: 1\n---\nb: [1,2]\n").unwrap();
+        assert_eq!(stream, "---\na: 1\n---\nb:\n  - 1\n  - 2\n");
         let toml_in = "zeta=1\n[server]\nhost=\"h\"\n";
         let toml = pretty(Format::Toml, toml_in).unwrap();
         assert_eq!(toml, "zeta = 1\n\n[server]\nhost = \"h\"\n");
@@ -1112,6 +1443,8 @@ mod tests {
         // A file that does not parse is refused with its position, not reformatted.
         let error = pretty(Format::Json, "{\"a\": }").unwrap_err();
         assert_eq!((error.line, error.column), (1, 7));
+        let error = pretty(Format::JsonLines, "{\"a\": 1}\n{\"a\": 1} x\n").unwrap_err();
+        assert_eq!((error.line, error.column), (2, 10));
     }
 
     #[test]
@@ -1131,31 +1464,15 @@ mod tests {
         assert!(toml.column >= 1 && !toml.message.is_empty(), "{toml}");
         let ini = Tree::parse(Format::Ini, "[a]\nb = 1\n\nbroken line\n").unwrap_err();
         assert_eq!((ini.line, ini.column), (4, 1));
-    }
-
-    /// A JSON document of about `target` bytes: `records`, each with ten nodes, and a count.
-    pub(crate) fn big_json(target: usize) -> (String, usize, String) {
-        let mut text = String::with_capacity(target + 1024);
-        text.push_str("{\"records\": [");
-        let note = "x".repeat(300);
-        let mut records = 0;
-        while text.len() < target {
-            if records > 0 {
-                text.push(',');
-            }
-            text.push_str(&format!(
-                "{{\"id\": {records}, \"name\": \"record-{records}\", \"tags\": [\"alpha\", \"beta\", \"gamma\"], \"ok\": true, \"score\": {records}.5, \"note\": \"{note}\"}}"
-            ));
-            records += 1;
-        }
-        text.push_str(&format!("], \"count\": {records}}}"));
-        // root, records, count, and ten nodes per record (object, id, name, tags, 3 tags, ok, score, note)
-        let nodes = 3 + records * 10;
-        (text, nodes, format!("$.records[{}].tags[2]", records - 1))
+        // CRLF endings count lines the same way.
+        let crlf = Tree::parse(Format::Json, "{\r\n  \"a\": 1,\r\n  \"b\": [1, 2,\r\n}\r\n").unwrap_err();
+        assert_eq!((crlf.line, crlf.column), (4, 1));
+        let crlf_toml = Tree::parse(Format::Toml, "a = 1\r\n[server\r\nhost = 1\r\n").unwrap_err();
+        assert_eq!(crlf_toml.line, 2, "{crlf_toml}");
     }
 
     #[test]
-    fn a_50_mb_json_opens_with_every_node_and_a_deep_path() {
+    fn a_50_mb_json_parses_with_every_node_and_a_deep_path() {
         let (text, nodes, deep_path) = big_json(50 * 1024 * 1024);
         assert!(text.len() >= 50 * 1024 * 1024);
         let tree = Tree::parse(Format::Json, &text).unwrap();
