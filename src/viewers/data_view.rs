@@ -3,14 +3,15 @@
 //! path, and the raw text in the text viewer one chord away.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Position};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, Role,
-    ScrollStrategy, Subscription, TestSupportExt, UniformListScrollHandle, Window, actions,
+    ScrollStrategy, Subscription, Task, TestSupportExt, UniformListScrollHandle, Window, actions,
     div, px, uniform_list,
 };
 
@@ -56,7 +57,13 @@ pub struct DataView {
     raw_shown: bool,
     status: String,
     scroll: UniformListScrollHandle,
+    /// Another writer noticed while the text viewer does not exist yet; once it exists, it watches
+    /// the disk itself (C-008).
+    disk_changed: bool,
+    /// The text viewer's last message shown in the status row, so a new one shows once.
+    seen_text_message: Option<String>,
     _subscriptions: Vec<Subscription>,
+    _watch: Task<()>,
 }
 
 impl DataView {
@@ -72,6 +79,14 @@ impl DataView {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 let text = state.read(cx).value().to_string();
                 this.find_next(&text, cx);
+            }
+        });
+        let watch = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |this, cx| this.check_disk(cx)).is_err() {
+                    break;
+                }
             }
         });
         let mut view = Self {
@@ -92,7 +107,10 @@ impl DataView {
             raw_shown: false,
             status: String::new(),
             scroll: UniformListScrollHandle::new(),
+            disk_changed: false,
+            seen_text_message: None,
             _subscriptions: vec![on_search],
+            _watch: watch,
         };
         view.reset_rows();
         if let Err(error) = &view.tree {
@@ -213,6 +231,60 @@ impl DataView {
             self.select_row(row, ScrollStrategy::Center, cx);
         }
         self.status = format!("match {} of {}", position + 1, self.matches.len());
+        cx.notify();
+    }
+
+    /// Until the text viewer exists and watches the disk itself: notice another writer.
+    fn check_disk(&mut self, cx: &mut Context<Self>) {
+        if self.text.is_some() || self.disk_changed {
+            return;
+        }
+        if DiskStamp::of(&self.path) != self.read_at {
+            self.disk_changed = true;
+            cx.notify();
+        }
+    }
+
+    /// Whether another program changed the file since it was read (C-008's bar, on the tree side too).
+    pub fn changed_on_disk(&self, cx: &App) -> bool {
+        match &self.text {
+            Some(text) => text.read(cx).changed_on_disk(),
+            None => self.disk_changed,
+        }
+    }
+
+    /// Reload: the text viewer's own reload once it exists, else the file read again; the tree follows.
+    fn on_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.text.clone() {
+            Some(text) => {
+                text.update(cx, |text, cx| text.reload(window, cx));
+                self.reparse(cx);
+                self.status = text.read(cx).message().map_or_else(|| "reloaded".to_string(), str::to_string);
+            }
+            None => match std::fs::read(&self.path) {
+                Ok(bytes) => {
+                    self.bytes = bytes;
+                    self.read_at = DiskStamp::of(&self.path);
+                    self.disk_changed = false;
+                    self.reparse(cx);
+                    self.status = "reloaded".to_string();
+                }
+                Err(error) => self.status = format!("cannot read {}: {error}", self.path.display()),
+            },
+        }
+        cx.notify();
+    }
+
+    /// Keep mine: the next save overwrites the file (C-008).
+    fn on_keep_mine(&mut self, cx: &mut Context<Self>) {
+        match self.text.clone() {
+            Some(text) => text.update(cx, |text, cx| text.keep_mine(cx)),
+            None => {
+                self.read_at = DiskStamp::of(&self.path);
+                self.disk_changed = false;
+            }
+        }
+        self.status = "kept yours; the next save overwrites the file".to_string();
         cx.notify();
     }
 
@@ -454,6 +526,16 @@ impl Focusable for DataView {
 
 impl Render for DataView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The text viewer's messages (a save, a refused save, a failed reload) show on the tree side too.
+        if let Some(text) = &self.text {
+            let message = text.read(cx).message().map(str::to_string);
+            if message != self.seen_text_message {
+                self.seen_text_message = message.clone();
+                if let Some(message) = message {
+                    self.status = message;
+                }
+            }
+        }
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let border = theme.border;
@@ -494,6 +576,8 @@ impl Render for DataView {
             .child(div().id("data-message").test_support().aria_label(status.clone()).flex_1().overflow_hidden().child(status));
 
         let raw_shown = self.raw_shown;
+        let changed = !raw_shown && self.changed_on_disk(cx);
+        let warning = theme.warning.opacity(0.15);
         let body = if raw_shown
             && let Some(text) = &self.text
         {
@@ -636,7 +720,27 @@ impl Render for DataView {
                     // the editor's there.
                     view.child(div().id("data-raw-area").flex_1().min_h_0().size_full().child(body))
                 } else {
-                    view.child(
+                    view.when(changed, |view| {
+                        view.child(
+                            h_flex()
+                                .id("data-changed-on-disk")
+                                .test_support()
+                                .role(Role::Status)
+                                .aria_label("The file changed on disk.")
+                                .flex_shrink_0()
+                                .gap_3()
+                                .px_3()
+                                .py_1()
+                                .bg(warning)
+                                .border_b_1()
+                                .border_color(border)
+                                .text_sm()
+                                .child("The file changed on disk.")
+                                .child(Button::new("data-reload").label("Reload").xsmall().on_click(cx.listener(|this, _, window, cx| this.on_reload(window, cx))))
+                                .child(Button::new("data-keep-mine").label("Keep mine").xsmall().on_click(cx.listener(|this, _, _, cx| this.on_keep_mine(cx)))),
+                        )
+                    })
+                    .child(
                         div()
                             .id("data-tree")
                             .test_support()

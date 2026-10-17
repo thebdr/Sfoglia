@@ -592,3 +592,99 @@ fn the_raw_text_takes_a_space_and_a_read_only_text_stays_as_it_is(cx: &mut TestA
     .unwrap();
     std::fs::remove_file(&shared).ok();
 }
+
+#[gpui_kit::test]
+fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mut TestAppContext) {
+    // A save refused by the encoding (C-008) is reported on the tree side too: the tree's status row
+    // shows the text viewer's message.
+    let latin = scratch("latin.json");
+    std::fs::write(&latin, b"{\"a\":\"caf\xe9\"}").unwrap();
+    let (handle, panel, _view) = open_data(cx, latin.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("end", cx);
+        window.press("left", cx);
+        window.press("left", cx);
+        window.input("€", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding");
+        assert!(panel.read(cx).is_dirty(cx));
+        assert_eq!(std::fs::read(&latin).unwrap(), b"{\"a\":\"caf\xe9\"}");
+    })
+    .unwrap();
+    std::fs::remove_file(&latin).ok();
+
+    // A change on disk while the tree side shows raises the Reload / Keep mine bar there; Keep mine lets
+    // the next save overwrite, as C-008 states.
+    let edited = scratch("edited.json");
+    std::fs::write(&edited, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, edited.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("end", cx);
+        window.press("space", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("data-changed-on-disk").is_none());
+    })
+    .unwrap();
+    std::fs::write(&edited, "{\"a\":1,\"other\":\"program\"}").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).changed_on_disk(cx));
+        assert_eq!(label(window, "data-changed-on-disk"), "The file changed on disk.");
+        window.click("data-keep-mine", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("data-changed-on-disk").is_none());
+        assert_eq!(label(window, "data-message"), "kept yours; the next save overwrites the file");
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&edited).unwrap(), "{\"a\":1} ");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&edited).ok();
+
+    // Before the text viewer exists the view watches the disk itself: Reload brings the newer file into
+    // the tree.
+    let watched = scratch("watched.json");
+    std::fs::write(&watched, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, watched.clone());
+    std::fs::write(&watched, "{\"a\":1,\"other\":\"program\"}").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).text_view().is_none());
+        assert!(view.read(cx).changed_on_disk(cx));
+        assert_eq!(label(window, "data-changed-on-disk"), "The file changed on disk.");
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2, "still the tree as read");
+        window.click("data-reload", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("data-changed-on-disk").is_none());
+        assert_eq!(view.read(cx).tree().unwrap().len(), 3);
+        assert_eq!(label(window, "data-message"), "reloaded");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&watched).ok();
+}
