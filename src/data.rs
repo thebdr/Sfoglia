@@ -339,8 +339,13 @@ const MAX_DEPTH: usize = 200;
 
 /// How much YAML anchors and aliases may stand for in one file, in nodes and bytes of scalar
 /// text together: the loader keeps a copy of every anchored node and copies it again for
-/// every alias, so a few lines can ask for billions.
+/// every alias, so a few lines can ask for billions. A big file may anchor big things, so the
+/// budget is this or eight times the text, whichever is more.
 const ALIAS_BUDGET: usize = 1_000_000;
+
+fn alias_budget(text: &str) -> usize {
+    ALIAS_BUDGET.max(text.len().saturating_mul(8))
+}
 
 /// Refuse YAML nested past `MAX_DEPTH`, or whose anchors and aliases stand for more than
 /// `ALIAS_BUDGET`, by counting the parser's events, which it produces without recursion. An
@@ -364,6 +369,7 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
     let mut heights: Vec<usize> = Vec::new();
     let mut sizes: Vec<usize> = Vec::new();
     let mut expanded = 0usize;
+    let budget = alias_budget(text);
     let at = |span: &saphyr_parser::Span| (span.start.line().max(1), span.start.col() + 1);
     let too_deep = |line: usize, column: usize, suffix: &str| ParseError {
         line,
@@ -373,7 +379,7 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
     let too_much = |line: usize, column: usize| ParseError {
         line,
         column,
-        message: format!("anchors and aliases stand for more than {ALIAS_BUDGET} nodes and bytes"),
+        message: format!("anchors and aliases stand for more than {budget} nodes and bytes"),
     };
     let remember = |heights: &mut Vec<usize>, sizes: &mut Vec<usize>, anchor: usize, height: usize, size: usize| {
         if anchor > 0 {
@@ -401,7 +407,7 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
                 remember(&mut heights, &mut sizes, done.anchor, done.deepest - done.depth, done.size);
                 if done.anchor > 0 {
                     expanded += done.size;
-                    if expanded > ALIAS_BUDGET {
+                    if expanded > budget {
                         return Err(too_much(done.line, done.column));
                     }
                 }
@@ -415,7 +421,7 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
                 remember(&mut heights, &mut sizes, anchor, 0, size);
                 if anchor > 0 {
                     expanded += size;
-                    if expanded > ALIAS_BUDGET {
+                    if expanded > budget {
                         return Err(too_much(line, column));
                     }
                 }
@@ -431,7 +437,7 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
                     return Err(too_deep(line, column, " through an alias"));
                 }
                 expanded += size;
-                if expanded > ALIAS_BUDGET {
+                if expanded > budget {
                     return Err(too_much(line, column));
                 }
                 if let Some(parent) = open.last_mut() {
@@ -450,8 +456,13 @@ fn too_deep(text: &str, offset: usize, what: &str) -> ParseError {
     ParseError { line, column, message: format!("{what} nested deeper than {MAX_DEPTH} levels") }
 }
 
-/// How many nodes an XML document may expand to, entities included.
-const XML_NODES_LIMIT: u32 = 1_000_000;
+/// How many nodes an XML document may expand to beyond its own size: the file's own markup
+/// never makes more nodes than it has bytes, so only entity expansion can reach this.
+const XML_EXPANSION_LIMIT: u32 = 1_000_000;
+
+fn xml_nodes_limit(text: &str) -> u32 {
+    u32::try_from(text.len()).unwrap_or(u32::MAX).saturating_add(XML_EXPANSION_LIMIT)
+}
 
 /// Refuse `text` when its elements nest deeper than `MAX_DEPTH`, in the document and inside any
 /// entity value of its DOCTYPE (the markup there is parsed where the entity is referenced).
@@ -1133,12 +1144,13 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<
 
 fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
     check_xml_depth(text)?;
-    // Entities may expand to a million nodes at most: a few lines can ask for billions otherwise.
-    let options = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: XML_NODES_LIMIT, ..Default::default() };
+    // Entities may add a million nodes at most: a few lines can ask for billions otherwise.
+    let limit = xml_nodes_limit(text);
+    let options = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: limit, ..Default::default() };
     roxmltree::Document::parse_with_options(text, options).map_err(|error| {
         let at = error.pos();
         let message = match error {
-            roxmltree::Error::NodesLimitReached => format!("the document expands to more than {XML_NODES_LIMIT} nodes"),
+            roxmltree::Error::NodesLimitReached => format!("the document expands to more than {limit} nodes"),
             _ => xml_message(&error.to_string()),
         };
         ParseError { line: at.row as usize, column: at.col as usize, message }
@@ -2044,8 +2056,12 @@ mod tests {
             ("yaml alias within bounds", Format::Yaml, format!("a0: &a0 {}1{}\na1: {}*a0{}\n", "[".repeat(100), "]".repeat(100), "[".repeat(50), "]".repeat(50)), Ok((253, 152))),
             ("yaml alias bomb", Format::Yaml, (1..6).fold("l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n".to_string(), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))), Err("line 6, column 20: anchors and aliases stand for more than 1000000 nodes and bytes")),
             ("yaml alias bomb on long scalars", Format::Yaml, (1..5).fold(format!("l0: &l0 [{}]\n", vec!["y".repeat(1000); 10].join(", ")), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))) + "l5: [*l4, *l4, *l4, *l4, *l4, *l4, *l4]\n", Err("line 3, column 45: anchors and aliases stand for more than 1000000 nodes and bytes")),
-            ("yaml nested anchors over a long list", Format::Yaml, format!("x: {}{}{}\n", (0..190).map(|i| format!("&a{i} [")).collect::<String>(), vec!["1"; 100_000].join(", "), "]".repeat(190)), Err("line 1, column 1195: anchors and aliases stand for more than 1000000 nodes and bytes")),
-            ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 1: the document expands to more than 1000000 nodes")),
+            ("yaml nested anchors over a long list", Format::Yaml, format!("x: {}{}{}\n", (0..190).map(|i| format!("&a{i} [")).collect::<String>(), vec!["1"; 100_000].join(", "), "]".repeat(190)), Err("line 1, column 1139: anchors and aliases stand for more than 2411296 nodes and bytes")),
+            ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 1: the document expands to more than 1005112 nodes")),
+            ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
+            ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
+            ("yaml big anchor without alias", Format::Yaml, (0..100_000).fold("big: &big\n".to_string(), |text, i| text + &format!("  k{i}: value number {i}\n")), Ok((100_002, 3))),
+            ("yaml anchored 2 MB scalar", Format::Yaml, format!("a: &s {}\n", "y".repeat(2_000_000)), Ok((2, 2))),
             ("xml entity 100 in 50", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"{}x{}\">]>{}&e;{}", "<a>".repeat(100), "</a>".repeat(100), "<r>".repeat(50), "</r>".repeat(50)), Ok((150, 150))),
         ];
         for (name, format, text, expected) in cases {
