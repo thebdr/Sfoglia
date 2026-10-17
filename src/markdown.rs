@@ -132,7 +132,7 @@ fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut 
     };
     match node {
         Node::Heading(heading) => {
-            let text = inline_text(&heading.children);
+            let text = heading_text(&heading.children);
             let slug = slugs.unique(&text);
             outline.headings.push(Heading { level: heading.depth, text: text.clone(), slug, span: span.clone(), line });
             push(outline, Kind::Heading(heading.depth), text);
@@ -203,14 +203,25 @@ fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut 
 /// The text of inline nodes on one line: emphasis and links keep their words, code its value, an
 /// image its alternative text, a break a space.
 fn inline_text(nodes: &[Node]) -> String {
+    inline_text_with(nodes, true)
+}
+
+/// A heading's text as GitHub anchors it: an image is no text (`# ![logo](l.png) Project` slugifies to
+/// `project`), inline HTML neither.
+fn heading_text(nodes: &[Node]) -> String {
+    inline_text_with(nodes, false)
+}
+
+fn inline_text_with(nodes: &[Node], with_alt: bool) -> String {
     let mut text = String::new();
     for node in nodes {
         match node {
             Node::Text(t) => text.push_str(&t.value),
             Node::InlineCode(code) => text.push_str(&code.value),
             Node::InlineMath(math) => text.push_str(&math.value),
-            Node::Image(image) => text.push_str(&image.alt),
-            Node::ImageReference(image) => text.push_str(&image.alt),
+            Node::Image(image) if with_alt => text.push_str(&image.alt),
+            Node::ImageReference(image) if with_alt => text.push_str(&image.alt),
+            Node::Image(_) | Node::ImageReference(_) => {}
             Node::Break(_) => text.push(' '),
             Node::FootnoteReference(note) => {
                 text.push('[');
@@ -219,7 +230,7 @@ fn inline_text(nodes: &[Node]) -> String {
             }
             other => {
                 if let Some(children) = other.children() {
-                    text.push_str(&inline_text(children));
+                    text.push_str(&inline_text_with(children, with_alt));
                 }
             }
         }
@@ -495,11 +506,17 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
     edits
 }
 
-/// The heading a fragment names among `headings`, by slug, the fragment taken as written or slugified.
+/// The heading a fragment names among `headings`, by slug, the fragment taken as written or slugified,
+/// hyphens at either end set aside (GitHub anchors `# ![logo](l.png) Project` as `-project`).
 pub fn heading_for_fragment<'a>(headings: &'a [Heading], fragment: &str) -> Option<&'a Heading> {
     let wanted = fragment.trim_start_matches('#');
     let slug = slugify(wanted);
-    headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug)
+    let bare = |slug: &str| slug.trim_matches('-').to_string();
+    headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug).or_else(|| {
+        let wanted = bare(wanted);
+        let slug = bare(&slug);
+        headings.iter().find(|heading| bare(&heading.slug) == wanted || bare(&heading.slug) == slug)
+    })
 }
 
 /// Where a link goes.
@@ -875,6 +892,12 @@ mod tests {
         assert_eq!(anchored.headings.iter().map(|h| (h.slug.as_str(), h.text.as_str())).collect::<Vec<_>>(), vec![("install", "Install"), ("project", "Project")]);
         assert_eq!(anchored.heading_for_fragment("%C3%BCber").is_none(), true);
         assert_eq!(anchored.blocks[2].text, "See bold text.");
+        // An image in a heading is no part of its text or slug, and GitHub's own `#-project` form finds it too.
+        let pictured = prepare("# ![logo](l.png) Project\n\n## ![badge][b] Install\n\n[b]: b.png\n").outline;
+        assert_eq!(pictured.headings.iter().map(|h| (h.slug.as_str(), h.text.as_str())).collect::<Vec<_>>(), vec![("project", "Project"), ("install", "Install")]);
+        assert_eq!(pictured.heading_for_fragment("-project").map(|h| h.line), Some(1));
+        assert_eq!(pictured.heading_for_fragment("#install").map(|h| h.line), Some(3));
+        assert_eq!(pictured.blocks[0].text, "Project");
         assert_eq!(link_target(folder, ""), LinkTarget::None);
         if cfg!(windows) {
             assert_eq!(link_target(folder, "README.md"), file(r"C:\docs\book\README.md", None));

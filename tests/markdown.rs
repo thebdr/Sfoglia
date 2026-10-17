@@ -277,13 +277,13 @@ fn the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx:
         window.render_frame(cx);
         assert!(window.try_find("markdown-changed-on-disk").is_none());
         assert_eq!(label(window, "markdown-message"), "reloaded");
-        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 2 headings");
         assert!(!panel.read(cx).is_dirty(cx));
     })
     .unwrap();
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 2 headings");
         assert!(rendered(&view, cx).contains("Two"), "{}", rendered(&view, cx));
     })
     .unwrap();
@@ -376,6 +376,10 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(other.read(cx).raw_shown());
         other.update(cx, |view, cx| view.reveal_heading("section-20", window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "markdown-message"), "at Section 20");
         let editor = other.read(cx).text_view().read(cx).editor().clone();
@@ -384,8 +388,13 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
         let edited = format!("intro\n\n{}", std::fs::read_to_string(&b).unwrap());
         editor.update(cx, |editor, cx| editor.set_value(edited, window, cx));
         other.update(cx, |view, cx| view.reveal_heading("section-20", window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "markdown-message"), "at Section 20");
+        let editor = other.read(cx).text_view().read(cx).editor().clone();
         assert_eq!(editor.read(cx).cursor_position(), Position::new(82, 0));
     })
     .unwrap();
@@ -421,6 +430,10 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         assert_eq!(view.read(cx).outline().blocks.len(), 0, "no outline is built for it");
         // A fragment into the raw text past the budget still finds its heading, by a scan of the lines.
         view.update(cx, |view, cx| view.reveal_heading("target", window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "markdown-message"), "at Target");
         assert_eq!(view.read(cx).text_view().read(cx).editor().read(cx).cursor_position(), Position::new(2, 0));
@@ -445,6 +458,11 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         window.press("ctrl-shift-d", cx);
         window.render_frame(cx);
         assert!(!view.read(cx).raw_shown(), "the text fits now");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
         assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 1 heading");
         window.press("ctrl-shift-d", cx);
         window.render_frame(cx);
@@ -462,6 +480,11 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(!view.read(cx).raw_shown(), "the cut text renders");
         assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the text, a click follows a link");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
         assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 1 heading");
     })
     .unwrap();

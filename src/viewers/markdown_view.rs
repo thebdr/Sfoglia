@@ -6,18 +6,19 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use gpui_kit::base::text::TextView as RichText;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Position;
-use gpui_kit::base::text::TextView as RichText;
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     Action, App, ClickEvent, Context, Entity, FocusHandle, Focusable, Image, ImageFormat, ImageSource,
-    IntoElement, Render, Resource, Role, SharedString, SharedUri, Subscription, TestSupportExt, Window, actions, div,
+    IntoElement, Render, Resource, Role, SharedString, SharedUri, Subscription, Task, TestSupportExt, Window,
+    actions, div,
 };
 
-use crate::markdown::{self, ImageSrc, LinkTarget, Outline, Prepared};
+use crate::markdown::{self, ImageSrc, LinkTarget, Outline};
 use crate::viewers::rules_panel::RulesStore;
 use crate::viewers::text_view::TextView;
 
@@ -34,9 +35,9 @@ pub struct OpenLinkedFile {
 /// The key context of the whole view: the chord works from the raw text too.
 pub const KEY_CONTEXT: &str = "MarkdownView";
 
-/// The longest text that renders: past this the outline and the renderer's parse would take seconds on the
-/// window thread, so the file opens on its raw text and the toggle keeps it there while the text (as decoded,
-/// line feeds alone, measured again after every reload and toggle) is that long.
+/// The longest text that renders: past this the outline and the renderer's parse would take too long
+/// even off the window thread, so the file opens on its raw text and the toggle keeps it there while
+/// the text (as decoded, line feeds alone, measured again after every reload and toggle) is that long.
 pub const MAX_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 
 /// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
@@ -67,6 +68,11 @@ pub struct MarkdownView {
     outline: Outline,
     /// The source the rich text was last given, to tell when its parse has landed.
     source: String,
+    /// The preparation of the text for the renderer (reference images, fences, the outline), run off
+    /// the window thread; a newer one replaces, and so cancels, an older one.
+    preparing: Option<Task<()>>,
+    /// The search for a fragment's heading in the raw text, run off the window thread too.
+    finding: Option<Task<()>>,
     /// A source range to scroll the rendered view to once the parse of `source` has landed.
     pending_reveal: Option<Range<usize>>,
     status: String,
@@ -85,13 +91,11 @@ impl MarkdownView {
         let decoded = Self::source_of(&text, cx);
         let size = decoded.len();
         let too_big = size > MAX_RENDERED_BYTES;
-        let Prepared { text: source, outline } =
-            if too_big { Prepared { text: String::new(), outline: Outline::default() } } else { markdown::prepare(&decoded) };
-        let rich = cx.new(|cx| TextViewState::markdown(&source, cx).scrollable(true).selectable(true));
+        let rich = cx.new(|cx| TextViewState::markdown("", cx).scrollable(true).selectable(true));
         let follow = cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(window, cx));
         let parsed = cx.observe(&rich, |this, _, cx| this.on_parsed(cx));
         let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Self {
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             path: path.to_path_buf(),
             folder,
@@ -100,15 +104,21 @@ impl MarkdownView {
             raw_shown: too_big,
             too_big,
             size,
-            outline,
-            source,
+            outline: Outline::default(),
+            source: String::new(),
+            preparing: None,
+            finding: None,
             pending_reveal: None,
             status: if too_big { too_big_message(size) } else { String::new() },
             seen_operations: 0,
             seen_reloads: 0,
             requested: Arc::default(),
             _subscriptions: vec![follow, parsed],
+        };
+        if !too_big {
+            view.render_source(decoded, None, cx);
         }
+        view
     }
 
     /// The editor's text with line feeds alone, as the parser counts positions.
@@ -117,13 +127,28 @@ impl MarkdownView {
         crate::data::with_line_feeds(shown.as_ref()).into_owned()
     }
 
-    /// Render `source` (reference images inline and code fences named for the renderer), remembering it
-    /// so a reveal waits for its parse.
-    fn render_source(&mut self, source: String, cx: &mut Context<Self>) {
-        let Prepared { text, outline } = markdown::prepare(&source);
-        self.outline = outline;
-        self.rich.update(cx, |rich, cx| rich.set_text(&text, cx));
-        self.source = text;
+    /// Render `source`: prepared off the window thread (reference images inline, code fences named,
+    /// the outline built), then handed to the renderer; a reveal of the block holding `reveal_line`
+    /// waits for the renderer's own parse. A newer call cancels an older one still running.
+    fn render_source(&mut self, source: String, reveal_line: Option<usize>, cx: &mut Context<Self>) {
+        self.preparing = Some(cx.spawn(async move |this, cx| {
+            let prepared = cx.background_spawn(async move { markdown::prepare(&source) }).await;
+            this.update(cx, |this, cx| {
+                this.outline = prepared.outline;
+                this.rich.update(cx, |rich, cx| rich.set_text(&prepared.text, cx));
+                this.source = prepared.text;
+                this.preparing = None;
+                if let Some(line) = reveal_line
+                    && let Some(span) =
+                        this.outline.top_block_at_line(line).and_then(|ix| this.outline.top_block(ix)).map(|b| b.span.clone())
+                {
+                    this.reveal_source(span, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// The rich text changed (a parse landed, a scroll, a selection): carry out a waiting reveal once
@@ -179,13 +204,10 @@ impl MarkdownView {
             return;
         }
         let line = self.text.read(cx).editor().read(cx).cursor_position().line as usize + 1;
-        self.render_source(source, cx);
+        self.render_source(source, Some(line), cx);
         self.raw_shown = false;
         // Back to the rendered side: the hint again, whatever the raw side said last (the budget message included).
         self.status = String::new();
-        if let Some(span) = self.outline.top_block_at_line(line).and_then(|ix| self.outline.top_block(ix)).map(|b| b.span.clone()) {
-            self.reveal_source(span, cx);
-        }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -226,7 +248,7 @@ impl MarkdownView {
                 cx.notify();
                 return;
             }
-            self.render_source(source, cx);
+            self.render_source(source, None, cx);
             if self.text.read(cx).message().is_none() {
                 self.status = "reloaded".to_string();
             }
@@ -270,27 +292,38 @@ impl MarkdownView {
         cx.notify();
     }
 
-    /// Scroll the rendered view to the heading `fragment` names, or say there is none; while the raw
+    /// Scroll the rendered view to the heading `fragment` names, or say there is none. While the raw
     /// text shows, the cursor goes to the heading's line in the text as it stands (edited, or past the
-    /// budget and so never rendered: one parse on the click finds it), so the next toggle lands there too.
+    /// budget and so never rendered), found by one parse off the window thread, so the next toggle
+    /// lands there too.
     pub fn reveal_heading(&mut self, fragment: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let heading = if self.raw_shown {
+        if self.raw_shown {
             let source = Self::source_of(&self.text, cx);
-            let headings = markdown::outline(&source).headings;
-            markdown::heading_for_fragment(&headings, fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))
-        } else {
-            self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))
-        };
-        match heading {
-            Some((span, text, line)) => {
+            let fragment = fragment.to_string();
+            self.finding = Some(cx.spawn_in(window, async move |this, cx| {
+                let headings = cx.background_spawn(async move { markdown::outline(&source).headings }).await;
+                this.update_in(cx, |this, window, cx| {
+                    match markdown::heading_for_fragment(&headings, &fragment) {
+                        Some(heading) => {
+                            this.status = format!("at {}", heading.text);
+                            let editor = this.text.read(cx).editor().clone();
+                            let position = Position::new(heading.line.saturating_sub(1) as u32, 0);
+                            editor.update(cx, |editor, cx| editor.set_cursor_position(position, window, cx));
+                        }
+                        None => this.status = format!("no heading named #{}", fragment.trim_start_matches('#')),
+                    }
+                    this.finding = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+            cx.notify();
+            return;
+        }
+        match self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone())) {
+            Some((span, text)) => {
                 self.status = format!("at {text}");
-                if self.raw_shown {
-                    let editor = self.text.read(cx).editor().clone();
-                    let position = Position::new(line.saturating_sub(1) as u32, 0);
-                    editor.update(cx, |editor, cx| editor.set_cursor_position(position, window, cx));
-                } else {
-                    self.reveal_source(span, cx);
-                }
+                self.reveal_source(span, cx);
             }
             None => self.status = format!("no heading named #{}", fragment.trim_start_matches('#')),
         }
@@ -320,6 +353,11 @@ impl MarkdownView {
     /// The blocks of the source last rendered.
     pub fn outline(&self) -> &Outline {
         &self.outline
+    }
+
+    /// Whether the text is still being prepared for the renderer.
+    pub fn is_preparing(&self) -> bool {
+        self.preparing.is_some()
     }
 
     /// Whether the raw text has edits not yet saved (C-008).
@@ -393,7 +431,13 @@ impl Render for MarkdownView {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let warning = theme.warning.opacity(0.15);
-        let summary = if self.too_big { format!("Markdown, {}", size_label(self.size)) } else { self.outline.summary() };
+        let summary = if self.too_big {
+            format!("Markdown, {}", size_label(self.size))
+        } else if self.preparing.is_some() {
+            "Markdown, preparing".to_string()
+        } else {
+            self.outline.summary()
+        };
         let status = if self.status.is_empty() {
             if self.raw_shown {
                 "Ctrl+Shift+D shows the rendered view".to_string()
