@@ -531,13 +531,20 @@ impl DataView {
     fn row_label(tree: &Tree, node: usize, marked: bool) -> String {
         let n = &tree.nodes[node];
         let found = if marked { "|found" } else { "" };
-        format!("{}|{}|{}|{}{found}", n.depth, n.key, n.kind.label(), preview(&n.value))
+        format!("{}|{}|{}|{}{found}", n.depth, one_line(&n.key), n.kind.label(), preview(&n.value))
     }
+}
+
+/// A key or value as a row shows it: on one line, ⏎ standing for each line break, so a text of
+/// several lines paints over no neighbouring row.
+fn one_line(text: &str) -> String {
+    text.replace("\r\n", "⏎").replace(['\n', '\r'], "⏎")
 }
 
 /// A value cut to what a row can show.
 fn preview(value: &str) -> String {
-    let mut chars = value.chars();
+    let line = one_line(value);
+    let mut chars = line.chars();
     let short: String = chars.by_ref().take(VALUE_PREVIEW).collect();
     if chars.next().is_some() { format!("{short}…") } else { short }
 }
@@ -643,6 +650,7 @@ impl Render for DataView {
                                         .px_3()
                                         .gap_2()
                                         .whitespace_nowrap()
+                                        .overflow_hidden()
                                         .when(selected == Some(row), |row| row.bg(selected_bg))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             window.focus(&this.rows_focus, cx);
@@ -681,13 +689,15 @@ impl Render for DataView {
                                                         .rounded_sm()
                                                         .overflow_hidden()
                                                         .when(marked, |key| key.bg(marked_bg).text_color(marked_fg))
-                                                        .child(n.key.clone()),
+                                                        .child(one_line(&n.key)),
                                                 ),
                                         )
                                         .child(div().w(px(90.)).flex_shrink_0().text_color(muted).child(n.kind.label()))
                                         .child(
                                             h_flex().flex_1().overflow_hidden().child(
                                                 div()
+                                                    .id(("data-value", row))
+                                                    .test_support()
                                                     .px_1()
                                                     .rounded_sm()
                                                     .overflow_hidden()

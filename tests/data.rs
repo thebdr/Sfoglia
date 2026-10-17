@@ -840,3 +840,48 @@ fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mu
     .unwrap();
     std::fs::remove_file(&mended).ok();
 }
+
+#[gpui_kit::test]
+fn a_value_of_several_lines_stays_on_its_row(cx: &mut TestAppContext) {
+    // A line break inside a key or a value shows as ⏎ on the node's one row, and every value cell is as
+    // tall as a one-line cell (the root's entry count) and centred on its row, so a text of several lines
+    // paints over no neighbour: JSON escapes and a key with a break, then XML text that spans lines.
+    fn one_line_each(window: &gpui_kit::Window, rows: usize) {
+        let single = f32::from(window.find(("data-value", 0usize)).bounds().size.height);
+        assert!(single < 32., "one line of text is under 32 px, not {single}");
+        for row in 0..rows {
+            let bounds = window.find(("data-row", row)).bounds();
+            let value = window.find(("data-value", row)).bounds();
+            assert_eq!(f32::from(value.size.height), single, "row {row}: value {value:?} in {bounds:?}");
+            let centre = f32::from(value.origin.y) + single / 2.;
+            let (top, bottom) = (f32::from(bounds.origin.y), f32::from(bounds.origin.y + bounds.size.height));
+            assert!(centre >= top && centre <= bottom, "row {row}: value {value:?} in {bounds:?}");
+        }
+    }
+
+    let lines = scratch("lines.json");
+    std::fs::write(&lines, "{\"a\": \"one\\ntwo\\nthree\\nfour\", \"b\\nc\": \"x\", \"c\": \"up\\r\\ndown\"}").unwrap();
+    let (handle, _panel, view) = open_data(cx, lines.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tree().unwrap().nodes[1].value, "one\ntwo\nthree\nfour", "the node keeps its text");
+        assert_eq!(label(window, ("data-row", 1usize)), "1|a|string|one⏎two⏎three⏎four");
+        assert_eq!(label(window, ("data-row", 2usize)), "1|b⏎c|string|x");
+        assert_eq!(label(window, ("data-row", 3usize)), "1|c|string|up⏎down");
+        one_line_each(window, 4);
+    })
+    .unwrap();
+    std::fs::remove_file(&lines).ok();
+
+    let prose = scratch("prose.xml");
+    std::fs::write(&prose, "<r>\n  <p>The first line of a paragraph\n    and its second line.</p>\n  <q>x</q>\n</r>\n").unwrap();
+    let (handle, _panel, _view) = open_data(cx, prose.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let p = label(window, ("data-row", 1usize));
+        assert!(p.starts_with("1|p|element|The first line of a paragraph⏎") && !p.contains('\n'), "{p}");
+        one_line_each(window, 3);
+    })
+    .unwrap();
+    std::fs::remove_file(&prose).ok();
+}
