@@ -22,6 +22,9 @@
 #   EDIT=1           click into the text, type "X" (the tab shows its marker), then append a
 #                    line to the first FILE from outside and capture ~/sfoglia-linux-edit.png
 #                    once the changed-on-disk bar has appeared
+#   CLOSE_ASK=1      click into the text, type "X", then press Alt+F4 (the window manager's close
+#                    request) and capture ~/sfoglia-linux-close.png with the closing question (C-012);
+#                    the window is expected to stay, and the log says whether it did
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -39,6 +42,7 @@ PNGEDIT="$HOME/sfoglia-linux-edit.png"
 PNGDATA="$HOME/sfoglia-linux-data.png"
 PNGMDRAW="$HOME/sfoglia-linux-mdraw.png"
 PNGMDBACK="$HOME/sfoglia-linux-mdback.png"
+PNGCLOSE="$HOME/sfoglia-linux-close.png"
 : > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX" "$PNGEDIT" "$PNGDATA"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
@@ -114,6 +118,17 @@ if [ -n "$WID" ]; then
     shot "$PNGMDRAW" "after 12 wheel steps down and Ctrl+Shift+D"
     xdotool key --window "$WID" ctrl+shift+d; sleep 2
     shot "$PNGMDBACK" "after Ctrl+Shift+D back"
+  fi
+  if [ "${CLOSE_ASK:-0}" = "1" ]; then
+    # The closing question (C-012): an edit in the active tab, then the window manager's close request.
+    eval "$GEOM"
+    xdotool mousemove $((X + WIDTH / 3)) $((Y + HEIGHT / 3)) click 1; sleep 0.5
+    xdotool type --delay 40 "X"; sleep 0.5
+    xdotool windowactivate --sync "$WID" 2>/dev/null; sleep 0.3
+    xdotool key alt+F4; sleep 2.5
+    shot "$PNGCLOSE" "after typing X and Alt+F4: the closing question"
+    STILL=$(xdotool search --onlyvisible --name '^Sfoglia$' 2>/dev/null | head -1)
+    log "window after Alt+F4: ${STILL:-gone}"
   fi
   if [ "${EDIT:-0}" = "1" ] && [ "$#" -gt 0 ]; then
     eval "$GEOM"

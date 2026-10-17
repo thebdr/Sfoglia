@@ -6,7 +6,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::{ActiveTheme, Theme, ThemeMode, WindowExt as _};
 use gpui_kit::component::dock::{
     BasePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
     PanelEvent, PanelId, panel_handle,
@@ -494,6 +496,8 @@ pub struct Workspace {
     open: Vec<OpenFile>,
     rules: Entity<RulesStore>,
     rules_panel: Entity<RulesPanel>,
+    /// The close request being answered (C-012), while the dialog shows.
+    closing: Option<Closing>,
 }
 
 struct OpenFile {
@@ -516,6 +520,12 @@ impl Workspace {
         let (dock_area, skin) = DockSkin::dock_area("sfoglia-main", Some(1), window, cx);
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
+        // The window asks about modified tabs before it closes (C-012); the handler outlives nothing it
+        // should not, holding the workspace weakly.
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |workspace, cx| workspace.may_close(window, cx)).unwrap_or(true)
+        });
         let rules = cx.new(|_| RulesStore::load(rules_path));
         let rules_panel = cx.new(|cx| RulesPanel::new(&rules, window, cx));
         // The rules panel lives in the right dock, closed until Ctrl+Shift+H.
@@ -538,6 +548,7 @@ impl Workspace {
             open: Vec::new(),
             rules,
             rules_panel,
+            closing: None,
         }
     }
 
@@ -761,5 +772,167 @@ impl Render for Workspace {
                         .child("Ctrl+O opens files. Dropping files here opens them too. Ctrl+Shift+H edits the highlighting rules. Ctrl+Shift+B shows a file's bytes."),
                 )
             })
+    }
+}
+
+/// The tabs still to settle before the window may close (C-012), the first being the one the
+/// dialog asks about, and the text viewer's message when it refused the last save.
+struct Closing {
+    queue: Vec<Entity<FilePanel>>,
+    message: Option<String>,
+}
+
+/// What a button of the closing dialog decides.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Decision {
+    Save,
+    Discard,
+    Cancel,
+    SaveAll,
+    DiscardAll,
+}
+
+impl Workspace {
+    /// The tabs with unsaved edits, in tab order.
+    fn modified_panels(&self, cx: &App) -> Vec<Entity<FilePanel>> {
+        self.panels(cx).into_iter().filter(|panel| panel.read(cx).is_dirty(cx)).collect()
+    }
+
+    /// The platform asks whether the window may close (C-012): yes when every tab is saved. Otherwise
+    /// the dialog asks about the first modified tab, and the window stays until the last one is saved or
+    /// discarded; a second request while the dialog shows changes nothing.
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let queue = self.modified_panels(cx);
+        if queue.is_empty() {
+            return true;
+        }
+        if self.closing.is_none() {
+            self.closing = Some(Closing { queue, message: None });
+            self.open_closing_dialog(window, cx);
+        }
+        cx.notify();
+        false
+    }
+
+    /// The facts the closing dialog shows: the tab's name and folder, how many modified tabs follow,
+    /// and the message of a refused save.
+    fn closing_facts(&self, cx: &App) -> Option<(String, String, usize, Option<String>)> {
+        let closing = self.closing.as_ref()?;
+        let first = closing.queue.first()?.read(cx);
+        let folder = first.info.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        Some((first.info.name.clone(), folder, closing.queue.len().saturating_sub(1), closing.message.clone()))
+    }
+
+    /// The alert dialog of C-012, read afresh from the closing state at every frame: the title names the
+    /// tab, the body its folder, how many modified tabs follow and a refused save's message, and the
+    /// buttons decide for this tab or for all of them. Closing the dialog any other way (Escape) is Cancel.
+    fn open_closing_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let facts = this.upgrade().and_then(|w| w.read(cx).closing_facts(cx));
+            let Some((name, folder, more, message)) = facts else {
+                return alert.title("Closing");
+            };
+            let danger = cx.theme().danger;
+            let button = |id: &'static str, label: &'static str, decision: Decision| {
+                let this = this.clone();
+                Button::new(id).label(label).on_click(move |_, window, cx| {
+                    this.update(cx, |workspace, cx| workspace.decide(decision, window, cx)).ok();
+                })
+            };
+            let more_text = match more {
+                1 => "1 more file has unsaved changes".to_string(),
+                n => format!("{n} more files have unsaved changes"),
+            };
+            let on_close = this.clone();
+            alert
+                .title({
+                    let title = format!("Save changes to “{name}”?");
+                    div().id("close-title").test_support().aria_label(title.clone()).child(title)
+                })
+                .description(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().id("close-folder").test_support().aria_label(folder.clone()).child(folder))
+                        .when(more > 0, |body| body.child(div().id("close-more").test_support().aria_label(more_text.clone()).child(more_text)))
+                        .when_some(message, |body, message| {
+                            body.child(div().id("close-message").test_support().aria_label(message.clone()).text_color(danger).child(message))
+                        }),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(button("close-cancel", "Cancel", Decision::Cancel))
+                        .when(more > 0, |footer| {
+                            footer
+                                .child(button("close-discard-all", "Discard all", Decision::DiscardAll).danger())
+                                .child(button("close-save-all", "Save all", Decision::SaveAll))
+                        })
+                        .child(button("close-discard", "Discard changes", Decision::Discard).danger())
+                        .child(button("close-save", "Save", Decision::Save).primary()),
+                )
+                .on_close(move |_, _, cx| {
+                    on_close.update(cx, |workspace, cx| workspace.closing_dialog_closed(cx)).ok();
+                })
+        });
+    }
+
+    /// The dialog went away without a decision that closes the window: every tab stays as it is.
+    fn closing_dialog_closed(&mut self, cx: &mut Context<Self>) {
+        self.closing = None;
+        cx.notify();
+    }
+
+    /// A button of the closing dialog: Cancel keeps everything as it is; the others save or restore this
+    /// tab, or every remaining one, and the window closes once no modified tab remains. A refused save
+    /// keeps the dialog on that tab with the viewer's message.
+    fn decide(&mut self, decision: Decision, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut closing) = self.closing.take() else {
+            return;
+        };
+        closing.message = None;
+        let (count, save) = match decision {
+            Decision::Cancel => {
+                window.close_dialog(cx);
+                cx.notify();
+                return;
+            }
+            Decision::Save => (1, true),
+            Decision::Discard => (1, false),
+            Decision::SaveAll => (usize::MAX, true),
+            Decision::DiscardAll => (usize::MAX, false),
+        };
+        self.settle(&mut closing, count, save, window, cx);
+        if closing.queue.is_empty() {
+            window.close_dialog(cx);
+            window.remove_window();
+        } else {
+            self.closing = Some(closing);
+        }
+        cx.notify();
+    }
+
+    /// Save or restore the first `count` tabs of the queue (a tab saved meanwhile is skipped); a refused
+    /// save stops on its tab with the message.
+    fn settle(&mut self, closing: &mut Closing, count: usize, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut done = 0;
+        while done < count && !closing.queue.is_empty() {
+            let panel = closing.queue[0].clone();
+            if panel.read(cx).is_dirty(cx)
+                && let Some(text) = panel.read(cx).editable_text(cx)
+            {
+                if save {
+                    if let Err(message) = text.update(cx, |text, cx| text.save(cx)) {
+                        closing.message = Some(message);
+                        return;
+                    }
+                } else {
+                    text.update(cx, |text, cx| text.reload(window, cx));
+                }
+            }
+            closing.queue.remove(0);
+            done += 1;
+        }
     }
 }

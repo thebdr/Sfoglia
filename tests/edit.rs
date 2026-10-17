@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use gpui_kit::component::dock::{BasePanel as _, ClosePanel, Panel as _};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use sfoglia::workspace::FilePanel;
 use sfoglia::{Workspace, window_options};
 
 /// A workspace with a rule file path of this test alone (the file need not exist).
@@ -564,5 +565,237 @@ fn an_unreadable_file_keeps_the_edits_protected(cx: &mut TestAppContext) {
         assert_eq!(std::fs::read_to_string(&hello).unwrap(), "QRSfoglia reads anything.\nSecond line.\n");
     })
     .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Type `text` into the panel's editor and let the change land.
+fn type_into(cx: &mut TestAppContext, handle: AnyWindowHandle, workspace: &Entity<Workspace>, path: &std::path::Path, panel: &Entity<FilePanel>, text: &str) {
+    cx.update_window(handle, |_, window, cx| {
+        // Only the active tab is laid out, so its editor is the one that takes the keys: bring the tab up.
+        workspace.update(cx, |w, cx| w.open_paths(&[path.to_path_buf()], window, cx));
+        window.render_frame(cx);
+        let view = panel.read(cx).text_view().expect("a text tab").clone();
+        let focus = view.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input(text, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+/// The kit's dialog slides in over a quarter of a second of real time, and a click aimed at one frame's bounds
+/// can land where the button no longer is: let the entrance finish before reading or clicking.
+fn settle_dialog(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    std::thread::sleep(Duration::from_millis(300));
+    window.render_frame(cx);
+    assert!(window.try_find("dialog").is_some(), "the closing dialog shows");
+}
+
+/// The closing dialog's title, folder line, "more" line and message, as shown once its entrance is over.
+fn closing_dialog(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> (String, String, Option<String>, Option<String>) {
+    settle_dialog(window, cx);
+    (
+        window.find("close-title").label().unwrap_or_default().to_string(),
+        window.find("close-folder").label().unwrap_or_default().to_string(),
+        window.try_find("close-more").and_then(|e| e.label().map(|l| l.to_string())),
+        window.try_find("close-message").and_then(|e| e.label().map(|l| l.to_string())),
+    )
+}
+
+/// The window with every tab saved closes at once; with modified tabs it asks about each in tab order,
+/// Cancel keeps everything, Discard changes restores a tab and moves on, Save writes and the window
+/// goes once the last tab is settled (C-012).
+#[gpui_kit::test]
+fn closing_the_window_asks_about_every_modified_tab_before_it_closes(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-ask");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(vcx.simulate_close(), "nothing modified: the window may close");
+    assert_eq!(cx.windows().len(), 1, "the test's simulated close removes nothing by itself");
+
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    assert!(!vcx.simulate_close(), "a modified tab holds the window");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (title, folder, more, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(folder, dir.display().to_string());
+        assert_eq!(more, None);
+        assert_eq!(message, None);
+        window.click("close-cancel", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none(), "Cancel closes the dialog");
+        assert!(panels[0].read(cx).is_dirty(cx), "and leaves the tab modified");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1, "the window stays");
+
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?", "the first modified tab in tab order");
+        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"));
+        assert!(window.try_find("close-save-all").is_some());
+        assert!(window.try_find("close-discard-all").is_some());
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        let view = panels[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).text(cx).as_ref(), "Sfoglia reads anything.\nSecond line.\n", "restored");
+        assert!(!panels[0].read(cx).is_dirty(cx));
+        assert_eq!(std::fs::read(&hello).unwrap(), fixture_bytes("hello.txt"), "the file is untouched");
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “utf16le.txt”?", "the dialog moves to the next modified tab");
+        assert_eq!(more, None);
+        assert!(window.try_find("close-save-all").is_none(), "no more tabs follow");
+        window.click("close-cancel", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none());
+        assert!(!panels[0].read(cx).is_dirty(cx), "the discarded tab stays restored");
+        assert!(panels[1].read(cx).is_dirty(cx), "the other stays modified");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (title, _, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “utf16le.txt”?");
+        window.click("close-save", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let expected: Vec<u8> = [0xff, 0xfe].into_iter().chain("Yhi\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(std::fs::read(&utf16).unwrap(), expected, "Save writes the exact bytes");
+    assert!(cx.windows().is_empty(), "the last modified tab saved: the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Save all writes every modified tab and the window goes (C-012).
+#[gpui_kit::test]
+fn save_all_writes_every_modified_tab_and_closes_the_window(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-save-all");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"));
+        window.click("close-save-all", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&hello).unwrap(), b"QSfoglia reads anything.\nSecond line.\n");
+    let expected: Vec<u8> = [0xff, 0xfe].into_iter().chain("Yhi\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(std::fs::read(&utf16).unwrap(), expected);
+    assert!(cx.windows().is_empty(), "every tab saved: the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Discard all restores every modified tab, writes nothing, and the window goes (C-012).
+#[gpui_kit::test]
+fn discard_all_restores_every_modified_tab_and_closes_the_window(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-discard-all");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-discard-all", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&hello).unwrap(), fixture_bytes("hello.txt"), "nothing written");
+    assert_eq!(std::fs::read(&utf16).unwrap(), fixture_bytes("utf16le.txt"));
+    assert!(cx.windows().is_empty(), "every tab restored: the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A save the text viewer refuses keeps the dialog on that tab with the viewer's message and the window
+/// open; Discard changes then restores the text and the window goes (C-012).
+#[gpui_kit::test]
+fn a_refused_save_keeps_the_window_open_with_its_message(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-refused");
+    let latin = copy_fixture("latin1.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[latin.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &latin, &panels[0], "€");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-save", cx);
+        window.render_frame(cx);
+        let (title, _, _, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “latin1.txt”?", "the dialog stays on the tab");
+        assert_eq!(message.as_deref(), Some("Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding"));
+        assert!(panels[0].read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&latin).unwrap(), fixture_bytes("latin1.txt"), "nothing written");
+    assert_eq!(cx.windows().len(), 1, "the window stays");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("close-discard", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&latin).unwrap(), fixture_bytes("latin1.txt"));
+    assert!(cx.windows().is_empty(), "the tab restored: the window is gone");
     let _ = std::fs::remove_dir_all(&dir);
 }
