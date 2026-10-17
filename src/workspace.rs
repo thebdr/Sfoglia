@@ -780,6 +780,24 @@ impl Render for Workspace {
     }
 }
 
+/// The path as it stands on disk: canonical when the file is there (Windows'"'"' `\\?\` prefix taken off), else
+/// made absolute as spelled (a file gone meanwhile still has a folder to name).
+fn plain_absolute(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => {
+            let text = canonical.to_string_lossy();
+            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                PathBuf::from(format!(r"\\{rest}"))
+            } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+                PathBuf::from(rest)
+            } else {
+                canonical
+            }
+        }
+        Err(_) => std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+    }
+}
+
 /// The tabs still to settle before the window may close (C-012), the first being the one the
 /// dialog asks about, and the text viewer's message when it refused the last save.
 struct Closing {
@@ -851,9 +869,7 @@ impl Workspace {
     fn closing_facts(&self, cx: &App) -> Option<(String, String, usize, Option<String>)> {
         let closing = self.closing.as_ref()?;
         let first = closing.queue.first()?.read(cx);
-        // The folder as it stands on disk, whatever spelling the path came with (a bare name has none).
-        let path = std::path::absolute(&first.info.path).unwrap_or_else(|_| first.info.path.clone());
-        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let folder = plain_absolute(&first.info.path).parent().map(|p| p.display().to_string()).unwrap_or_default();
         Some((first.info.name.clone(), folder, closing.queue.len().saturating_sub(1), closing.message.clone()))
     }
 
@@ -968,7 +984,10 @@ impl Workspace {
                         return;
                     }
                 } else if closing.refused_restore == Some(panel.entity_id()) {
-                    // Asked a second time with the message in view: the edit is dropped as asked, file or no file.
+                    // Asked a second time with the message in view: the edit is dropped as asked, file or no
+                    // file, and with it the tab, which has nothing left to show.
+                    let dock = self.dock_area.clone();
+                    dock.update(cx, |dock, cx| dock.remove_panel(panel.clone(), window, cx));
                 } else {
                     text.update(cx, |text, cx| text.reload(window, cx));
                     if text.read(cx).is_dirty() {

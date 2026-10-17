@@ -593,6 +593,12 @@ fn settle_dialog(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
     assert!(window.try_find("dialog").is_some(), "the closing dialog shows");
 }
 
+/// A folder as the dialog names it: canonical, Windows' `\\?\` prefix taken off (the temp folder's 8.3 spelling expands).
+fn canonical_folder(path: &std::path::Path) -> String {
+    let text = std::fs::canonicalize(path).unwrap().display().to_string();
+    text.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(text)
+}
+
 /// The closing dialog's title, folder line, "more" line and message, as shown once its entrance is over.
 fn closing_dialog(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> (String, String, Option<String>, Option<String>) {
     settle_dialog(window, cx);
@@ -632,7 +638,7 @@ fn closing_the_window_asks_about_every_modified_tab_before_it_closes(cx: &mut Te
         window.render_frame(cx);
         let (title, folder, more, message) = closing_dialog(window, cx);
         assert_eq!(title, "Save changes to “hello.txt”?");
-        assert_eq!(folder, dir.display().to_string());
+        assert_eq!(folder, canonical_folder(&dir));
         assert_eq!(more, None);
         assert_eq!(message, None);
         window.click("close-cancel", cx);
@@ -1061,7 +1067,7 @@ fn enter_is_save_and_a_refused_enter_keeps_the_dialog(cx: &mut TestAppContext) {
 fn a_relative_path_shows_its_absolute_folder(cx: &mut TestAppContext) {
     let (handle, workspace) = open_workspace(cx);
     // Relative to the crate root, where cargo runs the tests; nothing is written (Cancel).
-    let relative = PathBuf::from("tests").join("fixtures").join("hello.txt");
+    let relative = PathBuf::from("tests").join("..").join("tests").join("fixtures").join("hello.txt");
     let mut vcx = VisualTestContext::from_window(handle, cx);
     let panels = cx
         .update_window(handle, |_, window, cx| {
@@ -1078,10 +1084,105 @@ fn a_relative_path_shows_its_absolute_folder(cx: &mut TestAppContext) {
         let (title, folder, _, _) = closing_dialog(window, cx);
         assert_eq!(title, "Save changes to “hello.txt”?");
         let expected = std::env::current_dir().unwrap().join("tests").join("fixtures");
-        assert_eq!(folder, expected.display().to_string(), "the folder is absolute");
+        assert_eq!(folder, canonical_folder(&expected), "the folder is absolute and resolved");
         window.click("close-cancel", cx);
     })
     .unwrap();
     cx.run_until_parked();
     assert_eq!(std::fs::read(&relative).unwrap(), fixture_bytes("hello.txt"), "nothing written");
+}
+
+/// A second Discard changes on a tab whose file cannot be read back drops the edit for good: the tab closes,
+/// the dialog moves on, and a later request no longer asks about it (C-012).
+#[gpui_kit::test]
+fn a_dropped_edit_closes_its_tab_and_is_not_asked_about_again(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-drop-tab");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    std::fs::remove_file(&hello).unwrap();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        let (title, _, _, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?", "the refused restore keeps the dialog on the tab");
+        assert!(message.is_some());
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “utf16le.txt”?", "the second Discard drops the edit and moves on");
+        assert_eq!(more, None);
+        window.click("close-cancel", cx);
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["utf16le.txt"], "the dropped tab is closed");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “utf16le.txt”?", "the dropped edit is not asked about again");
+        assert_eq!(more, None);
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Discard all stops at a restore that cannot read the file back, like Save all at a refused save; a second
+/// Discard all drops that edit and goes on through the rest (C-012).
+#[gpui_kit::test]
+fn discard_all_stops_at_a_refused_restore_and_a_second_goes_on(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-discard-all-refused");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    std::fs::remove_file(&hello).unwrap();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-discard-all", cx);
+        window.render_frame(cx);
+        let (title, _, more, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?", "Discard all stops on the refused restore");
+        assert!(message.as_deref().unwrap_or("").starts_with("cannot read "));
+        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"));
+        assert!(panels[1].read(cx).is_dirty(cx), "the tab after it is still modified");
+        window.click("close-discard-all", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&utf16).unwrap(), fixture_bytes("utf16le.txt"), "restored, nothing written");
+    assert!(cx.windows().is_empty(), "the second Discard all drops the edit, restores the rest and the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
 }
