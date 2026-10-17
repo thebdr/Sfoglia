@@ -639,3 +639,36 @@ fn the_place_is_kept_while_the_renderer_catches_up(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::remove_file(&long).ok();
 }
+
+#[gpui_kit::test]
+fn a_reference_link_opens_like_an_inline_one(cx: &mut TestAppContext) {
+    // The renderer resolves no link definition, so a click on `[text][id]` would hand over an empty address:
+    // the preparation writes reference links inline, and a real click on one reaches its heading.
+    let referenced = scratch("referenced.md");
+    let mut text = String::from("[go to the target][r]\n\n[r]: #target\n\n");
+    for n in 0..60 {
+        text.push_str(&format!("## Section {n}\n\nparagraph {n}\n\n"));
+    }
+    text.push_str("# Target\n\nhere\n");
+    std::fs::write(&referenced, &text).unwrap();
+    let (handle, _panel, view) = open_markdown(cx, referenced.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 124 blocks, 61 headings");
+        assert!(view.read(cx).rich_text().read(cx).rendered_text().as_str().starts_with("go to the target"), "the link text renders");
+        // The link is the first line of the rendered side: a click on its first word.
+        window.click_at("markdown-rendered", gpui_kit::point(px(40.), px(16.)), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Target");
+        let top = view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix;
+        assert!(top >= 100, "the target, block 122, is on screen: the top row is {top}");
+    })
+    .unwrap();
+    std::fs::remove_file(&referenced).ok();
+}

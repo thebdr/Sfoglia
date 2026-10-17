@@ -309,16 +309,23 @@ impl Slugs {
     }
 }
 
+/// The definitions of a document and every image or link written with a reference to one: the
+/// renderer resolves neither, so both are rewritten inline. A reference inside a link's text is left
+/// to the next round, once the link itself is inline.
 fn collect_images(
     node: &Node,
     source: &str,
     definitions: &mut Vec<(String, String)>,
-    references: &mut Vec<(Range<usize>, String, ReferenceKind)>,
+    references: &mut Vec<(Range<usize>, String, ReferenceKind, bool)>,
 ) {
     match node {
         Node::Definition(definition) => definitions.push((definition.identifier.clone(), definition.url.clone())),
         Node::ImageReference(image) => {
-            references.push((span_of(node, source), image.identifier.clone(), image.reference_kind))
+            references.push((span_of(node, source), image.identifier.clone(), image.reference_kind, true))
+        }
+        Node::LinkReference(link) => {
+            references.push((span_of(node, source), link.identifier.clone(), link.reference_kind, false));
+            return;
         }
         _ => {}
     }
@@ -398,20 +405,28 @@ pub struct Prepared {
     pub outline: Outline,
 }
 
-/// Prepare `source` for the renderer: images written with a reference become inline and fenced code
-/// names its grammar as the kit knows it, both without moving a line, and the outline is built on the
-/// result. One parse when nothing needs rewriting, two when something does.
+/// Prepare `source` for the renderer: images and links written with a reference become inline and fenced
+/// code names its grammar as the kit knows it, all without moving a line, and the outline is built on the
+/// result. One parse when nothing needs rewriting; a rewrite is parsed again, and a reference inside a
+/// rewritten link's text gets its turn in the next round.
 pub fn prepare(source: &str) -> Prepared {
-    let Ok(root) = to_mdast(source, &parse_options()) else {
+    let Ok(mut root) = to_mdast(source, &parse_options()) else {
         return Prepared { text: source.to_string(), outline: Outline::default() };
     };
-    let mut edits = image_edits(&root, source);
-    collect_fences(&root, source, &mut edits);
-    if edits.is_empty() {
-        return Prepared { text: source.to_string(), outline: outline_from(&root, source) };
+    let mut text = source.to_string();
+    for _ in 0..4 {
+        let mut edits = image_edits(&root, &text);
+        collect_fences(&root, &text, &mut edits);
+        if edits.is_empty() {
+            break;
+        }
+        text = apply_edits(&text, edits);
+        match to_mdast(&text, &parse_options()) {
+            Ok(parsed) => root = parsed,
+            Err(_) => return Prepared { outline: Outline::default(), text },
+        }
     }
-    let text = apply_edits(source, edits);
-    let outline = outline(&text);
+    let outline = outline_from(&root, &text);
     Prepared { text, outline }
 }
 
@@ -488,13 +503,14 @@ pub fn resolve_image_references(source: &str) -> String {
 
 fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
     let mut definitions: Vec<(String, String)> = Vec::new();
-    let mut references: Vec<(Range<usize>, String, ReferenceKind)> = Vec::new();
+    let mut references: Vec<(Range<usize>, String, ReferenceKind, bool)> = Vec::new();
     collect_images(root, source, &mut definitions, &mut references);
     let mut edits = Vec::new();
-    for (span, identifier, kind) in references {
+    for (span, identifier, kind, image) in references {
         let Some((_, url)) = definitions.iter().find(|(id, _)| *id == identifier) else { continue };
         let text = &source[span.clone()];
-        if !text.starts_with("![") || text.len() < 3 {
+        let opener = if image { "![" } else { "[" };
+        if !text.starts_with(opener) || text.len() < opener.len() + 1 {
             continue;
         }
         let alt_end = match kind {
@@ -502,7 +518,10 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
             ReferenceKind::Collapsed => text.len() - 3,
             ReferenceKind::Shortcut => text.len() - 1,
         };
-        let alt = &text[2..alt_end];
+        if alt_end < opener.len() {
+            continue;
+        }
+        let alt = &text[opener.len()..alt_end];
         let kept_breaks = "\n".repeat(text[alt_end..].matches('\n').count());
         // A `|` would split a table cell, so it travels percent-encoded, as any address may.
         let url = url.replace('|', "%7C");
@@ -511,7 +530,7 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
         } else {
             url
         };
-        edits.push((span, format!("![{alt}{kept_breaks}]({destination})")));
+        edits.push((span, format!("{opener}{alt}{kept_breaks}]({destination})")));
     }
     edits
 }
@@ -821,6 +840,18 @@ mod tests {
         assert_eq!(shown, "| ![x](a%7Cb.png) | b |\n| --- | --- |\n\n[x]: a|b.png\n");
         assert_eq!(images(&shown), vec!["x|a%7Cb.png"]);
         assert_eq!(outline(&shown).blocks[0].text, "x | b (0 rows)");
+        // Links written with a reference are rewritten the same way: the renderer resolves no definition, so a
+        // click on `[text][id]` would hand over an empty address.
+        // (A destination with a space is only a definition between angle brackets.)
+        let links = "See [the docs][d], [d][] and [d] here, and [none][zz].\n\n[d]: <docs/a b.md#top>\n";
+        let shown = resolve_image_references(links);
+        assert_eq!(shown, "See [the docs](<docs/a b.md#top>), [d](<docs/a b.md#top>) and [d](<docs/a b.md#top>) here, and [none][zz].\n\n[d]: <docs/a b.md#top>\n");
+        assert_eq!(shown.lines().count(), links.lines().count());
+        // A reference link holding a reference image: the link is rewritten first and the image inside it in the
+        // next round of the preparation.
+        let nested = "[![badge][b]][site]\n\n[b]: b.png\n[site]: https://example.com\n";
+        assert_eq!(resolve_image_references(nested), "[![badge][b]](https://example.com)\n\n[b]: b.png\n[site]: https://example.com\n");
+        assert_eq!(prepare(nested).text, "[![badge](b.png)](https://example.com)\n\n[b]: b.png\n[site]: https://example.com\n");
     }
 
     #[test]
