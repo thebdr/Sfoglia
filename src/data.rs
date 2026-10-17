@@ -1512,12 +1512,17 @@ fn xml_prolog(text: &str) -> (Option<&str>, Option<&str>) {
     let mut declaration = None;
     let mut doctype = None;
     let mut rest = text;
+    let mut first = true;
     loop {
         // A byte-order mark that decoding left in place is skipped here, as roxmltree skips it.
         let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
-        if let Some(after) = trimmed.strip_prefix("<?xml").filter(|after| after.starts_with(char::is_whitespace)) {
+        // The declaration is `<?xml ` (a space) at the very start and nothing else, as roxmltree
+        // reads it; `<?xml` followed by a tab or a line break is a processing instruction.
+        let at_start = first && rest.trim_start_matches('\u{FEFF}').len() == trimmed.len();
+        first = false;
+        if let Some(after) = trimmed.strip_prefix("<?xml ").filter(|_| at_start) {
             let Some(end) = after.find("?>") else { break };
-            let end = "<?xml".len() + end + "?>".len();
+            let end = "<?xml ".len() + end + "?>".len();
             declaration = Some(&trimmed[..end]);
             rest = &trimmed[end..];
         } else if trimmed.starts_with("<?") {
@@ -1571,7 +1576,9 @@ fn escape_xml(text: &str, attribute: bool) -> String {
             '"' if attribute => out.push_str("&quot;"),
             '\t' if attribute => out.push_str("&#9;"),
             '\n' if attribute => out.push_str("&#10;"),
-            '\r' if attribute => out.push_str("&#13;"),
+            // A carriage return is normalised to a line feed wherever it is read back, so it is
+            // written as a reference in text too.
+            '\r' => out.push_str("&#13;"),
             _ => out.push(c),
         }
     }
@@ -1638,8 +1645,11 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
         }
         NodeType::PI => {
             if let Some(pi) = node.pi() {
-                match pi.value {
-                    Some(value) => out.push_str(&format!("{indent}<?{} {}?>\n", pi.target, value.trim_matches(xml_space))),
+                // An instruction whose target is `xml` is written with a tab after it: with a space it
+                // would read as a declaration, which may stand at the start only.
+                let separator = if pi.target.eq_ignore_ascii_case("xml") { '\t' } else { ' ' };
+                match pi.value.map(|value| value.trim_matches(xml_space)).filter(|value| !value.is_empty()) {
+                    Some(value) => out.push_str(&format!("{indent}<?{}{separator}{value}?>\n", pi.target)),
                     None => out.push_str(&format!("{indent}<?{}?>\n", pi.target)),
                 }
             }
@@ -2160,6 +2170,21 @@ mod tests {
         let pretty_ogham = pretty(Format::Xml, &ogham).unwrap();
         assert_eq!(pretty_ogham, format!("<a{0}b c{0}d=\"1\">\n  <?p {0}?>\n</a{0}b>\n", '\u{1680}'));
         assert_eq!(Tree::parse(Format::Xml, &pretty_ogham).unwrap().nodes, tree.nodes);
+        // An instruction whose target is `xml` is not the declaration (roxmltree reads only `<?xml ` at the
+        // very start as one) and is written back so that it stays an instruction; a carriage-return
+        // reference in text survives the round trip.
+        for (xml_in, xml_out) in [
+            ("<?xml\tversion=\"1.0\"?><r/>", "<?xml\tversion=\"1.0\"?>\n<r/>\n"),
+            ("<r><?xml\tx?></r>", "<r>\n  <?xml\tx?>\n</r>\n"),
+            ("<?xml version=\"1.0\"?><r/><?xml\nx?>", "<?xml version=\"1.0\"?>\n<r/>\n<?xml\tx?>\n"),
+            ("<?xml\r\n?><r/>", "<?xml?>\n<r/>\n"),
+            ("<r>a&#13;b</r>", "<r>a&#13;b</r>\n"),
+        ] {
+            let pretty_xml = pretty(Format::Xml, xml_in).unwrap();
+            assert_eq!(pretty_xml, xml_out, "{xml_in:?}");
+            assert_eq!(Tree::parse(Format::Xml, &pretty_xml).unwrap().nodes, Tree::parse(Format::Xml, xml_in).unwrap().nodes, "{xml_in:?}");
+        }
+        assert_eq!(Tree::parse(Format::Xml, "<r>a&#13;b</r>").unwrap().nodes[0].value, "a\rb");
         // A DOCTYPE and namespace declarations are written out, so the pretty form is still well-formed.
         let typed = "<?xml version=\"1.0\"?><!DOCTYPE note [<!ENTITY e \"x\">]><note>&e;</note>";
         assert_eq!(pretty(Format::Xml, typed).unwrap(), "<?xml version=\"1.0\"?>\n<!DOCTYPE note [<!ENTITY e \"x\">]>\n<note>x</note>\n");
