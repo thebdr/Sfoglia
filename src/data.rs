@@ -1108,6 +1108,8 @@ fn pretty_toml(text: &str) -> Result<String, ParseError> {
         .parse()
         .map_err(|error: toml_edit::TomlError| ParseError { line: 1, column: 1, message: error.message().to_string() })?;
     fmt_toml_table(document.as_table_mut());
+    // Comments after the last line live in the document's trailing decor, not in any table.
+    document.set_trailing("");
     let out = document.to_string();
     let mut out = out.trim_start_matches('\n').to_string();
     if !out.ends_with('\n') && !out.is_empty() {
@@ -1616,6 +1618,9 @@ mod tests {
         let pretty_inline = pretty(Format::Toml, toml_inline).unwrap();
         assert_eq!(pretty_inline, "[[arr]]\nz = { a = 1 }\nq.r = 2\n");
         assert_eq!(Tree::parse(Format::Toml, &pretty_inline).unwrap().nodes, Tree::parse(Format::Toml, toml_inline).unwrap().nodes);
+        // Comments after the last line go too; a file of comments alone comes back empty.
+        assert_eq!(pretty(Format::Toml, "a = 1\n# end\n").unwrap(), "a = 1\n");
+        assert_eq!(pretty(Format::Toml, "# only a comment\n").unwrap(), "");
         // XML: a processing instruction at the start is not the declaration, a DOCTYPE inside a comment is
         // not a DOCTYPE, an internal subset may end in `] >`, two prefixes for one URI keep their names, and
         // whitespace in attribute values is written as character references.
