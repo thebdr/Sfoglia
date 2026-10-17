@@ -40,9 +40,10 @@ pub const KEY_CONTEXT: &str = "MarkdownView";
 /// the text (as decoded, line feeds alone, measured again after every reload and toggle) is that long.
 pub const MAX_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 
-/// Up to this size the text is prepared on the window thread when the file opens, so the renderer gets its
-/// blocks in its first frame; a longer text is prepared off the thread and the renderer waits for it (a
-/// list laid out empty and filled later could land scrolled to its end under load).
+/// Up to this size the text is prepared on the window thread when the file opens, so the outline and the
+/// summary are there at once; a longer text is prepared off the thread. Either way the renderer, whose own
+/// parse runs in the background past 4 KB, lays out nothing until it holds the text: a list laid out empty
+/// and filled later could land scrolled to its end under load.
 const SYNC_PREPARE_BYTES: usize = 64 * 1024;
 
 /// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
@@ -514,8 +515,9 @@ impl Render for MarkdownView {
         let view = cx.entity().downgrade();
         let body = if self.raw_shown {
             div().id("markdown-raw").size_full().min_h_0().child(self.text.clone()).into_any_element()
-        } else if self.source.is_empty() && self.preparing.is_some() {
-            // The renderer has no text yet: nothing is laid out until it has, so its list never starts empty.
+        } else if self.rich.read(cx).rendered_text().source().is_empty() && (self.preparing.is_some() || !self.source.is_empty()) {
+            // The renderer has committed no text yet (ours is being prepared, or its own parse of it has not
+            // landed): nothing is laid out until it has, so its list never starts empty.
             div().id("markdown-preparing").test_support().size_full().min_h_0().px_4().py_2().text_color(muted).child("preparing…").into_any_element()
         } else {
             v_flex()

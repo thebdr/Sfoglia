@@ -673,3 +673,41 @@ fn a_reference_link_opens_like_an_inline_one(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::remove_file(&referenced).ok();
 }
+
+#[gpui_kit::test]
+fn the_renderer_lays_out_nothing_before_it_holds_the_text(cx: &mut TestAppContext) {
+    // Past 4 KB the renderer parses the text on its own task, so in the first frame it has no blocks: the
+    // view shows `preparing…` in its place rather than an empty list that fills later (which could land
+    // scrolled to its end under load), while the outline and the summary of a short text are there at once.
+    let mid = scratch("mid.md");
+    let mut text = String::new();
+    for n in 0..300 {
+        text.push_str(&format!("## Section {n}\n\nparagraph {n} of the middle-sized file\n\n"));
+    }
+    std::fs::write(&mid, &text).unwrap();
+    assert!(text.len() > 4 * 1024 && text.len() < 64 * 1024, "{} bytes", text.len());
+    let (handle, workspace) = open_workspace(cx);
+    let view = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[mid.clone()], window, cx));
+            window.render_frame(cx);
+            let view = workspace.read(cx).panels(cx)[0].read(cx).markdown_view().expect("rendered").clone();
+            assert!(!view.read(cx).is_preparing(), "a short text is prepared as the file opens");
+            assert_eq!(label(window, "markdown-summary"), "Markdown, 600 blocks, 300 headings");
+            assert!(window.try_find("markdown-preparing").is_some(), "the renderer holds no text yet, so nothing is laid out");
+            assert!(window.try_find("markdown-rendered").is_none());
+            assert_eq!(view.read(cx).rich_text().read(cx).list_state().item_count(), 0);
+            view
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("markdown-preparing").is_none());
+        assert!(window.try_find("markdown-rendered").is_some());
+        assert_eq!(view.read(cx).rich_text().read(cx).list_state().item_count(), 600, "every block in the first laid-out frame");
+        assert_eq!(view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix, 0, "at the top");
+    })
+    .unwrap();
+    std::fs::remove_file(&mid).ok();
+}
