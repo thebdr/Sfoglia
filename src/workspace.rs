@@ -780,21 +780,30 @@ impl Render for Workspace {
     }
 }
 
-/// The path as it stands on disk: canonical when the file is there (Windows'"'"' `\\?\` prefix taken off), else
-/// made absolute as spelled (a file gone meanwhile still has a folder to name).
+/// The path as it stands on disk: canonical when the file is there, its folder canonical and the name joined
+/// when the file is gone meanwhile (Windows' `\\?\` prefix taken off either way), else made absolute as spelled.
 fn plain_absolute(path: &Path) -> PathBuf {
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => {
-            let text = canonical.to_string_lossy();
-            if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-                PathBuf::from(format!(r"\\{rest}"))
-            } else if let Some(rest) = text.strip_prefix(r"\\?\") {
-                PathBuf::from(rest)
-            } else {
-                canonical
-            }
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return strip_verbatim(canonical);
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        if let Ok(folder) = std::fs::canonicalize(parent) {
+            return strip_verbatim(folder).join(name);
         }
-        Err(_) => std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A canonical path without the `\\?\` (or `\\?\UNC\`) prefix Windows gives it.
+fn strip_verbatim(canonical: PathBuf) -> PathBuf {
+    let text = canonical.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        canonical
     }
 }
 

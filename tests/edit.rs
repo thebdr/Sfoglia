@@ -917,8 +917,9 @@ fn a_restore_the_viewer_refuses_keeps_the_window_open_like_a_refused_save(cx: &m
         settle_dialog(window, cx);
         window.click("close-discard", cx);
         window.render_frame(cx);
-        let (title, _, _, message) = closing_dialog(window, cx);
+        let (title, folder, _, message) = closing_dialog(window, cx);
         assert_eq!(title, "Save changes to “hello.txt”?", "the dialog stays on the tab");
+        assert_eq!(folder, canonical_folder(&dir), "the folder is still shown as it stands on disk, the file gone");
         assert!(message.as_deref().unwrap_or("").starts_with("cannot read "), "with the viewer's message");
         assert!(panels[0].read(cx).is_dirty(cx), "nothing was restored");
         let view = panels[0].read(cx).text_view().unwrap().clone();
