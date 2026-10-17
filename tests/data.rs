@@ -356,13 +356,16 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let panels = workspace.read(cx).panels(cx);
         assert_eq!(panels.len(), 5);
-        let expected: [(Format, usize, &[usize], &[(usize, &str)], (usize, &str)); 5] = [
+        // Each with the grammar its raw text gets in the text viewer (C-005): JSON Lines the JSON one, XML
+        // the HTML one, INI none (its rules alone).
+        let expected: [(Format, usize, &[usize], &[(usize, &str)], (usize, &str), &str); 5] = [
             (
                 Format::JsonLines,
                 9,
                 &[0, 1, 4],
                 &[(0, "0|$|array|2 entries"), (1, "1|0|object|2 entries"), (2, "1|1|object|3 entries")],
                 (8, "$[1].tags[0]"),
+                "json",
             ),
             (
                 Format::Xml,
@@ -370,6 +373,7 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
                 &[0, 1, 2, 5],
                 &[(0, "0|catalogue|element|3 entries"), (1, "1|@year|attribute|2026"), (2, "1|book|element|2 entries")],
                 (7, "/catalogue/book[2]/title"),
+                "html",
             ),
             (
                 Format::Yaml,
@@ -377,6 +381,7 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
                 &[0, 1, 2, 5],
                 &[(0, "0|$|object|3 entries"), (1, "1|name|string|Sfoglia"), (2, "1|tags|array|2 entries"), (3, "1|server|object|1 entry")],
                 (6, "$.server.port"),
+                "yaml",
             ),
             (
                 Format::Toml,
@@ -384,6 +389,7 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
                 &[0, 1, 2],
                 &[(0, "0|$|table|2 entries"), (1, "1|name|string|Sfoglia"), (2, "1|server|table|2 entries")],
                 (4, "$.server.port"),
+                "toml",
             ),
             (
                 Format::Ini,
@@ -391,9 +397,10 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
                 &[0, 1, 2, 3],
                 &[(0, "0|name|key|top"), (1, "0|server|section|2 entries"), (2, "1|host|key|localhost"), (3, "1|port|key|8080")],
                 (3, "server.port"),
+                "text",
             ),
         ];
-        for (ix, (format, nodes, visible, rows, (node, path))) in expected.into_iter().enumerate() {
+        for (ix, (format, nodes, visible, rows, (node, path), language)) in expected.into_iter().enumerate() {
             // Opening a file again brings its tab to the front, so its rows are the ones rendered.
             workspace.update(cx, |w, cx| w.open_paths(&[fixture(files[ix])], window, cx));
             window.render_frame(cx);
@@ -407,6 +414,18 @@ fn every_format_opens_as_a_tree_with_its_root_rows(cx: &mut TestAppContext) {
                 assert_eq!(label(window, ("data-row", *row)), *text, "{} row {row}", files[ix]);
             }
             assert_eq!(tree.path(node), path, "{}", files[ix]);
+            // The raw text, and back. Opening an already open file brings its tab to the front without
+            // focusing it (the dock focuses on a click), so the rows are focused here first.
+            let focus = view.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            window.render_frame(cx);
+            window.press("ctrl-shift-d", cx);
+            window.render_frame(cx);
+            let text = view.read(cx).text_view().unwrap_or_else(|| panic!("{} shows its raw text", files[ix])).clone();
+            assert_eq!(text.read(cx).status().language, language, "{}", files[ix]);
+            window.press("ctrl-shift-d", cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).raw_shown(), "{}", files[ix]);
         }
     })
     .unwrap();

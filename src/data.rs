@@ -4,8 +4,6 @@
 
 use std::fmt;
 
-use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
-
 /// The formats the family decodes, one per extension group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
@@ -324,129 +322,7 @@ fn line_column(text: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
-// ---- JSON and JSON Lines: a serde seed that builds the arena while the parser runs ----
-
-/// The map key under which serde_json hands over a number's own text (`arbitrary_precision`).
-const JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
-
-/// Builds one value (and its subtree) straight into the arena, without an intermediate tree.
-struct Builder<'a> {
-    nodes: &'a mut Vec<Node>,
-    key: String,
-    depth: u32,
-}
-
-impl<'de, 'a> DeserializeSeed<'de> for Builder<'a> {
-    type Value = ();
-
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        deserializer.deserialize_any(self)
-    }
-}
-
-impl<'de, 'a> Visitor<'de> for Builder<'a> {
-    type Value = ();
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a JSON value")
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::Boolean, v.to_string());
-        Ok(())
-    }
-
-    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::Number, v.to_string());
-        Ok(())
-    }
-
-    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::Number, v.to_string());
-        Ok(())
-    }
-
-    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::Number, float_text(v));
-        Ok(())
-    }
-
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::String, v.to_string());
-        Ok(())
-    }
-
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::String, v);
-        Ok(())
-    }
-
-    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
-        push(self.nodes, self.depth, self.key, Kind::Null, "null".to_string());
-        Ok(())
-    }
-
-    fn visit_none<E: serde::de::Error>(self) -> Result<(), E> {
-        self.visit_unit()
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        let Builder { nodes, key, depth } = self;
-        let ix = push(nodes, depth, key, Kind::Array, String::new());
-        let mut count = 0;
-        while seq
-            .next_element_seed(Builder { nodes: &mut *nodes, key: count.to_string(), depth: depth + 1 })?
-            .is_some()
-        {
-            count += 1;
-        }
-        close(nodes, ix, count);
-        Ok(())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        let Builder { nodes, key, depth } = self;
-        let Some(first) = map.next_key::<String>()? else {
-            let ix = push(nodes, depth, key, Kind::Object, String::new());
-            close(nodes, ix, 0);
-            return Ok(());
-        };
-        // A number arrives as a one-entry map under serde_json's private key, its text as a
-        // string. An object that really has that key is told apart by what follows: anything
-        // but that one string that reads as a number.
-        if first == JSON_NUMBER_TOKEN {
-            let ix = push(nodes, depth, key, Kind::Object, String::new());
-            map.next_value_seed(Builder { nodes: &mut *nodes, key: first, depth: depth + 1 })?;
-            let mut count = 1;
-            while let Some(key) = map.next_key::<String>()? {
-                map.next_value_seed(Builder { nodes: &mut *nodes, key, depth: depth + 1 })?;
-                count += 1;
-            }
-            let number = count == 1
-                && nodes.len() == ix + 2
-                && nodes[ix + 1].kind == Kind::String
-                && is_json_number(&nodes[ix + 1].value);
-            if number {
-                let text = nodes.pop().map(|n| n.value).unwrap_or_default();
-                nodes[ix].kind = Kind::Number;
-                nodes[ix].value = text;
-                nodes[ix].end = ix + 1;
-            } else {
-                close(nodes, ix, count);
-            }
-            return Ok(());
-        }
-        let ix = push(nodes, depth, key, Kind::Object, String::new());
-        map.next_value_seed(Builder { nodes: &mut *nodes, key: first, depth: depth + 1 })?;
-        let mut count = 1;
-        while let Some(key) = map.next_key::<String>()? {
-            map.next_value_seed(Builder { nodes: &mut *nodes, key, depth: depth + 1 })?;
-            count += 1;
-        }
-        close(nodes, ix, count);
-        Ok(())
-    }
-}
+// ---- JSON and JSON Lines: serde_json checks the text, a scan of the valid text fills the arena ----
 
 /// serde_json's message without its own " at line N column M" tail, which the error's
 /// line and column carry.
@@ -466,20 +342,174 @@ fn json_error(error: serde_json::Error, text: &str, line_offset: usize) -> Parse
     ParseError { line: error.line() + line_offset, column, message: json_message(&error) }
 }
 
-/// Whether `text` is one JSON number and nothing else.
-fn is_json_number(text: &str) -> bool {
-    text.starts_with(|c: char| c == '-' || c.is_ascii_digit())
-        && serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
+/// A scan of JSON that serde_json has accepted: numbers keep the file's own text, strings
+/// are unescaped, and the arena is filled with no tree in between.
+struct JsonScan<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
 }
 
-fn parse_json_value(text: &str, nodes: &mut Vec<Node>, key: &str, depth: u32) -> Result<(), serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    Builder { nodes, key: key.to_string(), depth }.deserialize(&mut deserializer)?;
-    deserializer.end()
+impl JsonScan<'_> {
+    fn skip_whitespace(&mut self) {
+        while self.pos < self.bytes.len() && matches!(self.bytes[self.pos], b' ' | b'\t' | b'\n' | b'\r') {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> u8 {
+        self.bytes.get(self.pos).copied().unwrap_or(0)
+    }
+
+    fn value(&mut self, nodes: &mut Vec<Node>, key: String, depth: u32) {
+        self.skip_whitespace();
+        match self.peek() {
+            b'{' => {
+                self.pos += 1;
+                let ix = push(nodes, depth, key, Kind::Object, String::new());
+                let mut count = 0;
+                loop {
+                    self.skip_whitespace();
+                    match self.peek() {
+                        b'}' => {
+                            self.pos += 1;
+                            break;
+                        }
+                        b',' => {
+                            self.pos += 1;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let name = self.string();
+                    self.skip_whitespace();
+                    self.pos += 1; // the colon
+                    self.value(nodes, name, depth + 1);
+                    count += 1;
+                }
+                close(nodes, ix, count);
+            }
+            b'[' => {
+                self.pos += 1;
+                let ix = push(nodes, depth, key, Kind::Array, String::new());
+                let mut count = 0;
+                loop {
+                    self.skip_whitespace();
+                    match self.peek() {
+                        b']' => {
+                            self.pos += 1;
+                            break;
+                        }
+                        b',' => {
+                            self.pos += 1;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    self.value(nodes, count.to_string(), depth + 1);
+                    count += 1;
+                }
+                close(nodes, ix, count);
+            }
+            b'"' => {
+                let text = self.string();
+                push(nodes, depth, key, Kind::String, text);
+            }
+            b't' => {
+                self.pos += 4;
+                push(nodes, depth, key, Kind::Boolean, "true".to_string());
+            }
+            b'f' => {
+                self.pos += 5;
+                push(nodes, depth, key, Kind::Boolean, "false".to_string());
+            }
+            b'n' => {
+                self.pos += 4;
+                push(nodes, depth, key, Kind::Null, "null".to_string());
+            }
+            _ => {
+                let start = self.pos;
+                while self.pos < self.bytes.len()
+                    && !matches!(self.bytes[self.pos], b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r')
+                {
+                    self.pos += 1;
+                }
+                push(nodes, depth, key, Kind::Number, self.text[start..self.pos].to_string());
+            }
+        }
+    }
+
+    /// The string at the cursor (on its opening quote), unescaped; the cursor ends after
+    /// the closing quote.
+    fn string(&mut self) -> String {
+        self.pos += 1;
+        let mut out = String::new();
+        let mut start = self.pos;
+        while self.pos < self.bytes.len() {
+            match self.bytes[self.pos] {
+                b'"' => {
+                    out.push_str(&self.text[start..self.pos]);
+                    self.pos += 1;
+                    return out;
+                }
+                b'\\' => {
+                    out.push_str(&self.text[start..self.pos]);
+                    self.pos += 1;
+                    let escape = self.peek();
+                    self.pos += 1;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => out.push(self.unicode_escape()),
+                        _ => {}
+                    }
+                    start = self.pos;
+                }
+                _ => self.pos += 1,
+            }
+        }
+        out.push_str(&self.text[start.min(self.text.len())..]);
+        out
+    }
+
+    /// The four hex digits after `\u` (and a second escape for a surrogate pair), as a char.
+    fn unicode_escape(&mut self) -> char {
+        let first = self.hex4();
+        if (0xD800..=0xDBFF).contains(&first) && self.text[self.pos.min(self.text.len())..].starts_with("\\u") {
+            self.pos += 2;
+            let second = self.hex4();
+            if (0xDC00..=0xDFFF).contains(&second) {
+                let code = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+                return char::from_u32(code).unwrap_or('\u{FFFD}');
+            }
+            return '\u{FFFD}';
+        }
+        char::from_u32(first).unwrap_or('\u{FFFD}')
+    }
+
+    fn hex4(&mut self) -> u32 {
+        let digits = self.text.get(self.pos..self.pos + 4).unwrap_or("");
+        self.pos += 4;
+        u32::from_str_radix(digits, 16).unwrap_or(0xFFFD)
+    }
+}
+
+/// Fill the arena from `text`, which `check_json` has accepted.
+fn scan_json(text: &str, nodes: &mut Vec<Node>, key: &str, depth: u32) {
+    let mut scan = JsonScan { text, bytes: text.as_bytes(), pos: 0 };
+    scan.value(nodes, key.to_string(), depth);
 }
 
 fn parse_json(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
-    parse_json_value(text, nodes, "$", 0).map_err(|e| json_error(e, text, 0))
+    check_json(text, 0)?;
+    scan_json(text, nodes, "$", 0);
+    Ok(())
 }
 
 /// One record per non-blank line under a root `$` array; a bad line is reported by its number.
@@ -490,7 +520,8 @@ fn parse_json_lines(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError>
         if line.trim().is_empty() {
             continue;
         }
-        parse_json_value(line, nodes, &count.to_string(), 1).map_err(|e| json_error(e, line, line_ix))?;
+        check_json(line, line_ix)?;
+        scan_json(line, nodes, &count.to_string(), 1);
         count += 1;
     }
     close(nodes, root, count);
@@ -1281,22 +1312,23 @@ mod tests {
         assert_eq!(tree.roots(), vec![0]);
         assert_eq!(tree.levels(), 6);
         assert_eq!(tree.summary(), "JSON, 15 nodes, 6 levels");
-        // Scalars at the root; numbers keep the file's own digits, however long.
+        // Scalars at the root; numbers keep the file's own text, exponents and long digit runs included.
         let scalar = Tree::parse(Format::Json, "42").unwrap();
         assert_eq!(rows(&scalar), vec![(0, "$", "number", "42")]);
-        let numbers = Tree::parse(Format::Json, "[1.0, 2.5e10, -0.0, 12345678901234567890123, 0.1000]").unwrap();
-        assert_eq!(numbers.nodes[1].value, "1.0");
-        assert_eq!(numbers.nodes[2].value, "2.5e+10", "the exponent gets its sign, the digits stay");
-        assert_eq!(numbers.nodes[3].value, "-0.0");
-        assert_eq!(numbers.nodes[4].value, "12345678901234567890123");
-        assert_eq!(numbers.nodes[5].value, "0.1000");
+        let numbers = Tree::parse(Format::Json, "[1.0, 2.5e10, -0.0, 12345678901234567890123, 0.1000, 1E5, 1e400, 1.0e1, -1E-0]").unwrap();
+        let values: Vec<&str> = numbers.nodes[1..].iter().map(|n| n.value.as_str()).collect();
+        assert_eq!(values, vec!["1.0", "2.5e10", "-0.0", "12345678901234567890123", "0.1000", "1E5", "1e400", "1.0e1", "-1E-0"]);
+        assert!(numbers.nodes[1..].iter().all(|n| n.kind == Kind::Number));
+        // Strings are unescaped, surrogate pairs included.
+        let escaped = Tree::parse(Format::Json, r#"["a\"b\\c\/d\n\u00e9\ud83d\ude00", "\u0041"]"#).unwrap();
+        assert_eq!(escaped.nodes[1].value, "a\"b\\c/d\né😀");
+        assert_eq!(escaped.nodes[2].value, "A");
         let empty = Tree::parse(Format::Json, r#"{"a": [], "b": {}}"#).unwrap();
         assert_eq!(rows(&empty), vec![(0, "$", "object", "2 entries"), (1, "a", "array", "0 entries"), (1, "b", "object", "0 entries")]);
         // Duplicate keys are two nodes, as the file has them.
         let twice = Tree::parse(Format::Json, r#"{"a": 1, "a": 2}"#).unwrap();
         assert_eq!(rows(&twice), vec![(0, "$", "object", "2 entries"), (1, "a", "number", "1"), (1, "a", "number", "2")]);
-        // An object whose first key is serde_json's own number marker is still an object, unless its one
-        // value is a string that reads as a number (serde_json's own value type has the same limit).
+        // An object whose first key is serde_json's private number marker is an object like any other.
         let marker = "$serde_json::private::Number";
         let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": 5}}")).unwrap();
         assert_eq!(rows(&object), vec![(0, "$", "object", "1 entry"), (1, marker, "number", "5")]);
@@ -1304,6 +1336,8 @@ mod tests {
         assert_eq!(rows(&object), vec![(0, "$", "object", "1 entry"), (1, marker, "string", "abc")]);
         let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": \"1\", \"b\": 2}}")).unwrap();
         assert_eq!(rows(&object), vec![(0, "$", "object", "2 entries"), (1, marker, "string", "1"), (1, "b", "number", "2")]);
+        let object = Tree::parse(Format::Json, &format!("{{\"{marker}\": \"1\"}}")).unwrap();
+        assert_eq!(rows(&object), vec![(0, "$", "object", "1 entry"), (1, marker, "string", "1")]);
     }
 
     #[test]

@@ -25,9 +25,9 @@ flate2 = "1"
 ttf-parser = "0.25"
 usvg = "0.46"
 resvg = "0.46"
-# Structured data trees (C-010): JSON in key order with its numbers' own text, XML as a read-only DOM, YAML as a
+# Structured data trees (C-010): serde_json checks the JSON (numbers of any size), XML as a read-only DOM, YAML as a
 # typed document tree, TOML in file order.
-serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 roxmltree = "0.21"
 saphyr = "0.2"
 toml_edit = "0.25"

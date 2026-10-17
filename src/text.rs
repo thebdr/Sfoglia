@@ -325,6 +325,18 @@ pub const LANGUAGES: &[&str] = &[
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_data_formats_get_the_grammars_their_clause_names() {
+        // C-010: json, jsonl, yaml and toml by their own grammars, xml by the HTML one, ini by the rules alone.
+        assert_eq!(language_for("a.json"), Some("json"));
+        assert_eq!(language_for("a.jsonl"), Some("json"));
+        assert_eq!(language_for("a.yaml"), Some("yaml"));
+        assert_eq!(language_for("a.yml"), Some("yaml"));
+        assert_eq!(language_for("a.toml"), Some("toml"));
+        assert_eq!(language_for("a.xml"), Some("html"));
+        assert_eq!(language_for("a.ini"), None);
+    }
+
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)).unwrap()
     }
