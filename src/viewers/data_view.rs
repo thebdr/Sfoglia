@@ -16,7 +16,7 @@ use gpui_kit::{
 
 use crate::data::{self, Format, ParseError, Tree};
 use crate::viewers::rules_panel::RulesStore;
-use crate::viewers::text_view::TextView;
+use crate::viewers::text_view::{DiskStamp, TextView};
 
 actions!(
     data_view,
@@ -38,8 +38,10 @@ pub struct DataView {
     path: PathBuf,
     format: Format,
     rules: Entity<RulesStore>,
-    /// The file's bytes, kept until the text viewer takes them.
+    /// The file's bytes, kept until the text viewer takes them, and the disk as it was when they
+    /// were read, so the text viewer notices a writer that came in between (C-008).
     bytes: Vec<u8>,
+    read_at: Option<DiskStamp>,
     tree: Result<Tree, ParseError>,
     /// Per node, whether its children show.
     expanded: Vec<bool>,
@@ -79,6 +81,7 @@ impl DataView {
             format,
             rules: rules.clone(),
             bytes: bytes.to_vec(),
+            read_at: DiskStamp::of(path),
             tree,
             expanded: Vec::new(),
             visible: Vec::new(),
@@ -218,7 +221,7 @@ impl DataView {
         if let Some(text) = &self.text {
             return text.clone();
         }
-        let text = cx.new(|cx| TextView::new(&self.path, &self.bytes, &self.rules, window, cx));
+        let text = cx.new(|cx| TextView::new_as_read(&self.path, &self.bytes, self.read_at, &self.rules, window, cx));
         self._subscriptions.push(cx.observe(&text, |_, _, cx| cx.notify()));
         self.text = Some(text.clone());
         text

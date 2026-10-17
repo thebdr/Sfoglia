@@ -54,13 +54,14 @@ pub struct TextStatus {
 
 /// The file on disk as last read or written: enough to notice another writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiskStamp {
+pub struct DiskStamp {
     modified: Option<SystemTime>,
     len: u64,
 }
 
 impl DiskStamp {
-    fn of(path: &Path) -> Option<DiskStamp> {
+    /// The file's stamp now, or `None` when it cannot be read.
+    pub fn of(path: &Path) -> Option<DiskStamp> {
         let meta = std::fs::metadata(path).ok()?;
         Some(DiskStamp { modified: meta.modified().ok(), len: meta.len() })
     }
@@ -93,10 +94,23 @@ pub struct TextView {
 
 impl TextView {
     /// Decode `bytes` as the file at `path` and put the text in an editor, painted by the
-    /// rule sets that name the file.
+    /// rule sets that name the file; the bytes count as read now.
     pub fn new(
         path: &Path,
         bytes: &[u8],
+        rules: &Entity<RulesStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_as_read(path, bytes, DiskStamp::of(path), rules, window, cx)
+    }
+
+    /// The same for bytes read earlier, at `read_at`: the disk check then notices a writer that
+    /// came between that read and this view (the data viewer builds its text view on first need).
+    pub fn new_as_read(
+        path: &Path,
+        bytes: &[u8],
+        read_at: Option<DiskStamp>,
         rules: &Entity<RulesStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -141,7 +155,7 @@ impl TextView {
             editable: replaced == 0,
             dirty: false,
             message: None,
-            on_disk: DiskStamp::of(path),
+            on_disk: read_at,
             changed_on_disk: false,
             rules: rules.clone(),
             decorations,

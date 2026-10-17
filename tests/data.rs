@@ -558,4 +558,37 @@ fn the_raw_text_takes_a_space_and_a_read_only_text_stays_as_it_is(cx: &mut TestA
     })
     .unwrap();
     std::fs::remove_file(&crlf).ok();
+
+    // A change another program makes between opening the tab and first showing the raw text is noticed:
+    // the text viewer takes the disk as it was when the bytes were read (C-008), so its check finds the
+    // newer file and offers Reload, which brings the other program's content and rebuilds the tree.
+    let shared = scratch("shared.json");
+    std::fs::write(&shared, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, shared.clone());
+    std::fs::write(&shared, "{\"a\":1,\"other\":\"program\"}").unwrap();
+    let text = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-shift-d", cx);
+            window.render_frame(cx);
+            view.read(cx).text_view().expect("the raw text is shown").clone()
+        })
+        .unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(text.read(cx).changed_on_disk(), "the newer file is noticed");
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":1}");
+        text.update(cx, |text, cx| text.reload(window, cx));
+        window.render_frame(cx);
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":1,\"other\":\"program\"}");
+        assert!(!text.read(cx).changed_on_disk());
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tree().unwrap().len(), 3);
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&shared).ok();
 }
