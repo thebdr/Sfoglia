@@ -5,7 +5,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use markdown::mdast::Node;
+use markdown::mdast::{Node, ReferenceKind};
 use markdown::{Constructs, ParseOptions, to_mdast};
 
 /// What a block is, as the outline names it.
@@ -303,29 +303,39 @@ fn unique_slug(text: &str, slugs: &mut Vec<String>) -> String {
     slug
 }
 
-/// `![alt][id]` images written with a reference, rewritten as `![alt](url "title")` with the address
-/// their definition gives, since the renderer draws inline images only. Definitions stay where they
-/// are and no line moves, so the outline and the editor still agree line for line.
+/// `![alt][id]` images written with a reference, rewritten as `![alt](url)` with the address their
+/// definition gives, since the renderer draws inline images only. The alt is copied as written
+/// (it is valid between `![` and `]` already), the dropped label's line break stays inside it and
+/// titles are left out, so no line moves and the outline still agrees with the editor line for line.
 pub fn resolve_image_references(source: &str) -> String {
     let Ok(root) = to_mdast(source, &parse_options()) else { return source.to_string() };
-    let mut definitions: Vec<(String, String, Option<String>)> = Vec::new();
-    let mut references: Vec<(Range<usize>, String, String)> = Vec::new();
+    let mut definitions: Vec<(String, String)> = Vec::new();
+    let mut references: Vec<(Range<usize>, String, ReferenceKind)> = Vec::new();
     collect_images(&root, source, &mut definitions, &mut references);
     if references.is_empty() {
         return source.to_string();
     }
     let mut out = source.to_string();
     references.sort_by_key(|(span, _, _)| std::cmp::Reverse(span.start));
-    for (span, alt, identifier) in references {
-        let Some((_, url, title)) = definitions.iter().find(|(id, _, _)| *id == identifier) else { continue };
-        let alt = alt.replace(['\n', '\r'], " ").replace(']', "\\]");
-        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>']) {
-            format!("<{}>", url.replace('>', "%3E"))
+    for (span, identifier, kind) in references {
+        let Some((_, url)) = definitions.iter().find(|(id, _)| *id == identifier) else { continue };
+        let text = &source[span.clone()];
+        if !text.starts_with("![") || text.len() < 3 {
+            continue;
+        }
+        let alt_end = match kind {
+            ReferenceKind::Full => text.rfind("][").unwrap_or(text.len() - 1),
+            ReferenceKind::Collapsed => text.len() - 3,
+            ReferenceKind::Shortcut => text.len() - 1,
+        };
+        let alt = &text[2..alt_end];
+        let kept_breaks = "\n".repeat(text[alt_end..].matches('\n').count());
+        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>', '\n']) {
+            format!("<{}>", url.replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A"))
         } else {
             url.clone()
         };
-        let title = title.as_ref().map(|title| format!(" \"{}\"", title.replace('"', "\\\""))).unwrap_or_default();
-        out.replace_range(span, &format!("![{alt}]({destination}{title})"));
+        out.replace_range(span, &format!("![{alt}{kept_breaks}]({destination})"));
     }
     out
 }
@@ -333,14 +343,14 @@ pub fn resolve_image_references(source: &str) -> String {
 fn collect_images(
     node: &Node,
     source: &str,
-    definitions: &mut Vec<(String, String, Option<String>)>,
-    references: &mut Vec<(Range<usize>, String, String)>,
+    definitions: &mut Vec<(String, String)>,
+    references: &mut Vec<(Range<usize>, String, ReferenceKind)>,
 ) {
     match node {
-        Node::Definition(definition) => {
-            definitions.push((definition.identifier.clone(), definition.url.clone(), definition.title.clone()))
+        Node::Definition(definition) => definitions.push((definition.identifier.clone(), definition.url.clone())),
+        Node::ImageReference(image) => {
+            references.push((span_of(node, source), image.identifier.clone(), image.reference_kind))
         }
-        Node::ImageReference(image) => references.push((span_of(node, source), image.alt.clone(), image.identifier.clone())),
         _ => {}
     }
     if let Some(children) = node.children() {
@@ -603,21 +613,41 @@ mod tests {
 
     #[test]
     fn reference_images_are_written_inline_for_the_renderer() {
+        fn images(text: &str) -> Vec<String> {
+            fn walk(node: &Node, out: &mut Vec<String>) {
+                if let Node::Image(image) = node {
+                    out.push(format!("{}|{}", image.alt, image.url));
+                }
+                if let Some(children) = node.children() {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&to_mdast(text, &parse_options()).unwrap(), &mut out);
+            out
+        }
         let source = "A ![alt][logo] B\n\n![x][]\n\n![y]\n\n![nope][zz] and ![a\\]b][logo]\n\n[logo]: beta.png \"Be\\\"ta\"\n[x]: <a b.png>\n[y]: y.png\n";
         let shown = resolve_image_references(source);
         assert_eq!(
             shown,
-            "A ![alt](beta.png \"Be\\\"ta\") B\n\n![x](<a b.png>)\n\n![y](y.png)\n\n![nope][zz] and ![a\\]b](beta.png \"Be\\\"ta\")\n\n[logo]: beta.png \"Be\\\"ta\"\n[x]: <a b.png>\n[y]: y.png\n"
+            "A ![alt](beta.png) B\n\n![x](<a b.png>)\n\n![y](y.png)\n\n![nope][zz] and ![a\\]b](beta.png)\n\n[logo]: beta.png \"Be\\\"ta\"\n[x]: <a b.png>\n[y]: y.png\n"
         );
         assert_eq!(shown.lines().count(), source.lines().count(), "no line moves");
-        // Every image is inline now (an undefined reference was plain text all along), and the
-        // definitions still stand.
-        let root = to_mdast(&shown, &parse_options()).unwrap();
-        let mut definitions = Vec::new();
-        let mut references = Vec::new();
-        collect_images(&root, &shown, &mut definitions, &mut references);
-        assert_eq!(definitions.len(), 3);
-        assert!(references.is_empty(), "{references:?}");
+        assert_eq!(images(&shown), vec!["alt|beta.png", "x|a b.png", "y|y.png", "a]b|beta.png"]);
+        // An alt or a label over two lines (the parser drops a label's line ending when it matches a definition, so
+        // `lo⏎go` is `logo`), balanced brackets in the alt, a title ending in a backslash: every heading keeps its
+        // line and every image comes back as an image.
+        let tricky = "![first\nsecond][logo] tail\n\n# Install\n\n![x][lo\ngo] and ![a [b] c][logo] and ![t][slash]\n\n## Next\n\n[logo]: a.png \"one\ntwo\"\n[slash]: c.png \"t\\\\\"\n";
+        let shown = resolve_image_references(tricky);
+        assert_eq!(shown.lines().count(), tricky.lines().count(), "{shown}");
+        assert_eq!(
+            outline(&shown).headings.iter().map(|h| h.line).collect::<Vec<_>>(),
+            outline(tricky).headings.iter().map(|h| h.line).collect::<Vec<_>>(),
+            "{shown}"
+        );
+        assert_eq!(images(&shown), vec!["first\nsecond|a.png", "x\n|a.png", "a [b] c|a.png", "t|c.png"], "{shown}");
         // The fixture's reference image becomes inline too, and a source without references comes
         // back as it is, byte for byte.
         let plain = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/guide.md")).unwrap();
