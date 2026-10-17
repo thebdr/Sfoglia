@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use gpui_kit::component::dock::{BasePanel as _, ClosePanel, Panel as _};
+use gpui_kit::component::dock::{BasePanel as _, ClosePanel, DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, Panel as _, PanelId};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
 use sfoglia::workspace::FilePanel;
@@ -797,5 +797,182 @@ fn a_refused_save_keeps_the_window_open_with_its_message(cx: &mut TestAppContext
     cx.run_until_parked();
     assert_eq!(std::fs::read(&latin).unwrap(), fixture_bytes("latin1.txt"));
     assert!(cx.windows().is_empty(), "the tab restored: the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Escape is Cancel: the dialog goes, the tab stays modified, and the next close request asks again (C-012).
+#[gpui_kit::test]
+fn escape_is_cancel_and_the_question_returns_on_the_next_request(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-escape");
+    let hello = copy_fixture("hello.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none(), "Escape closes the dialog");
+        assert!(panels[0].read(cx).is_dirty(cx), "and leaves the tab modified");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1, "the window stays");
+    assert!(!vcx.simulate_close(), "the next request is refused again");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, _, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?", "and asks again");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Save all writes the tabs before a refused save, stops on it with the message, and leaves the later tabs
+/// modified and their files untouched (C-012).
+#[gpui_kit::test]
+fn save_all_stops_at_a_refused_save_with_the_rest_untouched(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-save-all-refused");
+    let hello = copy_fixture("hello.txt", &dir);
+    let latin = copy_fixture("latin1.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), latin.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &latin, &panels[1], "€");
+    type_into(cx, handle, &workspace, &utf16, &panels[2], "Y");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(more.as_deref(), Some("2 more files have unsaved changes"));
+        window.click("close-save-all", cx);
+        window.render_frame(cx);
+        let (title, _, more, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “latin1.txt”?", "Save all stops on the refused tab");
+        assert_eq!(message.as_deref(), Some("Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding"));
+        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"), "only what is left counts");
+        assert!(!panels[0].read(cx).is_dirty(cx), "the tab before it was saved");
+        assert!(panels[1].read(cx).is_dirty(cx));
+        assert!(panels[2].read(cx).is_dirty(cx), "the tab after it is still modified");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&hello).unwrap(), b"QSfoglia reads anything.\nSecond line.\n", "written");
+    assert_eq!(std::fs::read(&latin).unwrap(), fixture_bytes("latin1.txt"), "refused: untouched");
+    assert_eq!(std::fs::read(&utf16).unwrap(), fixture_bytes("utf16le.txt"), "not reached: untouched");
+    assert_eq!(cx.windows().len(), 1, "the window stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Discard changes on a file that can no longer be read restores nothing: the dialog stays on the tab with the
+/// viewer's message and the window open, as after a refused save (C-012).
+#[gpui_kit::test]
+fn a_restore_the_viewer_refuses_keeps_the_window_open_like_a_refused_save(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-restore-refused");
+    let hello = copy_fixture("hello.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    std::fs::remove_file(&hello).unwrap();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        let (title, _, _, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?", "the dialog stays on the tab");
+        assert!(message.unwrap_or_default().starts_with("cannot read "), "with the viewer's message");
+        assert!(panels[0].read(cx).is_dirty(cx), "nothing was restored");
+        let view = panels[0].read(cx).text_view().unwrap().clone();
+        assert_eq!(view.read(cx).text(cx).as_ref(), "QSfoglia reads anything.\nSecond line.\n", "the edit is kept");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1, "the window stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The question follows the tabs as they stand, not the order the files were opened in: a tab dragged to the
+/// front is asked about first (C-012).
+#[gpui_kit::test]
+fn the_question_follows_the_tabs_order_not_the_opening_order(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-tab-order");
+    let hello = copy_fixture("hello.txt", &dir);
+    let utf16 = copy_fixture("utf16le.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
+    cx.update_window(handle, |_, window, cx| {
+        // Move utf16le.txt's tab in front of hello.txt's, as a drag onto the first tab would.
+        let dock = workspace.read(cx).dock_area().clone();
+        fn first_tabs(node: &PaneNode) -> Option<NodeId> {
+            match node.kind() {
+                PaneRef::Tabs { .. } => Some(node.id()),
+                PaneRef::Split { children, .. } => children.iter().find_map(first_tabs),
+            }
+        }
+        let node = first_tabs(dock.read(cx).layout(DockPlacement::Center).expect("the centre layout").root()).expect("a tab group");
+        dock.update(cx, |dock, cx| {
+            dock.move_panel(PanelId::from(panels[1].entity_id()), InsertTarget::Tabs { node, ix: Some(0), activate: true }, window, cx)
+        });
+        window.render_frame(cx);
+        let order: Vec<String> = workspace.read(cx).panels_in_tab_order(cx).iter().map(|p| p.read(cx).info().name.clone()).collect();
+        assert_eq!(order, ["utf16le.txt", "hello.txt"], "the tabs as they stand");
+        let opened: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(opened, ["hello.txt", "utf16le.txt"], "the opening order is unchanged");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, _, more, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “utf16le.txt”?", "the first tab as the tabs stand");
+        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"));
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
     let _ = std::fs::remove_dir_all(&dir);
 }

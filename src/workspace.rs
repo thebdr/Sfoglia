@@ -560,6 +560,11 @@ impl Workspace {
         &self.rules_panel
     }
 
+    /// The dock the tabs live in (tests move tabs through it).
+    pub fn dock_area(&self) -> &Entity<DockArea> {
+        &self.dock_area
+    }
+
     /// Whether the rules panel is on screen.
     pub fn rules_panel_open(&self, cx: &App) -> bool {
         self.dock_area.read(cx).is_dock_open(DockPlacement::Right)
@@ -793,9 +798,34 @@ enum Decision {
 }
 
 impl Workspace {
+    /// The open panels as their tabs stand in the centre, group by group and left to right (a dragged tab
+    /// counts where it was dropped); a panel the centre does not hold follows in opening order.
+    pub fn panels_in_tab_order(&self, cx: &App) -> Vec<Entity<FilePanel>> {
+        fn collect(node: &PaneNode, out: &mut Vec<PanelId>) {
+            match node.kind() {
+                PaneRef::Tabs { panels, .. } => out.extend(panels.iter().copied()),
+                PaneRef::Split { children, .. } => children.iter().for_each(|child| collect(child, out)),
+            }
+        }
+        let mut ids = Vec::new();
+        if let Some(layout) = self.dock_area.read(cx).layout(DockPlacement::Center) {
+            collect(layout.root(), &mut ids);
+        }
+        let mut ordered: Vec<Entity<FilePanel>> = ids
+            .iter()
+            .filter_map(|id| self.open.iter().find(|f| PanelId::from(f.panel.entity_id()) == *id).map(|f| f.panel.clone()))
+            .collect();
+        for panel in self.panels(cx) {
+            if !ordered.iter().any(|p| p.entity_id() == panel.entity_id()) {
+                ordered.push(panel);
+            }
+        }
+        ordered
+    }
+
     /// The tabs with unsaved edits, in tab order.
     fn modified_panels(&self, cx: &App) -> Vec<Entity<FilePanel>> {
-        self.panels(cx).into_iter().filter(|panel| panel.read(cx).is_dirty(cx)).collect()
+        self.panels_in_tab_order(cx).into_iter().filter(|panel| panel.read(cx).is_dirty(cx)).collect()
     }
 
     /// The platform asks whether the window may close (C-012): yes when every tab is saved. Otherwise
@@ -845,6 +875,7 @@ impl Workspace {
                 n => format!("{n} more files have unsaved changes"),
             };
             let on_close = this.clone();
+            let on_enter = this.clone();
             alert
                 .title({
                     let title = format!("Save changes to “{name}”?");
@@ -874,6 +905,11 @@ impl Workspace {
                 )
                 .on_close(move |_, _, cx| {
                     on_close.update(cx, |workspace, cx| workspace.closing_dialog_closed(cx)).ok();
+                })
+                // Enter is the primary button, Save; the dialog's own closing is ours (`decide` closes it).
+                .on_ok(move |_, window, cx| {
+                    on_enter.update(cx, |workspace, cx| workspace.decide(Decision::Save, window, cx)).ok();
+                    false
                 })
         });
     }
@@ -914,7 +950,7 @@ impl Workspace {
     }
 
     /// Save or restore the first `count` tabs of the queue (a tab saved meanwhile is skipped); a refused
-    /// save stops on its tab with the message.
+    /// save, or a restore that could not read the file back, stops on its tab with the viewer's message.
     fn settle(&mut self, closing: &mut Closing, count: usize, save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut done = 0;
         while done < count && !closing.queue.is_empty() {
@@ -929,6 +965,12 @@ impl Workspace {
                     }
                 } else {
                     text.update(cx, |text, cx| text.reload(window, cx));
+                    if text.read(cx).is_dirty() {
+                        // The saved text could not be read back (the file is gone): nothing was restored, so
+                        // the question stays on this tab with the viewer's message, as after a refused save.
+                        closing.message = text.read(cx).message().map(str::to_string);
+                        return;
+                    }
                 }
             }
             closing.queue.remove(0);
