@@ -337,29 +337,44 @@ fn on_deep_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 /// bytes), so the text is checked before it is built; toml stops at about 80 with its own message.
 const MAX_DEPTH: usize = 200;
 
-/// How many nodes YAML aliases may stand for in one file: the loader copies the anchored
-/// node for every alias, so a few lines can ask for billions.
+/// How much YAML anchors and aliases may stand for in one file, in nodes and bytes of scalar
+/// text together: the loader keeps a copy of every anchored node and copies it again for
+/// every alias, so a few lines can ask for billions.
 const ALIAS_BUDGET: usize = 1_000_000;
 
-/// Refuse YAML nested past `MAX_DEPTH`, or whose aliases stand for more than `ALIAS_BUDGET`
-/// nodes, by counting the parser's events, which it produces without recursion. An alias
-/// counts as the depth and the size of what it names. A scan error here is left to the loader,
-/// which reports it.
+/// Refuse YAML nested past `MAX_DEPTH`, or whose anchors and aliases stand for more than
+/// `ALIAS_BUDGET`, by counting the parser's events, which it produces without recursion. An
+/// alias counts as the depth and the size of what it names; an anchored collection counts
+/// once more at its end, for the copy the loader keeps. A scan error here is left to the
+/// loader, which reports it.
 fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
     use saphyr_parser::Event;
-    // Every open collection: the depth of its own node, the deepest level inside it, its size.
+    // Every open collection: where it starts, its anchor, the depth of its own node, the
+    // deepest level inside it, and its size in nodes and bytes.
     struct Open {
+        line: usize,
+        column: usize,
         anchor: usize,
         depth: usize,
         deepest: usize,
         size: usize,
     }
     let mut open: Vec<Open> = Vec::new();
-    // Per anchor id: the levels below the anchored node, and the nodes it holds.
+    // Per anchor id: the levels below the anchored node, and what it holds.
     let mut heights: Vec<usize> = Vec::new();
     let mut sizes: Vec<usize> = Vec::new();
     let mut expanded = 0usize;
     let at = |span: &saphyr_parser::Span| (span.start.line().max(1), span.start.col() + 1);
+    let too_deep = |line: usize, column: usize, suffix: &str| ParseError {
+        line,
+        column,
+        message: format!("values nested deeper than {MAX_DEPTH} levels{suffix}"),
+    };
+    let too_much = |line: usize, column: usize| ParseError {
+        line,
+        column,
+        message: format!("anchors and aliases stand for more than {ALIAS_BUDGET} nodes and bytes"),
+    };
     let remember = |heights: &mut Vec<usize>, sizes: &mut Vec<usize>, anchor: usize, height: usize, size: usize| {
         if anchor > 0 {
             if heights.len() <= anchor {
@@ -373,40 +388,51 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
     for event in saphyr_parser::Parser::new_from_str(text) {
         let Ok((event, span)) = event else { return Ok(()) };
         let depth = open.len();
+        let (line, column) = at(&span);
         match event {
             Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
                 if depth + 1 > MAX_DEPTH {
-                    let (line, column) = at(&span);
-                    return Err(ParseError { line, column, message: format!("values nested deeper than {MAX_DEPTH} levels") });
+                    return Err(too_deep(line, column, ""));
                 }
-                open.push(Open { anchor, depth: depth + 1, deepest: depth + 1, size: 1 });
+                open.push(Open { line, column, anchor, depth: depth + 1, deepest: depth + 1, size: 1 });
             }
             Event::SequenceEnd | Event::MappingEnd => {
                 let Some(done) = open.pop() else { continue };
                 remember(&mut heights, &mut sizes, done.anchor, done.deepest - done.depth, done.size);
+                if done.anchor > 0 {
+                    expanded += done.size;
+                    if expanded > ALIAS_BUDGET {
+                        return Err(too_much(done.line, done.column));
+                    }
+                }
                 if let Some(parent) = open.last_mut() {
                     parent.deepest = parent.deepest.max(done.deepest);
                     parent.size += done.size;
                 }
             }
-            Event::Scalar(_, _, anchor, _) => {
-                remember(&mut heights, &mut sizes, anchor, 0, 1);
+            Event::Scalar(value, _, anchor, _) => {
+                let size = 1 + value.len();
+                remember(&mut heights, &mut sizes, anchor, 0, size);
+                if anchor > 0 {
+                    expanded += size;
+                    if expanded > ALIAS_BUDGET {
+                        return Err(too_much(line, column));
+                    }
+                }
                 if let Some(parent) = open.last_mut() {
                     parent.deepest = parent.deepest.max(depth + 1);
-                    parent.size += 1;
+                    parent.size += size;
                 }
             }
             Event::Alias(anchor) => {
                 let height = heights.get(anchor).copied().unwrap_or(0);
                 let size = sizes.get(anchor).copied().unwrap_or(1);
                 if depth + 1 + height > MAX_DEPTH {
-                    let (line, column) = at(&span);
-                    return Err(ParseError { line, column, message: format!("values nested deeper than {MAX_DEPTH} levels through an alias") });
+                    return Err(too_deep(line, column, " through an alias"));
                 }
                 expanded += size;
                 if expanded > ALIAS_BUDGET {
-                    let (line, column) = at(&span);
-                    return Err(ParseError { line, column, message: format!("aliases stand for more than {ALIAS_BUDGET} nodes") });
+                    return Err(too_much(line, column));
                 }
                 if let Some(parent) = open.last_mut() {
                     parent.deepest = parent.deepest.max(depth + 1 + height);
@@ -423,6 +449,9 @@ fn too_deep(text: &str, offset: usize, what: &str) -> ParseError {
     let (line, column) = line_column(text, offset);
     ParseError { line, column, message: format!("{what} nested deeper than {MAX_DEPTH} levels") }
 }
+
+/// How many nodes an XML document may expand to, entities included.
+const XML_NODES_LIMIT: u32 = 1_000_000;
 
 /// Refuse `text` when its elements nest deeper than `MAX_DEPTH`, in the document and inside any
 /// entity value of its DOCTYPE (the markup there is parsed where the entity is referenced).
@@ -1104,16 +1133,33 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<
 
 fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
     check_xml_depth(text)?;
-    let options = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    // Entities may expand to a million nodes at most: a few lines can ask for billions otherwise.
+    let options = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: XML_NODES_LIMIT, ..Default::default() };
     roxmltree::Document::parse_with_options(text, options).map_err(|error| {
         let at = error.pos();
-        ParseError { line: at.row as usize, column: at.col as usize, message: xml_message(&error.to_string()) }
+        let message = match error {
+            roxmltree::Error::NodesLimitReached => format!("the document expands to more than {XML_NODES_LIMIT} nodes"),
+            _ => xml_message(&error.to_string()),
+        };
+        ParseError { line: at.row as usize, column: at.col as usize, message }
     })
+}
+
+/// The byte range of the DOCTYPE, whose inner comments and processing instructions roxmltree
+/// reports as children of the document: they belong to the DOCTYPE, not to the tree.
+fn xml_doctype_range(text: &str) -> Option<std::ops::Range<usize>> {
+    let doctype = xml_prolog(text).1?;
+    let start = doctype.as_ptr() as usize - text.as_ptr() as usize;
+    Some(start..start + doctype.len())
 }
 
 fn parse_xml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
     let document = load_xml(text)?;
+    let doctype = xml_doctype_range(text);
     for child in document.root().children() {
+        if doctype.as_ref().is_some_and(|range| range.contains(&child.range().start)) {
+            continue;
+        }
         walk_xml(child, nodes, 0)?;
     }
     Ok(())
@@ -1277,7 +1323,11 @@ fn pretty_xml(text: &str) -> Result<String, ParseError> {
         out.push_str(doctype);
         out.push('\n');
     }
+    let doctype = xml_doctype_range(text);
     for child in document.root().children() {
+        if doctype.as_ref().is_some_and(|range| range.contains(&child.range().start)) {
+            continue;
+        }
         write_xml(child, 0, &mut out);
     }
     Ok(out)
@@ -1866,6 +1916,11 @@ mod tests {
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- the catalogue -->\n<catalogue year=\"2026\">\n  <book id=\"b1\">\n    <title>Leafing</title>\n    <price currency=\"EUR\">12.50</price>\n  </book>\n  <book id=\"b2\">\n    <title>Pages &amp; Bytes</title>\n  </book>\n  <note>\n    mixed\n    <b>content</b>\n    here\n  </note>\n  <?render fast?>\n  <empty/>\n</catalogue>\n"
         );
         assert_eq!(Tree::parse(Format::Xml, &xml).unwrap().nodes, Tree::parse(Format::Xml, XML).unwrap().nodes);
+        // Comments and processing instructions inside the DOCTYPE stay there: they are not rows and are not written twice.
+        let subset = "<!DOCTYPE r [<!-- c --><?pi x?>]><r/>";
+        assert_eq!(rows(&Tree::parse(Format::Xml, subset).unwrap()), vec![(0, "r", "element", "0 entries")]);
+        assert_eq!(pretty(Format::Xml, subset).unwrap(), "<!DOCTYPE r [<!-- c --><?pi x?>]>\n<r/>\n");
+        assert_eq!(Tree::parse(Format::Xml, &pretty(Format::Xml, subset).unwrap()).unwrap().nodes, Tree::parse(Format::Xml, subset).unwrap().nodes);
         // A DOCTYPE and namespace declarations are written out, so the pretty form is still well-formed.
         let typed = "<?xml version=\"1.0\"?><!DOCTYPE note [<!ENTITY e \"x\">]><note>&e;</note>";
         assert_eq!(pretty(Format::Xml, typed).unwrap(), "<?xml version=\"1.0\"?>\n<!DOCTYPE note [<!ENTITY e \"x\">]>\n<note>x</note>\n");
@@ -1987,7 +2042,10 @@ mod tests {
             ("xml pi with apostrophe in the doctype 20000", Format::Xml, format!("<!DOCTYPE r [<?pi it's?>]>{}x{}", "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 627: elements nested deeper than 200 levels")),
             ("yaml alias chain", Format::Yaml, format!("a0: &a0 {}1{}\na1: &a1 {}*a0{}\n", "[".repeat(190), "]".repeat(190), "[".repeat(190), "]".repeat(190)), Err("line 2, column 199: values nested deeper than 200 levels through an alias")),
             ("yaml alias within bounds", Format::Yaml, format!("a0: &a0 {}1{}\na1: {}*a0{}\n", "[".repeat(100), "]".repeat(100), "[".repeat(50), "]".repeat(50)), Ok((253, 152))),
-            ("yaml alias bomb", Format::Yaml, (1..6).fold("l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n".to_string(), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))), Err("line 6, column 45: aliases stand for more than 1000000 nodes")),
+            ("yaml alias bomb", Format::Yaml, (1..6).fold("l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n".to_string(), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))), Err("line 6, column 20: anchors and aliases stand for more than 1000000 nodes and bytes")),
+            ("yaml alias bomb on long scalars", Format::Yaml, (1..5).fold(format!("l0: &l0 [{}]\n", vec!["y".repeat(1000); 10].join(", ")), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))) + "l5: [*l4, *l4, *l4, *l4, *l4, *l4, *l4]\n", Err("line 3, column 45: anchors and aliases stand for more than 1000000 nodes and bytes")),
+            ("yaml nested anchors over a long list", Format::Yaml, format!("x: {}{}{}\n", (0..190).map(|i| format!("&a{i} [")).collect::<String>(), vec!["1"; 100_000].join(", "), "]".repeat(190)), Err("line 1, column 1195: anchors and aliases stand for more than 1000000 nodes and bytes")),
+            ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 1: the document expands to more than 1000000 nodes")),
             ("xml entity 100 in 50", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"{}x{}\">]>{}&e;{}", "<a>".repeat(100), "</a>".repeat(100), "<r>".repeat(50), "</r>".repeat(50)), Ok((150, 150))),
         ];
         for (name, format, text, expected) in cases {
