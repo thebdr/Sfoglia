@@ -612,7 +612,11 @@ fn an_unchanged_value_writes_nothing_whatever_the_quoting(cx: &mut TestAppContex
 /// as read now (its encoding named afresh, the budget measured again), Keep mine marks the tab (C-013).
 #[gpui_kit::test]
 fn a_reload_follows_the_file_its_encoding_and_its_budget(cx: &mut TestAppContext) {
-    let dir = scratch_dir("sheet-reload");
+    // One fixed folder, cleared first and removed at the end: the file grows to 65 MB below, and a leftover
+    // under a fresh name every run once filled the disk.
+    let dir = std::env::temp_dir().join("sfoglia-sheet-reload");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("latin.csv");
     std::fs::write(&path, b"id,name\n1,caf\xe9\n").unwrap();
     let (handle, panel, view) = open_sheet(cx, path.clone());
@@ -754,12 +758,47 @@ fn a_save_in_another_encoding_renames_it_in_the_summary(cx: &mut TestAppContext)
 fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppContext) {
     let dir = scratch_dir("sheet-book-reload");
     let path = copy_fixture("book.xlsx", &dir);
-    let (handle, _panel, view) = open_sheet(cx, path.clone());
+    let (handle, panel, view) = open_sheet(cx, path.clone());
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns");
+        window.click(("sheet-tab-button", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Notes: 2 rows, 2 columns");
     })
     .unwrap();
+    // Rewritten outside (the same book, a later stamp): Reload reads it afresh and opens on the first sheet.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, fixture_bytes("book.xlsx")).unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some());
+        window.click("sheet-reload", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "reloaded");
+        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns", "the first sheet again");
+        assert!(window.try_find("sheet-changed-on-disk").is_none());
+    })
+    .unwrap();
+    // Changed again: Keep mine keeps the sheets as read, takes the bar down and marks nothing (nothing to save).
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, b"changed again").unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some());
+        window.click("sheet-keep-mine", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "kept the sheets as read");
+        assert!(window.try_find("sheet-changed-on-disk").is_none());
+        assert!(!panel.read(cx).is_dirty(cx), "a workbook has nothing to save");
+        assert_eq!(dump(&view, cx).1[1][1], "Rossi, Mario");
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
     std::fs::write(&path, b"no longer a workbook").unwrap();
     cx.background_executor.advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
@@ -772,6 +811,91 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns", "the sheets as read stay");
         assert_eq!(dump(&view, cx).1[1][1], "Rossi, Mario");
         assert!(window.try_find("sheet-changed-on-disk").is_none(), "the bar is down");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A mixed column sorts numbers by value before text, text case-insensitively, empty cells last either way:
+/// the first click is the reverse of that order, the second the order itself (C-013).
+#[gpui_kit::test]
+fn a_mixed_column_sorts_numbers_before_text_case_insensitively(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-mixed-sort");
+    let path = dir.join("mixed.csv");
+    std::fs::write(&path, "k,v\n1,b\n2,10\n3,A\n4,2\n5,c\n6,\n").unwrap();
+    let (handle, _panel, view) = open_sheet(cx, path);
+    let values = |view: &Entity<SheetView>, cx: &gpui_kit::App| -> Vec<String> { dump(view, cx).1.iter().map(|r| r[1].clone()).collect() };
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(values(&view, cx), rows(&["c", "b", "A", "10", "2", ""]), "descending: text before numbers, the empty cell last");
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(values(&view, cx), rows(&["2", "10", "A", "b", "c", ""]), "ascending: numbers by value, then text regardless of case, the empty cell last");
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(values(&view, cx), rows(&["b", "10", "A", "2", "c", ""]), "the file's order again");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.tsv` is read by tabs and says so (C-013).
+#[gpui_kit::test]
+fn a_tsv_opens_by_tabs_and_says_so(cx: &mut TestAppContext) {
+    let (handle, _panel, view) = open_sheet(cx, fixture("table.tsv"));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "TSV, 3 rows, 5 columns, tab, UTF-8");
+        assert_eq!(dump(&view, cx).1[0][1], "Rossi, Mario", "a comma inside a field is no delimiter here");
+    })
+    .unwrap();
+}
+
+/// A UTF-16 file names its encoding before and after an edit saved back with its mark, that record alone
+/// changed (C-013). One workspace per test: a second in the same context delivers Enter twice.
+#[gpui_kit::test]
+fn a_utf16_file_keeps_its_label_and_its_bytes(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-utf16");
+    let path = copy_fixture("utf16.csv", &dir);
+    let (handle, panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-16 LE");
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("Élodie Durand", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
+        assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-16 LE", "the encoding as read, still");
+        assert!(panel.read(cx).is_dirty(cx));
+        window.press("ctrl-s", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let written = std::fs::read(&path).unwrap();
+    assert_eq!(&written[..2], &[0xff, 0xfe], "the mark kept");
+    let expected = String::from_utf8(fixture_bytes("table.csv")).unwrap().replace("2,Élodie,plain", "2,Élodie Durand,plain");
+    let expected_bytes: Vec<u8> = [0xff, 0xfe].into_iter().chain(expected.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(written, expected_bytes, "that record alone, in UTF-16 LE");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-16 LE", "as last written");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
