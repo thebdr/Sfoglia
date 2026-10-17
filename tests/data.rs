@@ -889,25 +889,29 @@ fn a_value_of_several_lines_stays_on_its_row(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn deep_rows_keep_their_glyph_and_key_in_the_key_column(cx: &mut TestAppContext) {
     // The key column widens with the deepest open row, up to twice its width, and the indent stops
-    // growing past that: a row forty levels deep still shows its glyph and its whole key inside the
-    // column, and its value cell is on screen.
+    // growing past that: a row forty levels deep still shows its glyph and its whole 26-character key
+    // inside the column (the key cell as wide as at the first level), and its value cell is on screen.
     let deep = scratch("deep.json");
     let mut json = String::new();
     for level in 1..=40 {
-        json.push_str(&format!("{{\"k{level}\":"));
+        json.push_str(&format!("{{\"customerShippingPostcode{level:02}\":"));
     }
     json.push_str("\"leaf\"");
     json.push_str(&"}".repeat(40));
     std::fs::write(&deep, &json).unwrap();
     let (handle, _panel, view) = open_data(cx, deep.clone());
-    cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-        window.press("ctrl-shift-f", cx);
-        window.render_frame(cx);
-        window.input("k40", cx);
-        window.press("enter", cx);
-    })
-    .unwrap();
+    let whole = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(label(window, ("data-row", 1usize)), "1|customerShippingPostcode01|object|1 entry");
+            let whole = f32::from(window.find(("data-key", 1usize)).bounds().size.width);
+            window.press("ctrl-shift-f", cx);
+            window.render_frame(cx);
+            window.input("Postcode40", cx);
+            window.press("enter", cx);
+            whole
+        })
+        .unwrap();
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
@@ -916,9 +920,9 @@ fn deep_rows_keep_their_glyph_and_key_in_the_key_column(cx: &mut TestAppContext)
             let node = &view.read(cx).tree().unwrap().nodes[found];
             (node.depth, node.key.clone())
         };
-        assert_eq!((depth, key.as_str()), (40, "k40"));
+        assert_eq!((depth, key.as_str()), (40, "customerShippingPostcode40"));
         let found_row = view.read(cx).visible_nodes().iter().position(|&n| n == found).unwrap();
-        assert_eq!(label(window, ("data-row", found_row)), "40|k40|string|leaf|found");
+        assert_eq!(label(window, ("data-row", found_row)), "40|customerShippingPostcode40|string|leaf|found");
         let width = f32::from(window.find("data-tree").bounds().size.width);
         let mut checked = 0;
         for row in 0..view.read(cx).visible_nodes().len() {
@@ -933,7 +937,8 @@ fn deep_rows_keep_their_glyph_and_key_in_the_key_column(cx: &mut TestAppContext)
             let (glyph_left, glyph_right) = (f32::from(glyph.origin.x), f32::from(glyph.origin.x + glyph.size.width));
             let (key_left, key_right) = (f32::from(key.origin.x), f32::from(key.origin.x + key.size.width));
             assert!(glyph_left >= left && glyph_right <= right, "row {row}: glyph {glyph:?} in {column:?}");
-            assert!(key_left >= glyph_right && key_right <= right && f32::from(key.size.width) > 0., "row {row}: key {key:?} in {column:?}");
+            assert!(key_left >= glyph_right && key_right <= right, "row {row}: key {key:?} in {column:?}");
+            assert_eq!(f32::from(key.size.width), whole, "row {row}: the key cell is as wide as at the first level, {key:?} in {column:?}");
             assert!(f32::from(value.origin.x) + 60. < width, "row {row}: value {value:?} on a tree {width} px wide");
             checked += 1;
         }

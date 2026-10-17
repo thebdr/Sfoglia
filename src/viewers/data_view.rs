@@ -34,11 +34,11 @@ const VALUE_PREVIEW: usize = 200;
 /// Pixels per level of nesting.
 const INDENT: f32 = 16.;
 /// The key column's width at rest, and at most once deep rows are open: it widens with the deepest
-/// open row so that row keeps `KEY_ROOM` for its glyph and key, and the indent stops growing past
-/// that, so the type and value columns stay on screen.
+/// open row so every row keeps the room a root row has at rest for its glyph and key, and the
+/// indent stops growing past that, so the type and value columns stay on screen.
 const KEY_COLUMN: f32 = 300.;
 const KEY_COLUMN_MAX: f32 = 600.;
-const KEY_ROOM: f32 = 176.;
+const KEY_ROOM: f32 = KEY_COLUMN;
 
 pub struct DataView {
     focus_handle: FocusHandle,
