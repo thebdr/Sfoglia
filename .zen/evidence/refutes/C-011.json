@@ -1,13 +1,13 @@
 {
   "clause": "C-011",
   "verdict": "holds",
-  "ranAt": "2026-10-17T15:52:48.065Z",
-  "headCommit": "01bf2e9fd107bc485b7e03939b86c8fe57679470",
+  "ranAt": "2026-10-17T16:22:44.757Z",
+  "headCommit": "f63cd313bbdd77785a4f42067526487715625c8b",
   "tests": [
     {
       "name": "the_markdown_extensions_map_to_their_family",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "the_outline_lists_every_block_with_its_kind_depth_and_text",
@@ -27,27 +27,27 @@
     {
       "name": "a_markdown_file_opens_rendered_with_its_summary_and_text",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "the_raw_text_toggles_edits_saves_and_re_renders",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "the_toggle_carries_the_place_between_the_views",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "a_link_to_another_file_opens_it_at_its_heading",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "remote_images_are_fetched_through_the_apps_http_client",
@@ -57,7 +57,7 @@
     {
       "name": "data_images_take_their_format_from_the_media_type_or_a_blank",
       "file": "src/viewers/markdown_view.rs",
-      "symbolSha": "7ff85de3a895465d946c393a7015f9cb5bb82ff95d886689a4fd85f971920e3b"
+      "symbolSha": "72ac63772ede4cd282bc0e4b8f6c55290e79d7c25f4aaef9379e8910e7eb76a7"
     },
     {
       "name": "reference_images_are_written_inline_for_the_renderer",
@@ -72,7 +72,7 @@
     {
       "name": "a_large_markdown_file_opens_on_its_text",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "repeated_headings_get_numbered_slugs_in_linear_time",
@@ -82,12 +82,17 @@
     {
       "name": "the_place_is_kept_while_the_renderer_catches_up",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     },
     {
       "name": "a_reference_link_opens_like_an_inline_one",
       "file": "tests/markdown.rs",
-      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
+    },
+    {
+      "name": "the_renderer_lays_out_nothing_before_it_holds_the_text",
+      "file": "tests/markdown.rs",
+      "symbolSha": "afd778ddcc5be4fd8e0eed5e576a742d6b4047f42fe9c71155dbfa710e93d7cb"
     }
   ]
 }
