@@ -522,47 +522,91 @@ fn xml_expansion_budget(text: &str) -> usize {
     1_000_000usize.max(text.len().saturating_mul(8))
 }
 
-/// The general entities a DOCTYPE declares inline, by name, with their values as written.
+/// The general entities a DOCTYPE declares inline, by name, with their values as written:
+/// comments, processing instructions and the other declarations' quoted values are skipped,
+/// so a `<!ENTITY` written inside them is not taken for a declaration.
 fn xml_entities(doctype: &str) -> Vec<(String, String)> {
     let mut entities = Vec::new();
-    let mut from = 0;
-    while let Some(at) = doctype[from..].find("<!ENTITY") {
-        let start = from + at;
-        let rest = doctype[start + "<!ENTITY".len()..].trim_start();
-        if let Some((name, after)) = rest.split_once(char::is_whitespace) {
-            let after = after.trim_start();
-            if let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                let value = after[1..].split(quote).next().unwrap_or("");
+    let mut i = 0;
+    while i < doctype.len() {
+        let rest = &doctype[i..];
+        if rest.starts_with("<!--") {
+            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with("<?") {
+            i += rest.find("?>").map_or(rest.len(), |e| e + 2);
+        } else if rest.starts_with("<!DOCTYPE") {
+            i += rest.find('[').map_or_else(|| xml_declaration_end(rest), |b| b + 1);
+        } else if rest.starts_with("<!ENTITY") {
+            let after = rest["<!ENTITY".len()..].trim_start();
+            let (name, after_name) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
+            let after_name = after_name.trim_start();
+            if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let value = after_name[1..].split(quote).next().unwrap_or("");
                 if !name.starts_with('%') {
                     entities.push((name.to_string(), value.to_string()));
                 }
             }
+            i += xml_declaration_end(rest);
+        } else if rest.starts_with("<!") {
+            i += xml_declaration_end(rest);
+        } else {
+            i += rest.chars().next().map_or(1, char::len_utf8);
         }
-        from = start + "<!ENTITY".len();
     }
     entities
 }
 
-/// The bytes an entity stands for once the entities inside its value are expanded too; a
-/// chain deeper than roxmltree allows (ten) stops counting, as roxmltree stops expanding.
-fn xml_expanded_len(name: &str, entities: &[(String, String)], depth: usize) -> usize {
-    let Some((_, value)) = entities.iter().find(|(n, _)| n == name) else { return 0 };
-    if depth > 10 {
-        return value.len();
-    }
-    let mut total = value.len();
-    let mut rest = value.as_str();
-    while let Some(at) = rest.find('&') {
-        let tail = &rest[at + 1..];
-        match tail.find(';') {
-            Some(end) if !tail.starts_with('#') && entities.iter().any(|(n, _)| n == &tail[..end]) => {
-                total = total - (end + 2) + xml_expanded_len(&tail[..end], entities, depth + 1);
-                rest = &tail[end + 1..];
+/// The length of the `<!...>` declaration that starts `text`: up to its `>` outside quotes.
+fn xml_declaration_end(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = 2;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
             }
-            _ => rest = tail,
+            b'>' => return i + 1,
+            _ => i += 1,
         }
     }
-    total
+    text.len()
+}
+
+/// The bytes each entity stands for once the entities inside its value are expanded too,
+/// computed once per entity (a chain back to itself counts its text once; roxmltree refuses
+/// such a file anyway).
+fn xml_expanded_lengths(entities: &[(String, String)]) -> std::collections::HashMap<String, usize> {
+    fn length(name: &str, entities: &[(String, String)], memo: &mut std::collections::HashMap<String, usize>) -> usize {
+        if let Some(&known) = memo.get(name) {
+            return known;
+        }
+        let Some((_, value)) = entities.iter().find(|(n, _)| n == name) else { return 0 };
+        memo.insert(name.to_string(), value.len());
+        let mut total = value.len();
+        let mut rest = value.as_str();
+        while let Some(at) = rest.find('&') {
+            let tail = &rest[at + 1..];
+            match tail.find(';') {
+                Some(end) if !tail.starts_with('#') && entities.iter().any(|(n, _)| n == &tail[..end]) => {
+                    let inner = length(&tail[..end], entities, memo);
+                    total = total.saturating_sub(end + 2).saturating_add(inner);
+                    rest = &tail[end + 1..];
+                }
+                _ => rest = tail,
+            }
+        }
+        memo.insert(name.to_string(), total);
+        total
+    }
+    let mut memo = std::collections::HashMap::new();
+    for (name, _) in entities {
+        length(name, entities, &mut memo);
+    }
+    memo
 }
 
 /// Refuse `text` when the entities its content references stand for more than the budget.
@@ -572,6 +616,7 @@ fn check_xml_expansion(text: &str) -> Result<(), ParseError> {
     if entities.is_empty() {
         return Ok(());
     }
+    let lengths = xml_expanded_lengths(&entities);
     let budget = xml_expansion_budget(text);
     let doctype_end = doctype.as_ptr() as usize - text.as_ptr() as usize + doctype.len();
     let body = &text[doctype_end..];
@@ -588,15 +633,11 @@ fn check_xml_expansion(text: &str) -> Result<(), ParseError> {
             i += rest.find("?>").map_or(rest.len(), |e| e + 2);
         } else if bytes[i] == b'&' && !rest.starts_with("&#") {
             let Some(end) = rest.find(';') else { break };
-            let name = &rest[1..end];
-            if entities.iter().any(|(n, _)| n == name) {
-                total += xml_expanded_len(name, &entities, 0);
+            if let Some(&expanded) = lengths.get(&rest[1..end]) {
+                total = total.saturating_add(expanded);
                 if total > budget {
-                    return Err(ParseError {
-                        line: line_column(text, doctype_end + i).0,
-                        column: line_column(text, doctype_end + i).1,
-                        message: format!("entities expand to more than {budget} bytes"),
-                    });
+                    let (line, column) = line_column(text, doctype_end + i);
+                    return Err(ParseError { line, column, message: format!("entities expand to more than {budget} bytes") });
                 }
             }
             i += end + 1;
@@ -2152,6 +2193,10 @@ mod tests {
             ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 5069: entities expand to more than 1000000 bytes")),
             ("xml entity amplification into text", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11069: entities expand to more than 1000000 bytes")),
             ("xml entity amplification into an attribute", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r a=\"{}\"/>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11072: entities expand to more than 1000000 bytes")),
+            ("xml decoy entity in a doctype comment", Format::Xml, format!("<!DOCTYPE r [<!-- <!ENTITY e1 \"a\"> --><!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11094: entities expand to more than 1000000 bytes")),
+            ("xml decoy entity in a doctype instruction", Format::Xml, format!("<!DOCTYPE r [<?x <!ENTITY e1 \"a\"> ?><!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11092: entities expand to more than 1000000 bytes")),
+            ("xml decoy entity in another value", Format::Xml, format!("<!DOCTYPE r [<!ENTITY d '<!ENTITY e1 \"a\">'><!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11099: entities expand to more than 1000000 bytes")),
+            ("xml billion laughs", Format::Xml, (1..=9).fold("<!DOCTYPE r [<!ENTITY lol0 \"lol\">".to_string(), |text, i| text + &format!("<!ENTITY lol{i} \"{}\">", format!("&lol{};", i - 1).repeat(10))) + "]><r>&lol9;</r>", Err("line 1, column 732: entities expand to more than 1000000 bytes")),
             ("xml small entity used a thousand times", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"hello\">]><r>{}</r>", "&e;".repeat(1000)), Ok((1, 1))),
             ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
             ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
