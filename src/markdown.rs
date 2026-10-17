@@ -303,6 +303,68 @@ fn unique_slug(text: &str, slugs: &mut Vec<String>) -> String {
     slug
 }
 
+/// `![alt][id]` images written with a reference, rewritten as `![alt](url "title")` with the address
+/// their definition gives, since the renderer draws inline images only. Definitions stay where they
+/// are and no line moves, so the outline and the editor still agree line for line.
+pub fn resolve_image_references(source: &str) -> String {
+    let Ok(root) = to_mdast(source, &parse_options()) else { return source.to_string() };
+    let mut definitions: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut references: Vec<(Range<usize>, String, String)> = Vec::new();
+    collect_images(&root, source, &mut definitions, &mut references);
+    if references.is_empty() {
+        return source.to_string();
+    }
+    let mut out = source.to_string();
+    references.sort_by_key(|(span, _, _)| std::cmp::Reverse(span.start));
+    for (span, alt, identifier) in references {
+        let Some((_, url, title)) = definitions.iter().find(|(id, _, _)| *id == identifier) else { continue };
+        let alt = alt.replace(['\n', '\r'], " ").replace(']', "\\]");
+        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>']) {
+            format!("<{}>", url.replace('>', "%3E"))
+        } else {
+            url.clone()
+        };
+        let title = title.as_ref().map(|title| format!(" \"{}\"", title.replace('"', "\\\""))).unwrap_or_default();
+        out.replace_range(span, &format!("![{alt}]({destination}{title})"));
+    }
+    out
+}
+
+fn collect_images(
+    node: &Node,
+    source: &str,
+    definitions: &mut Vec<(String, String, Option<String>)>,
+    references: &mut Vec<(Range<usize>, String, String)>,
+) {
+    match node {
+        Node::Definition(definition) => {
+            definitions.push((definition.identifier.clone(), definition.url.clone(), definition.title.clone()))
+        }
+        Node::ImageReference(image) => references.push((span_of(node, source), image.alt.clone(), image.identifier.clone())),
+        _ => {}
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_images(child, source, definitions, references);
+        }
+    }
+}
+
+/// The path a `file:` address names, `rest` being what follows `file:`: `///C:/x` and `///x` are
+/// absolute paths, `//host/share/x` stays a network path.
+fn file_url_path(rest: &str) -> PathBuf {
+    let decoded = percent_decode(rest);
+    let path = match decoded.strip_prefix("//") {
+        Some(after) => match after.strip_prefix('/') {
+            Some(abs) if abs.len() >= 2 && abs.as_bytes()[0].is_ascii_alphabetic() && abs.as_bytes()[1] == b':' => abs.to_string(),
+            Some(abs) => format!("/{abs}"),
+            None => format!("//{after}"),
+        },
+        None => decoded,
+    };
+    PathBuf::from(path)
+}
+
 /// Where a link goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -328,9 +390,8 @@ pub fn link_target(folder: &Path, href: &str) -> LinkTarget {
     if let Some(rest) = scheme_rest(href) {
         // `file:` addresses are files like any other; everything else goes outside.
         if href[..href.len() - rest.len() - 1].eq_ignore_ascii_case("file") {
-            let path = percent_decode(rest.trim_start_matches("//").trim_start_matches('/'));
-            let (path, fragment) = split_fragment(&path);
-            return LinkTarget::File { path: PathBuf::from(path), fragment };
+            let (path, fragment) = split_fragment(rest);
+            return LinkTarget::File { path: file_url_path(&path), fragment };
         }
         return LinkTarget::Outside(href.to_string());
     }
@@ -428,7 +489,7 @@ pub fn image_source(folder: &Path, src: &str) -> ImageSrc {
         return if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
             ImageSrc::Remote(src.to_string())
         } else if scheme.eq_ignore_ascii_case("file") {
-            ImageSrc::File(PathBuf::from(percent_decode(rest.trim_start_matches("//").trim_start_matches('/'))))
+            ImageSrc::File(file_url_path(rest.split('#').next().unwrap_or(rest)))
         } else {
             ImageSrc::Invalid
         };
@@ -513,9 +574,11 @@ mod tests {
             (0, "heading 2", "Links and images"),
             (0, "paragraph", "The site, the readme, the install section, a note[1] and the dot."),
             (0, "paragraph", "dot"),
+            (0, "paragraph", "dot too"),
             (0, "footnote", "1"),
             (1, "paragraph", "A footnote."),
             (0, "definition", "readme"),
+            (0, "definition", "dot"),
         ];
         let expected: Vec<(u32, String, String)> = expected.into_iter().map(|(d, k, t)| (d, k.to_string(), t.to_string())).collect();
         assert_eq!(kinds(&outline), expected);
@@ -523,10 +586,10 @@ mod tests {
             outline.headings.iter().map(|h| (h.level, h.slug.as_str(), h.line)).collect::<Vec<_>>(),
             vec![(1, "sfoglia-guide", 1), (2, "install", 5), (2, "features", 13), (3, "formats", 22), (2, "code", 30), (2, "links-and-images", 42)]
         );
-        assert_eq!(outline.summary(), "Markdown, 18 blocks, 6 headings");
+        assert_eq!(outline.summary(), "Markdown, 20 blocks, 6 headings");
         assert_eq!(outline.top_block_at_line(1), Some(0));
         assert_eq!(outline.top_block_at_line(9), Some(3), "a line inside the nested list belongs to the ordered list");
-        assert_eq!(outline.top_block_at_line(1000), Some(17));
+        assert_eq!(outline.top_block_at_line(1000), Some(19));
         assert_eq!(outline.heading_for_fragment("install").map(|h| h.line), Some(5));
         assert_eq!(outline.heading_for_fragment("#Links and images").map(|h| h.line), Some(42));
         assert!(outline.heading_for_fragment("missing").is_none());
@@ -535,6 +598,33 @@ mod tests {
         assert_eq!(twice.headings.iter().map(|h| h.slug.as_str()).collect::<Vec<_>>(), vec!["a", "a-1", "a-b"]);
         assert_eq!(super::outline("").summary(), "Markdown, 0 blocks, 0 headings");
         assert_eq!(super::outline("# One\n").summary(), "Markdown, 1 block, 1 heading");
+    }
+
+
+    #[test]
+    fn reference_images_are_written_inline_for_the_renderer() {
+        let source = "A ![alt][logo] B\n\n![x][]\n\n![y]\n\n![nope][zz] and ![a\\]b][logo]\n\n[logo]: beta.png \"Be\\\"ta\"\n[x]: <a b.png>\n[y]: y.png\n";
+        let shown = resolve_image_references(source);
+        assert_eq!(
+            shown,
+            "A ![alt](beta.png \"Be\\\"ta\") B\n\n![x](<a b.png>)\n\n![y](y.png)\n\n![nope][zz] and ![a\\]b](beta.png \"Be\\\"ta\")\n\n[logo]: beta.png \"Be\\\"ta\"\n[x]: <a b.png>\n[y]: y.png\n"
+        );
+        assert_eq!(shown.lines().count(), source.lines().count(), "no line moves");
+        // Every image is inline now (an undefined reference was plain text all along), and the
+        // definitions still stand.
+        let root = to_mdast(&shown, &parse_options()).unwrap();
+        let mut definitions = Vec::new();
+        let mut references = Vec::new();
+        collect_images(&root, &shown, &mut definitions, &mut references);
+        assert_eq!(definitions.len(), 3);
+        assert!(references.is_empty(), "{references:?}");
+        // The fixture's reference image becomes inline too, and a source without references comes
+        // back as it is, byte for byte.
+        let plain = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/guide.md")).unwrap();
+        let shown = resolve_image_references(&plain);
+        assert!(shown.contains("![dot too](dot.png)"), "{shown}");
+        assert_eq!(shown.lines().count(), plain.lines().count());
+        assert_eq!(resolve_image_references("# Plain\n\ntext\n"), "# Plain\n\ntext\n");
     }
 
     #[test]
@@ -557,8 +647,10 @@ mod tests {
             assert_eq!(link_target(folder, "../notes/a%20b.md#top"), file("/docs/notes/a b.md", Some("top")));
             assert_eq!(link_target(folder, "./img/../x.md"), file("/docs/book/x.md", None));
             assert_eq!(link_target(folder, "/other/y.md"), file("/other/y.md", None));
-            assert_eq!(link_target(folder, "file:///z/w.md#s"), file("z/w.md", Some("s")));
+            assert_eq!(link_target(folder, "file:///z/w.md#s"), file("/z/w.md", Some("s")));
         }
+        // A network share keeps its host on both systems.
+        assert_eq!(link_target(folder, "file://server/share/x.md"), file("//server/share/x.md", None));
         assert_eq!(slugify("Links and images"), "links-and-images");
         assert_eq!(slugify("  C++ & Rust: 2 things! "), "c--rust-2-things");
         assert_eq!(slugify("Ünïcödé Köpfe"), "ünïcödé-köpfe");
@@ -581,6 +673,10 @@ mod tests {
         assert_eq!(image_source(folder, absolute), ImageSrc::File(PathBuf::from(absolute)));
         assert_eq!(image_source(folder, "https://example.com/a.png"), ImageSrc::Remote("https://example.com/a.png".into()));
         assert_eq!(image_source(folder, "ftp://example.com/a.png"), ImageSrc::Invalid);
+        let from_url = if cfg!(windows) { "file:///C:/pics/a%20b.png" } else { "file:///pics/a%20b.png" };
+        let on_disk = if cfg!(windows) { "C:/pics/a b.png" } else { "/pics/a b.png" };
+        assert_eq!(image_source(folder, from_url), ImageSrc::File(PathBuf::from(on_disk)));
+        assert_eq!(image_source(folder, "file://server/share/x.png"), ImageSrc::File(PathBuf::from("//server/share/x.png")));
         // A 1x1 red PNG as a data URL decodes to its 70 bytes, which start with the PNG signature.
         let data = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
         match image_source(folder, data) {

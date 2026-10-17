@@ -82,7 +82,8 @@ fn fetch(
     }
     let response = agent.run(request.body(body)?)?;
     let (head, mut ureq_body) = response.into_parts();
-    let bytes = ureq_body.read_to_vec()?;
+    // A remote image may well pass ureq's 10 MB default; 64 MB is the most this reads.
+    let bytes = ureq_body.with_config().limit(64 * 1024 * 1024).read_to_vec()?;
     let mut out = Response::builder().status(head.status).version(head.version);
     for (name, value) in &head.headers {
         out = out.header(name, value);

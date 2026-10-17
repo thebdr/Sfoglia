@@ -362,6 +362,15 @@ impl KitPanel for FilePanel {
     }
 }
 
+/// Whether two paths name the same file on disk, however they are spelled.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
 impl EventEmitter<PanelEvent> for FilePanel {}
 
 impl Focusable for FilePanel {
@@ -654,13 +663,18 @@ impl Workspace {
     /// A Markdown link to a file: open it, and scroll to the heading its fragment names (C-011).
     fn on_open_linked_file(&mut self, action: &OpenLinkedFile, window: &mut Window, cx: &mut Context<Self>) {
         self.open_paths(std::slice::from_ref(&action.path), window, cx);
-        let Some(fragment) = action.fragment.clone() else { return };
+        // The file may already be open under another spelling of its path (a case, a `.` or `..`):
+        // the tab is found as `open_paths` finds it, by the file on disk, and takes the focus, so the
+        // chords act on the tab that came up.
         let target = self.panels(cx).iter().find_map(|panel| {
             let view = panel.read(cx).markdown_view()?.clone();
-            (view.read(cx).path() == action.path).then_some(view)
+            same_file(view.read(cx).path(), &action.path).then_some(view)
         });
-        if let Some(view) = target {
-            view.update(cx, |view, cx| view.reveal_heading(&fragment, cx));
+        let Some(view) = target else { return };
+        let focus = view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        if let Some(fragment) = &action.fragment {
+            view.update(cx, |view, cx| view.reveal_heading(fragment, window, cx));
         }
     }
 

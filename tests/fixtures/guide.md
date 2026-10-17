@@ -45,6 +45,9 @@ The [site](https://example.com), the [readme][readme], the [install section](#in
 
 ![dot](dot.png)
 
+![dot too][dot]
+
 [^1]: A footnote.
 
 [readme]: ../../README.md
+[dot]: dot.png

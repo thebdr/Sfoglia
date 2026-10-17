@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Position;
@@ -64,6 +64,8 @@ pub struct MarkdownView {
     /// The text viewer's operation and reload counts as last followed (C-010's pattern).
     seen_operations: u64,
     seen_reloads: u64,
+    /// The image files the renderer asked for, as the tests read them.
+    requested: Arc<Mutex<Vec<PathBuf>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -71,7 +73,7 @@ impl MarkdownView {
     /// Open `bytes`, the file at `path`, rendered.
     pub fn new(path: &Path, bytes: &[u8], rules: &Entity<RulesStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = cx.new(|cx| TextView::new(path, bytes, rules, window, cx));
-        let source = Self::source_of(&text, cx);
+        let source = markdown::resolve_image_references(&Self::source_of(&text, cx));
         let outline = markdown::outline(&source);
         let rich = cx.new(|cx| TextViewState::markdown(&source, cx).scrollable(true).selectable(true));
         let follow = cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(window, cx));
@@ -90,6 +92,7 @@ impl MarkdownView {
             status: String::new(),
             seen_operations: 0,
             seen_reloads: 0,
+            requested: Arc::default(),
             _subscriptions: vec![follow, parsed],
         }
     }
@@ -100,8 +103,10 @@ impl MarkdownView {
         crate::data::with_line_feeds(shown.as_ref()).into_owned()
     }
 
-    /// Render `source`, remembering it so a reveal waits for its parse.
+    /// Render `source` (reference images written inline for the renderer), remembering it so a reveal
+    /// waits for its parse.
     fn render_source(&mut self, source: String, cx: &mut Context<Self>) {
+        let source = markdown::resolve_image_references(&source);
         self.outline = markdown::outline(&source);
         self.rich.update(cx, |rich, cx| rich.set_text(&source, cx));
         self.source = source;
@@ -226,18 +231,26 @@ impl MarkdownView {
                 let focus = self.focus_handle.clone();
                 window.defer(cx, move |window, cx| focus.dispatch_action(&OpenLinkedFile { path, fragment }, window, cx));
             }
-            LinkTarget::Heading(fragment) => self.reveal_heading(&fragment, cx),
+            LinkTarget::Heading(fragment) => self.reveal_heading(&fragment, window, cx),
             LinkTarget::None => {}
         }
         cx.notify();
     }
 
-    /// Scroll the rendered view to the heading `fragment` names, or say there is none.
-    pub fn reveal_heading(&mut self, fragment: &str, cx: &mut Context<Self>) {
-        match self.outline.heading_for_fragment(fragment).map(|heading| (heading.span.clone(), heading.text.clone())) {
-            Some((span, text)) => {
+    /// Scroll the rendered view to the heading `fragment` names, or say there is none; while the raw
+    /// text shows, the cursor goes to the heading's line instead, so the next toggle lands there too.
+    pub fn reveal_heading(&mut self, fragment: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let heading = self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone(), h.line));
+        match heading {
+            Some((span, text, line)) => {
                 self.status = format!("at {text}");
-                self.reveal_source(span, cx);
+                if self.raw_shown {
+                    let editor = self.text.read(cx).editor().clone();
+                    let position = Position::new(line.saturating_sub(1) as u32, 0);
+                    editor.update(cx, |editor, cx| editor.set_cursor_position(position, window, cx));
+                } else {
+                    self.reveal_source(span, cx);
+                }
             }
             None => self.status = format!("no heading named #{}", fragment.trim_start_matches('#')),
         }
@@ -277,6 +290,11 @@ impl MarkdownView {
     /// Whether another program changed the file since it was read or written (C-008).
     pub fn changed_on_disk(&self, cx: &App) -> bool {
         self.text.read(cx).changed_on_disk()
+    }
+
+    /// The image files the renderer has asked for so far, in order.
+    pub fn requested_images(&self) -> Vec<PathBuf> {
+        self.requested.lock().map(|list| list.clone()).unwrap_or_default()
     }
 }
 
@@ -334,6 +352,7 @@ impl Render for MarkdownView {
         };
         let changed = !self.raw_shown && self.changed_on_disk(cx);
         let folder = self.folder.clone();
+        let requested = self.requested.clone();
         let view = cx.entity().downgrade();
         let body = if self.raw_shown {
             div().id("markdown-raw").size_full().min_h_0().child(self.text.clone()).into_any_element()
@@ -373,7 +392,15 @@ impl Render for MarkdownView {
                         .child(
                             RichText::new(&self.rich)
                                 .scrollable(true)
-                                .image_source(move |uri: &SharedUri| to_image_source(markdown::image_source(&folder, &uri.to_string())))
+                                .image_source(move |uri: &SharedUri| {
+                                    let src = markdown::image_source(&folder, &uri.to_string());
+                                    if let ImageSrc::File(path) = &src
+                                        && let Ok(mut list) = requested.lock()
+                                    {
+                                        list.push(path.clone());
+                                    }
+                                    to_image_source(src)
+                                })
                                 .on_link_click(move |href: &SharedString, _: &ClickEvent, window: &mut Window, cx: &mut App| {
                                     let href = href.to_string();
                                     let _ = view.update(cx, |this, cx| this.follow_link(&href, window, cx));

@@ -86,7 +86,10 @@ fn a_markdown_file_opens_rendered_with_its_summary_and_text(cx: &mut TestAppCont
         window.render_frame(cx);
         assert!(!view.read(cx).raw_shown(), "it opens rendered");
         assert!(window.try_find("markdown-rendered").is_some());
-        assert_eq!(label(window, "markdown-summary"), "Markdown, 18 blocks, 6 headings");
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 20 blocks, 6 headings");
+        // Both images, the inline one and the one written with a reference, were asked for from the file's folder.
+        let dot = fixture("dot.png");
+        assert_eq!(view.read(cx).requested_images().iter().filter(|p| **p == dot).count(), 2, "{:?}", view.read(cx).requested_images());
         assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the text, a click follows a link");
         assert!(!panel.read(cx).is_dirty(cx));
         // Every heading, item, cell and code line, in order, is in the rendered text.
@@ -312,8 +315,10 @@ fn the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx:
 
 #[gpui_kit::test]
 fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
-    // A link to a file opens it in a second tab, scrolled to the heading its fragment names; a bare
-    // fragment scrolls the document itself; the app's own HTTP client stands behind remote images.
+    // A link to a file that is already open, under another spelling of its path, brings its tab up
+    // scrolled to the heading its fragment names; a bare fragment scrolls the document itself; a
+    // fragment into a tab showing its raw text puts the cursor on the heading; the app's own HTTP
+    // client stands behind remote images.
     let folder = scratch("linked");
     std::fs::create_dir_all(&folder).unwrap();
     let a = folder.join("a.md");
@@ -329,9 +334,9 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
     assert_eq!(agent.as_deref(), Some("Sfoglia"), "the app's HTTP client is installed, so remote images are fetched");
     let view = cx
         .update_window(handle, |_, window, cx| {
-            workspace.update(cx, |w, cx| w.open_paths(&[a.clone()], window, cx));
+            workspace.update(cx, |w, cx| w.open_paths(&[folder.join(".").join("b.md"), a.clone()], window, cx));
             window.render_frame(cx);
-            workspace.read(cx).panels(cx)[0].read(cx).markdown_view().expect("rendered").clone()
+            workspace.read(cx).panels(cx)[1].read(cx).markdown_view().expect("rendered").clone()
         })
         .unwrap();
     cx.run_until_parked();
@@ -353,19 +358,28 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
         .update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             let panels = workspace.read(cx).panels(cx);
-            assert_eq!(panels.len(), 2, "the linked file opened in a second tab");
-            panels[1].read(cx).markdown_view().expect("the linked file is rendered").clone()
+            assert_eq!(panels.len(), 2, "the linked file was already open: no third tab");
+            panels[0].read(cx).markdown_view().expect("the linked file is rendered").clone()
         })
         .unwrap();
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.render_frame(cx);
-        assert_eq!(other.read(cx).path(), b.as_path());
+        assert_eq!(other.read(cx).path(), folder.join(".").join("b.md").as_path(), "the tab opened first, under its own spelling");
         assert_eq!(label(window, "markdown-summary"), "Markdown, 120 blocks, 60 headings");
         assert_eq!(label(window, "markdown-message"), "at Section 50");
         let top = other.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix;
         assert!((70..=100).contains(&top), "section 50 (block 100) is on screen: the top row is {top}");
+        // With the raw text showing, a fragment puts the cursor on the heading's line (section 20: line 81).
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(other.read(cx).raw_shown());
+        other.update(cx, |view, cx| view.reveal_heading("section-20", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Section 20");
+        let editor = other.read(cx).text_view().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(80, 0));
     })
     .unwrap();
     std::fs::remove_dir_all(&folder).ok();
