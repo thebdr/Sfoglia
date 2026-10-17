@@ -780,19 +780,40 @@ impl Render for Workspace {
     }
 }
 
-/// The path as it stands on disk: canonical when the file is there, its folder canonical and the name joined
-/// when the file is gone meanwhile (Windows' `\\?\` prefix taken off either way), else made absolute as spelled.
+/// The path as it stands on disk: absolute with `.` and `..` resolved, its nearest ancestor still on disk
+/// canonical (Windows' `\\?\` prefix taken off) and the rest joined as spelled, so a file or a folder gone
+/// meanwhile still names its place.
 fn plain_absolute(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return strip_verbatim(canonical);
-    }
-    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
-        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
-        if let Ok(folder) = std::fs::canonicalize(parent) {
-            return strip_verbatim(folder).join(name);
+    use std::path::Component;
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
         }
     }
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    let mut ancestor = normalized.as_path();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            let mut result = strip_verbatim(canonical);
+            for name in rest.iter().rev() {
+                result.push(name);
+            }
+            return result;
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                ancestor = parent;
+            }
+            _ => return normalized,
+        }
+    }
 }
 
 /// A canonical path without the `\\?\` (or `\\?\UNC\`) prefix Windows gives it.

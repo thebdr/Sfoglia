@@ -1187,3 +1187,42 @@ fn discard_all_stops_at_a_refused_restore_and_a_second_goes_on(cx: &mut TestAppC
     assert!(cx.windows().is_empty(), "the second Discard all drops the edit, restores the rest and the window is gone");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file whose whole folder is gone still names its folder as it stood: the nearest folder on disk
+/// canonical, the rest as spelled (C-012).
+#[gpui_kit::test]
+fn a_file_whose_folder_is_gone_still_names_its_folder_as_it_stood(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-folder-gone");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let hello = copy_fixture("hello.txt", &sub);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
+    std::fs::remove_dir_all(&sub).unwrap();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, folder, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(folder, PathBuf::from(canonical_folder(&dir)).join("sub").display().to_string(), "the folder as it stood");
+        window.click("close-save", cx);
+        window.render_frame(cx);
+        let (_, folder, _, message) = closing_dialog(window, cx);
+        assert!(message.as_deref().unwrap_or("").starts_with("cannot write "), "the save is refused: {message:?}");
+        assert_eq!(folder, PathBuf::from(canonical_folder(&dir)).join("sub").display().to_string(), "and the folder line holds");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.windows().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
