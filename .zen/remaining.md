@@ -7,11 +7,8 @@ data trees, Markdown, closing with modified tabs).
 ## In flight
 
 - **C-013 Spreadsheets and delimited tables** (branch `c-013-spreadsheets`): implemented and tested (15 tests,
-  Windows and Linux captures). Three refuter passes found and fixed real bugs (CRLF edits, 1904 xls dates, the
-  delimiter under a title line, lost line breaks in the edit field, untouched values rewritten); the fourth pass
-  is running. Left: the holds verdict, `zen verify`, a last Linux run, the merge to main, CI.
-- **Run-evidence drift** reported by `zen status`: C-002 and C-004 (xtask changed for the fixture generator),
-  C-008 (the edit tests grew with C-012). Each needs its recorded run refreshed before or with the C-013 merge.
+  Windows and Linux captures). Three refuter passes found and fixed real bugs; passes four to seven found no code defect, only promises without a test, all pinned since (24 tests); the eighth pass is running. Left: the holds verdict, `zen verify`, a last Linux run, the merge to main, CI.
+- Run evidence of C-002, C-004 and C-008 refreshed on 2026-10-18; `zen status` reports no drift.
 
 ## Pending clauses, in the order I plan to take them
 

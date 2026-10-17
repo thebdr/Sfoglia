@@ -466,5 +466,8 @@ mod tests {
         assert_eq!(column_name(26), "AA");
         assert_eq!(column_name(701), "ZZ");
         assert_eq!(cell_name(2, 1), "B3");
+        assert_eq!(compare_cells(&classify("B"), &classify("a")), std::cmp::Ordering::Greater, "case-insensitive: a before B");
+        assert_eq!(compare_cells(&classify("10"), &classify("9")), std::cmp::Ordering::Greater, "numbers by value");
+        assert_eq!(compare_cells(&classify("9"), &classify("abc")), std::cmp::Ordering::Less, "numbers before text");
     }
 }

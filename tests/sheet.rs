@@ -139,7 +139,11 @@ fn the_workbook_fixtures_read_their_typed_cells() {
         assert_eq!(texts[1], rows(&["1", "Rossi, Mario", "12.5", "2026-01-05", "TRUE", "first line\nsecond line"]), "{name}");
         assert_eq!(texts[2], rows(&["2", "Élodie", "7", "2026-02-28 14:30:00", "FALSE", ""]), "{name}");
         assert_eq!(texts[3], rows(&["3", "quote \"inside\"", "-3.25", "", "", ""]), "{name}");
-        assert_eq!(texts[4], rows(&["", "total", "16.25", "", "", ""]), "{name}: the formula's cached value");
+        let error = if name == "book.xlsx" { "#DIV/0!" } else { "" };
+        assert_eq!(texts[4], rows(&["", "total", "16.25", "", "", error]), "{name}: the formula's cached value, an error as written");
+        if name == "book.xlsx" {
+            assert_eq!(data.cell(4, 5).map(|c| c.kind.clone()), Some(CellKind::Error));
+        }
         assert_eq!(texts[5], rows(&["", "", "", "", "", ""]), "{name}");
         assert_eq!(texts[6], rows(&["merged across three", "", "", "", "", ""]), "{name}");
         assert_eq!(data.cell(1, 0).map(|c| c.kind.clone()), Some(CellKind::Number(1.0)), "{name}");
@@ -296,7 +300,8 @@ fn the_search_field_finds_cells_and_counts_them(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let focused = window.focused(cx);
         assert_eq!(focused, Some(view.read(cx).search_input().read(cx).focus_handle(cx)), "Ctrl+Shift+F focuses the search field");
-        window.input("line", cx);
+        // Upper case, so a case-sensitive search would find nothing.
+        window.input("LINE", cx);
         window.press("enter", cx);
     })
     .unwrap();
@@ -478,7 +483,7 @@ fn a_workbook_opens_on_its_sheets_with_merges_and_dates(cx: &mut TestAppContext)
         window.render_frame(cx);
         window.press("ctrl-shift-f", cx);
         window.render_frame(cx);
-        window.input("Élodie", cx);
+        window.input("ÉLODIE", cx);
         window.press("enter", cx);
     })
     .unwrap();
@@ -917,20 +922,29 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
 fn a_mixed_column_sorts_numbers_before_text_case_insensitively(cx: &mut TestAppContext) {
     let dir = scratch_dir("sheet-mixed-sort");
     let path = dir.join("mixed.csv");
-    std::fs::write(&path, "k,v\n1,b\n2,10\n3,A\n4,2\n5,c\n6,\n").unwrap();
+    // `b`, `A`, `C`: byte order would give A, C, b; case-insensitive order gives A, b, C.
+    std::fs::write(&path, "k,v\n1,b\n2,10\n3,A\n4,2\n5,C\n6,\n").unwrap();
     let (handle, _panel, view) = open_sheet(cx, path);
     let values = |view: &Entity<SheetView>, cx: &gpui_kit::App| -> Vec<String> { dump(view, cx).1.iter().map(|r| r[1].clone()).collect() };
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         window.click(("icon-sort", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(values(&view, cx), rows(&["c", "b", "A", "10", "2", ""]), "descending: text before numbers, the empty cell last");
+        assert_eq!(values(&view, cx), rows(&["C", "b", "A", "10", "2", ""]), "descending: text before numbers, the empty cell last");
         window.click(("icon-sort", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(values(&view, cx), rows(&["2", "10", "A", "b", "c", ""]), "ascending: numbers by value, then text regardless of case, the empty cell last");
+        assert_eq!(values(&view, cx), rows(&["2", "10", "A", "b", "C", ""]), "ascending: numbers by value, then text regardless of case, the empty cell last");
         window.click(("icon-sort", 1usize), cx);
         window.render_frame(cx);
-        assert_eq!(values(&view, cx), rows(&["b", "10", "A", "2", "c", ""]), "the file's order again");
+        assert_eq!(values(&view, cx), rows(&["b", "10", "A", "2", "C", ""]), "the file's order again");
+        // A sort left on, then the header toggle: the file's order again, the sort gone.
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(values(&view, cx)[0], "C");
+        window.click("sheet-header-button", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).table().read(cx).delegate().sort(), None, "the header toggle drops the sort");
+        assert_eq!(values(&view, cx), rows(&["v", "b", "10", "A", "2", "C", ""]), "the file's order, the header record a row");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -991,6 +1005,64 @@ fn a_utf16_file_keeps_its_label_and_its_bytes(cx: &mut TestAppContext) {
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-16 LE", "as last written");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A match far down a long file scrolls the grid to it (C-013).
+#[gpui_kit::test]
+fn a_match_far_down_scrolls_the_grid_to_it(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-scroll");
+    let path = dir.join("long.csv");
+    let mut text = String::from("n,word\n");
+    for n in 1..=300 {
+        text.push_str(&format!("{n},{}\n", if n == 290 { "needle" } else { "hay" }));
+    }
+    std::fs::write(&path, text).unwrap();
+    let (handle, _panel, view) = open_sheet(cx, path);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).table().read(cx).visible_range().rows().start, 0, "at the top");
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        window.input("NEEDLE", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "match 1 of 1");
+        assert_eq!(label(window, "sheet-cell"), "B291");
+        let visible = view.read(cx).table().read(cx).visible_range().rows().clone();
+        assert!(visible.start > 0 && visible.contains(&289), "scrolled to the match: rows {visible:?} on screen");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other delimiters are named in the summary too (C-013).
+#[gpui_kit::test]
+fn a_semicolon_and_a_pipe_file_name_their_delimiter(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-delimiters");
+    let semi = dir.join("semi.csv");
+    std::fs::write(&semi, "a;b\n1;2\n").unwrap();
+    let (handle, _panel, view) = open_sheet(cx, semi);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, semicolon, UTF-8");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "2"]));
+    })
+    .unwrap();
+    let pipe = dir.join("pipe.csv");
+    std::fs::write(&pipe, "a|b\n1|2\n").unwrap();
+    let (handle, _panel, view) = open_sheet(cx, pipe);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, pipe, UTF-8");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "2"]));
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

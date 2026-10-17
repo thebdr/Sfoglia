@@ -908,6 +908,8 @@ fn fixtures(root: &Path) -> Result<(), String> {
     // A formula with its cached result, as Excel saves it.
     data.write_formula(4, 2, Formula::new("=SUM(C2:C4)").set_result("16.25")).map_err(err)?;
     data.write_string(4, 1, "total").map_err(err)?;
+    // An error cell, as Excel stores a division by zero (the legacy saves predate it and read it blank).
+    data.write_formula(4, 5, Formula::new("=1/0").set_result("#DIV/0!")).map_err(err)?;
     // A merged title row under the data and a column width Excel would show.
     data.merge_range(6, 0, 6, 2, "merged across three", &centre).map_err(err)?;
     data.set_column_width(1, 24.0).map_err(err)?;
