@@ -60,6 +60,8 @@ pub struct DataView {
     deepest: u32,
     /// The selected row, an index into `visible`.
     selected: Option<usize>,
+    /// The selected node's path as last computed: walking up a huge arena every frame would cost.
+    path_cache: Option<(usize, String)>,
     search: Entity<InputState>,
     /// The nodes the last search matched.
     matches: Vec<usize>,
@@ -114,6 +116,7 @@ impl DataView {
             visible: Vec::new(),
             deepest: 0,
             selected: None,
+            path_cache: None,
             search,
             matches: Vec::new(),
             text: None,
@@ -179,6 +182,16 @@ impl DataView {
     pub fn selected_path(&self) -> Option<String> {
         let tree = self.tree.as_ref().ok()?;
         self.selected_node().map(|node| tree.path(node))
+    }
+
+    /// The same for the status row, computed once per selection.
+    fn cached_path(&mut self) -> String {
+        let Some(node) = self.selected_node() else { return String::new() };
+        if self.path_cache.as_ref().is_none_or(|(cached, _)| *cached != node) {
+            let Ok(tree) = &self.tree else { return String::new() };
+            self.path_cache = Some((node, tree.path(node)));
+        }
+        self.path_cache.as_ref().map(|(_, path)| path.clone()).unwrap_or_default()
     }
 
     /// The row at the top of the list: from the scroll offset and the row height the last
@@ -337,6 +350,8 @@ impl DataView {
         let text = cx.new(|cx| TextView::new_as_read(&self.path, &self.bytes, self.read_at, &self.rules, window, cx));
         self._subscriptions.push(cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(String::new(), window, cx)));
         self.text = Some(text.clone());
+        // The editor holds the text from here on.
+        self.bytes = Vec::new();
         text
     }
 
@@ -368,6 +383,7 @@ impl DataView {
     fn reparse(&mut self, cx: &App) {
         let text = self.current_text(cx);
         self.tree = Tree::parse(self.format, &text);
+        self.path_cache = None;
         self.reset_rows();
     }
 
@@ -585,7 +601,7 @@ impl Render for DataView {
             Ok(tree) => tree.summary(),
             Err(_) => format!("{}, does not parse", self.format.label()),
         };
-        let path = self.selected_path().unwrap_or_default();
+        let path = self.cached_path();
         let status = if self.status.is_empty() {
             if self.raw_shown {
                 "Ctrl+Shift+D shows the tree, Ctrl+Shift+P pretty-prints".to_string()
@@ -647,7 +663,8 @@ impl Render for DataView {
                                     let indent = (INDENT * n.depth as f32).min(key_width - KEY_ROOM);
                                     let container = n.kind.is_container();
                                     let open = this.expanded[node];
-                                    let marked = this.matches.contains(&node);
+                                    // The matches come in index order, so a binary search tells a marked row.
+                                    let marked = this.matches.binary_search(&node).is_ok();
                                     let glyph = if !container {
                                         ""
                                     } else if open {
