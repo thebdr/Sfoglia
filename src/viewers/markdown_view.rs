@@ -272,15 +272,11 @@ impl MarkdownView {
 
     /// Scroll the rendered view to the heading `fragment` names, or say there is none; while the raw
     /// text shows, the cursor goes to the heading's line in the text as it stands (edited, or past the
-    /// budget and so never parsed: then by a scan of its lines), so the next toggle lands there too.
+    /// budget and so never rendered: one parse on the click finds it), so the next toggle lands there too.
     pub fn reveal_heading(&mut self, fragment: &str, window: &mut Window, cx: &mut Context<Self>) {
         let heading = if self.raw_shown {
             let source = Self::source_of(&self.text, cx);
-            let headings = if source.len() > MAX_RENDERED_BYTES {
-                markdown::quick_headings(&source)
-            } else {
-                markdown::outline(&source).headings
-            };
+            let headings = markdown::outline(&source).headings;
             markdown::heading_for_fragment(&headings, fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))
         } else {
             self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))

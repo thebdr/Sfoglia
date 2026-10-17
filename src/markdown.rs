@@ -124,7 +124,7 @@ pub fn parse_options() -> ParseOptions {
     }
 }
 
-fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut Outline, slugs: &mut Vec<String>) {
+fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut Outline, slugs: &mut Slugs) {
     let span = span_of(node, source);
     let line = lines.line_of(span.start);
     let push = |outline: &mut Outline, kind: Kind, text: String| {
@@ -133,7 +133,7 @@ fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut 
     match node {
         Node::Heading(heading) => {
             let text = inline_text(&heading.children);
-            let slug = unique_slug(&text, slugs);
+            let slug = slugs.unique(&text);
             outline.headings.push(Heading { level: heading.depth, text: text.clone(), slug, span: span.clone(), line });
             push(outline, Kind::Heading(heading.depth), text);
         }
@@ -276,16 +276,26 @@ pub fn slugify(text: &str) -> String {
     slug
 }
 
-fn unique_slug(text: &str, slugs: &mut Vec<String>) -> String {
-    let base = slugify(text);
-    let mut slug = base.clone();
-    let mut n = 0;
-    while slugs.contains(&slug) {
-        n += 1;
-        slug = format!("{base}-{n}");
+/// The slugs given so far, so a repeated heading gets `-1`, `-2` and so on as on GitHub, each in about
+/// constant time: a changelog repeats `Added` and `Fixed` thousands of times.
+#[derive(Default)]
+struct Slugs {
+    used: std::collections::HashSet<String>,
+    next: std::collections::HashMap<String, usize>,
+}
+
+impl Slugs {
+    fn unique(&mut self, text: &str) -> String {
+        let base = slugify(text);
+        let mut n = self.next.get(&base).copied().unwrap_or(0);
+        let mut slug = if n == 0 { base.clone() } else { format!("{base}-{n}") };
+        while !self.used.insert(slug.clone()) {
+            n += 1;
+            slug = format!("{base}-{n}");
+        }
+        self.next.insert(base, n + 1);
+        slug
     }
-    slugs.push(slug.clone());
-    slug
 }
 
 fn collect_images(
@@ -354,7 +364,7 @@ fn outline_from(root: &Node, source: &str) -> Outline {
     let mut outline = Outline::default();
     let Some(children) = root.children() else { return outline };
     let lines = LineIndex::new(source);
-    let mut slugs: Vec<String> = Vec::new();
+    let mut slugs = Slugs::default();
     for child in children {
         walk(child, 0, source, &lines, &mut outline, &mut slugs);
     }
@@ -490,80 +500,6 @@ pub fn heading_for_fragment<'a>(headings: &'a [Heading], fragment: &str) -> Opti
     let wanted = fragment.trim_start_matches('#');
     let slug = slugify(wanted);
     headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug)
-}
-
-/// The `#` headings of `source` by one pass over its lines, fenced code skipped: for a text too long
-/// to parse, where a fragment link still has to find its heading. Underlined headings are not seen.
-pub fn quick_headings(source: &str) -> Vec<Heading> {
-    let mut headings = Vec::new();
-    let mut slugs: Vec<String> = Vec::new();
-    let mut fence: Option<(char, usize)> = None;
-    let mut offset = 0;
-    for (ix, line) in source.split_inclusive('\n').enumerate() {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let trimmed = body.trim_start_matches(' ');
-        let indent = body.len() - trimmed.len();
-        if indent <= 3 {
-            if let Some((ch, len)) = fence_of(trimmed) {
-                match fence {
-                    None => fence = Some((ch, len)),
-                    Some((open, open_len)) if open == ch && len >= open_len && trimmed[len..].trim().is_empty() => fence = None,
-                    Some(_) => {}
-                }
-            } else if fence.is_none()
-                && let Some((level, text)) = atx_heading(trimmed)
-            {
-                let slug = unique_slug(&text, &mut slugs);
-                headings.push(Heading { level, text, slug, span: offset..offset + body.len(), line: ix + 1 });
-            }
-        }
-        offset += line.len();
-    }
-    headings
-}
-
-/// A fence opener or closer: the run of three or more backticks or tildes the line starts with.
-fn fence_of(line: &str) -> Option<(char, usize)> {
-    let ch = line.chars().next()?;
-    if ch != '`' && ch != '~' {
-        return None;
-    }
-    let len = line.chars().take_while(|c| *c == ch).count();
-    (len >= 3).then_some((ch, len))
-}
-
-/// `## Text ##` as a level and the text, the closing run of `#` and inline tags dropped; the slug
-/// drops the rest of the markup itself.
-fn atx_heading(line: &str) -> Option<(u8, String)> {
-    let level = line.chars().take_while(|c| *c == '#').count();
-    if level == 0 || level > 6 {
-        return None;
-    }
-    let rest = &line[level..];
-    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
-        return None;
-    }
-    let mut text = rest.trim();
-    let without = text.trim_end_matches('#');
-    if without.len() != text.len() && (without.is_empty() || without.ends_with([' ', '\t'])) {
-        text = without.trim_end();
-    }
-    Some((level as u8, strip_inline_tags(text)))
-}
-
-/// Inline HTML tags dropped, as the parser's heading text has none.
-fn strip_inline_tags(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Where a link goes.
@@ -855,20 +791,26 @@ mod tests {
     }
 
     #[test]
-    fn quick_headings_match_the_outline() {
-        // The line scan a text past the budget gets finds the same `#` headings as the parser, slugs and lines
-        // alike, and skips a `#` line inside a fence, a closing run of `#` and inline tags.
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/guide.md")).unwrap();
-        let quick: Vec<(u8, String, usize)> = quick_headings(&source).iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
-        let parsed: Vec<(u8, String, usize)> = outline(&source).headings.iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
-        assert_eq!(quick, parsed);
-        let tricky = "# A\n\n```\n# not one\n```\n\n## B ##\n\n### C#\n\n#### <a name=\"d\"></a> D\n\n~~~~\n```\n# still code\n~~~~\n\n##### E\n#NotHeading\n    # indented\n";
-        let found = quick_headings(tricky);
-        let quick: Vec<(u8, &str, &str, usize)> = found.iter().map(|h| (h.level, h.text.as_str(), h.slug.as_str(), h.line)).collect();
-        assert_eq!(quick, vec![(1, "A", "a", 1), (2, "B", "b", 7), (3, "C#", "c", 9), (4, "D", "d", 11), (5, "E", "e", 18)]);
-        let parsed: Vec<(u8, String, usize)> = outline(tricky).headings.iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
-        assert_eq!(quick.iter().map(|(l, _, s, n)| (*l, s.to_string(), *n)).collect::<Vec<_>>(), parsed);
-        assert_eq!(heading_for_fragment(&found, "#C").map(|h| h.line), Some(9));
+    fn repeated_headings_get_numbered_slugs_in_linear_time() {
+        // A changelog repeats its headings thousands of times: each gets its number without a search through
+        // every slug given before, so the outline of such a file takes about as long as its parse.
+        let mut source = String::from("# Changelog\n\n");
+        for release in 0..2000 {
+            source.push_str(&format!("## {release}.0\n\n### Added\n\n- a\n\n### Fixed\n\n- b\n\n"));
+        }
+        let started = std::time::Instant::now();
+        let outline = outline(&source);
+        let took = started.elapsed();
+        assert_eq!(outline.headings.len(), 1 + 3 * 2000);
+        assert_eq!(outline.headings[2].slug, "added");
+        assert_eq!(outline.headings[3].slug, "fixed");
+        assert_eq!(outline.headings[5].slug, "added-1");
+        assert_eq!(outline.headings[6].slug, "fixed-1");
+        assert_eq!(outline.headings[1 + 3 * 1999 + 1].slug, "added-1999");
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        // An explicit `a-1` and a repeated `a` stay apart, as on GitHub.
+        let apart = super::outline("# a\n\n# a-1\n\n# a\n\n# a\n");
+        assert_eq!(apart.headings.iter().map(|h| h.slug.as_str()).collect::<Vec<_>>(), vec!["a", "a-1", "a-2", "a-3"]);
     }
 
     #[test]
