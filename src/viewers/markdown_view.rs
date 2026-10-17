@@ -145,8 +145,9 @@ impl MarkdownView {
                 this.rich.update(cx, |rich, cx| rich.set_text(&prepared.text, cx));
                 this.source = prepared.text;
                 this.preparing = None;
-                if let Some(fragment) = this.pending_fragment.take() {
-                    this.reveal_heading_now(&fragment, cx);
+                if this.pending_fragment.is_some() {
+                    // A click waits for the renderer to show this text; the toggle's own scroll yields to it.
+                    this.on_parsed(cx);
                 } else if let Some(line) = reveal_line
                     && let Some(span) =
                         this.outline.top_block_at_line(line).and_then(|ix| this.outline.top_block(ix)).map(|b| b.span.clone())
@@ -169,6 +170,11 @@ impl MarkdownView {
     /// The rich text changed (a parse landed, a scroll, a selection): carry out a waiting reveal once
     /// the rendered text is the source it was asked for.
     fn on_parsed(&mut self, cx: &mut Context<Self>) {
+        let current = self.preparing.is_none() && self.rich.read(cx).rendered_text().source() == self.source;
+        if current && let Some(fragment) = self.pending_fragment.take() {
+            // A click made while an older text showed: followed now, in the outline that is on screen.
+            self.reveal_heading_now(&fragment, cx);
+        }
         if let Some(span) = self.pending_reveal.clone() {
             let rendered = self.rich.read(cx).rendered_text();
             if rendered.source() == self.source {
@@ -355,8 +361,9 @@ impl MarkdownView {
             cx.notify();
             return;
         }
-        if self.preparing.is_some() {
-            // The outline is the old text's: the click waits for the new one and then has its way.
+        if !self.rendered_is_current(cx) {
+            // The screen still shows an older text (its preparation or the renderer's parse running): the
+            // click waits for the new one and then has its way, or follows a toggle to the raw text.
             self.pending_fragment = Some(fragment.to_string());
             cx.notify();
             return;

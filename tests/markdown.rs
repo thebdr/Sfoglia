@@ -604,5 +604,38 @@ fn the_place_is_kept_while_the_renderer_catches_up(cx: &mut TestAppContext) {
         assert_eq!(editor.read(cx).cursor_position(), Position::new(208, 0));
     })
     .unwrap();
+    // The same one window later: the outline has landed but the renderer still parses the new text when the
+    // fragment is clicked; a toggle to the raw text then follows it there (section 50, line 211 after ten
+    // new lines).
+    let edited = format!("zero\n\none\n\ntwo\n\nthree\n\nfour\n\n{text}");
+    cx.update_window(handle, |_, window, cx| {
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        editor.update(cx, |editor, cx| editor.set_value(edited.clone(), window, cx));
+        editor.update(cx, |editor, cx| editor.set_cursor_position(Position::new(10, 0), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+    })
+    .unwrap();
+    while cx.update(|cx| view.read(cx).is_preparing()) {
+        cx.background_executor.tick();
+    }
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_ne!(view.read(cx).rich_text().read(cx).rendered_text().source(), edited, "the renderer still parses the new text");
+        view.update(cx, |view, cx| view.follow_link("#section-50", window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Section 50");
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(210, 0));
+    })
+    .unwrap();
     std::fs::remove_file(&long).ok();
 }
