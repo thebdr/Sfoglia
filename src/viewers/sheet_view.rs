@@ -187,8 +187,6 @@ pub struct SheetView {
     search: Entity<InputState>,
     /// The edit field beneath a delimited grid, holding the selected cell's text.
     edit: Entity<InputState>,
-    /// The selected cell as (data row, column).
-    selected: Option<(usize, usize)>,
     text: Option<Entity<TextView>>,
     raw_shown: bool,
     status: String,
@@ -251,7 +249,6 @@ impl SheetView {
             table,
             search,
             edit,
-            selected: None,
             text: None,
             raw_shown: false,
             status: String::new(),
@@ -269,11 +266,14 @@ impl SheetView {
                 }
                 Err(error) => view.status = format!("cannot open the workbook: {error}"),
             }
-        } else if bytes.len() > MAX_GRID_BYTES {
-            view.status = too_big_message(bytes.len());
-            view.show_raw(window, cx);
         } else {
+            // The budget is measured on the decoded text, as it is again after a toggle or a reload.
             let decoded = crate::text::decode(bytes);
+            if decoded.text.len() > MAX_GRID_BYTES {
+                view.status = too_big_message(decoded.text.len());
+                view.show_raw(window, cx);
+                return view;
+            }
             let encoding = decoded.encoding.label().to_string();
             // Parsed with line feeds alone, as the text an edit is written into (C-008's save puts the
             // file's endings back): the record spans and the cells agree before and after an edit.
@@ -312,7 +312,6 @@ impl SheetView {
             },
             Source::None => SheetDelegate::new(Vec::new(), 0, Vec::new(), Vec::new()),
         };
-        self.selected = None;
         self.table.update(cx, |table, cx| {
             *table.delegate_mut() = delegate;
             table.clear_selection(cx);
@@ -329,31 +328,40 @@ impl SheetView {
         }
     }
 
+    /// The table's selected cell as (data row, column); a sort or a rebuild clears it with the table's own.
+    fn selection(&self, cx: &App) -> Option<(usize, usize)> {
+        let table = self.table.read(cx);
+        table.selected_cell().and_then(|(display, col)| table.delegate().data_row(display).map(|row| (row, col)))
+    }
+
+    /// A cell came up in the table: the edit field takes its text, a line break shown as ⏎ (the field is
+    /// one line) and written back as a break.
     fn select_cell(&mut self, cell: Option<(usize, usize)>, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected = cell;
         if let Some((row, col)) = cell
             && let Source::Delimited { grid, .. } = &self.source
         {
             let record = row + self.record_offset();
             let text = grid.rows.get(record).and_then(|r| r.get(col)).cloned().unwrap_or_default();
-            self.edit.update(cx, |edit, cx| edit.set_value(text, window, cx));
+            self.edit.update(cx, |edit, cx| edit.set_value(text.replace('\n', "⏎"), window, cx));
         }
         cx.notify();
     }
 
     /// The selected cell's name as Excel writes it (`B3`), by the file's own row numbers.
-    pub fn selected_cell_name(&self) -> Option<String> {
-        self.selected.map(|(row, col)| cell_name(row + self.record_offset(), col))
+    pub fn selected_cell_name(&self, cx: &App) -> Option<String> {
+        self.selection(cx).map(|(row, col)| cell_name(row + self.record_offset(), col))
     }
 
     /// Write `text` into the selected cell's record, that record alone re-written in the file's dialect,
     /// so the raw text holds the edit and C-008's save writes it; the grid follows the text.
     fn apply_edit(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((row, col)) = self.selected else {
+        let Some((row, col)) = self.selection(cx) else {
             self.status = "select a cell first".to_string();
             cx.notify();
             return;
         };
+        // The field is one line: ⏎ stands for a line break and goes back as one.
+        let text = text.replace('⏎', "\n");
         let (record_ix, delimiter, span, fields) = match &self.source {
             Source::Delimited { grid, .. } => {
                 let record_ix = row + self.record_offset();
@@ -379,22 +387,26 @@ impl SheetView {
             cx.notify();
             return;
         };
+        let record = sheet::format_record(&fields, delimiter);
+        if record == current[span.clone()] {
+            // Nothing to write: the text stays as it is, unmarked.
+            self.status = format!("{} unchanged", cell_name(record_ix, col));
+            cx.notify();
+            return;
+        }
         let mut next = String::with_capacity(current.len() + text.len());
         next.push_str(&current[..span.start]);
-        next.push_str(&sheet::format_record(&fields, delimiter));
+        next.push_str(&record);
         next.push_str(&current[span.end..]);
         let editor = view.read(cx).editor().clone();
         editor.update(cx, |editor, cx| editor.replace_all(next, window, cx));
         view.update(cx, |view, cx| view.note_edit(cx));
-        let keep = self.selected;
         self.reparse(cx);
         self.rebuild_table(cx);
-        self.selected = keep;
-        if let Some((r, c)) = keep {
-            let display = self.table.read(cx).delegate().display_row(r);
-            if let Some(display) = display {
-                self.table.update(cx, |table, cx| table.set_selected_cell(display, c, cx));
-            }
+        // The grid is rebuilt in the file's order: the edited cell comes up again where it stands now.
+        let display = self.table.read(cx).delegate().display_row(row);
+        if let Some(display) = display {
+            self.table.update(cx, |table, cx| table.set_selected_cell(display, col, cx));
         }
         self.status = format!("{} set; Ctrl+S saves", cell_name(record_ix, col));
         cx.notify();
@@ -420,7 +432,7 @@ impl SheetView {
                     }
                 }
             }
-            let after = self.selected.and_then(|(r, c)| delegate.display_row(r).map(|d| (d, c)));
+            let after = table.selected_cell();
             let next = matches.iter().position(|&m| after.is_none_or(|a| m > a)).unwrap_or(0);
             (matches, next)
         };
@@ -773,7 +785,7 @@ impl Render for SheetView {
             "the arrow in a header sorts, Ctrl+Shift+F finds a cell, Ctrl+Shift+D shows the text"
         };
         let status = if self.status.is_empty() { hint.to_string() } else { self.status.clone() };
-        let cell = self.selected_cell_name().unwrap_or_default();
+        let cell = self.selected_cell_name(cx).unwrap_or_default();
         let header_label = if self.header_on() { "Header: on" } else { "Header: off" };
         let status_row = h_flex()
             .id("sheet-status")

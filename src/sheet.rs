@@ -238,8 +238,17 @@ fn cell_of(data: &Data, epoch_1904: bool) -> Cell {
             let text = if dt.is_duration() { format_duration(dt.as_f64()) } else { format_serial(dt.as_f64(), epoch_1904) };
             Cell { text, kind: CellKind::Date }
         }
-        Data::DateTimeIso(s) | Data::DurationIso(s) => Cell { text: s.clone(), kind: CellKind::Date },
+        Data::DateTimeIso(s) => Cell { text: iso_text(s), kind: CellKind::Date },
+        Data::DurationIso(s) => Cell { text: s.clone(), kind: CellKind::Date },
         Data::Error(e) => Cell { text: e.to_string(), kind: CellKind::Error },
+    }
+}
+
+/// An ISO date-time as written in a workbook, its `T` between date and time shown as a space.
+pub fn iso_text(text: &str) -> String {
+    match text.as_bytes().get(10) {
+        Some(b'T') => format!("{} {}", &text[..10], &text[11..]),
+        _ => text.to_string(),
     }
 }
 
@@ -278,10 +287,11 @@ pub fn format_number(value: f64) -> String {
 /// (a time alone) as `HH:MM:SS`.
 pub fn format_serial(serial: f64, epoch_1904: bool) -> String {
     let base = if epoch_1904 { 24107 } else { 25569 }; // days from 1899-12-30 / 1904-01-01 to 1970-01-01
-    let days = serial.floor() as i64;
-    let seconds = ((serial - serial.floor()) * 86_400.0).round() as i64;
+    // Rounded to whole seconds before the split, so a time just short of midnight carries into the next day.
+    let total = (serial * 86_400.0).round() as i64;
+    let (days, seconds) = (total.div_euclid(86_400), total.rem_euclid(86_400));
     let (h, m, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
-    if days == 0 {
+    if serial < 1.0 {
         // A serial below one is a time of day in either system (calamine cannot tell a time cell from a
         // date cell, and the 1900 system's day 0 is no day).
         return format!("{h:02}:{m:02}:{s:02}");
@@ -404,6 +414,10 @@ mod tests {
         assert_eq!(format_serial(61.0, false), "1900-03-01");
         assert_eq!(format_serial(0.5, false), "12:00:00");
         assert_eq!(format_serial(0.5, true), "12:00:00", "a time of day in the 1904 system too");
+        assert_eq!(format_serial(46027.999999999, false), "2026-01-06", "a second short of midnight rounds into the next day");
+        assert_eq!(format_serial(0.9999999999, false), "00:00:00", "a time alone wraps");
+        assert_eq!(iso_text("2026-02-28T14:30:00"), "2026-02-28 14:30:00");
+        assert_eq!(iso_text("2026-02-28"), "2026-02-28");
         assert_eq!(format_serial(1.0, true), "1904-01-02");
         assert_eq!(format_serial(44565.0, true), "2026-01-05", "the 1904 system's serial of the fixture's date (1462 days fewer)");
         assert_eq!(format_number(12.5), "12.5");

@@ -204,6 +204,7 @@ fn a_header_click_sorts_the_rows_and_a_third_restores_the_order(cx: &mut TestApp
         window.render_frame(cx);
         assert_eq!(ids(&view, cx), rows(&["2", "1", "3"]), "a click sorts descending");
         assert_eq!(view.read(cx).table().read(cx).delegate().sort(), Some((3, ColumnSort::Descending)));
+        assert_eq!(label(window, "sheet-cell"), "", "a sort drops the selection, so no stale cell is named");
         window.click(("icon-sort", 3usize), cx);
         window.render_frame(cx);
         assert_eq!(ids(&view, cx), rows(&["3", "1", "2"]), "a second click ascending");
@@ -276,6 +277,31 @@ fn an_edit_in_the_grid_rewrites_its_record_alone_and_saves(cx: &mut TestAppConte
     let (handle, panel, view) = open_sheet(cx, path.clone());
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
+        let table = view.read(cx).table().clone();
+        // C2 first: a two-line note shows its break as ⏎ in the one-line field, and Enter with nothing
+        // changed writes nothing.
+        table.update(cx, |table, cx| table.set_selected_cell(0, 2, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "C2");
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "first line⏎second line");
+        let edit = view.read(cx).edit_input().clone();
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "C2 unchanged");
+        assert!(!panel.read(cx).is_dirty(cx), "nothing written, the tab stays saved");
+        let (_, cells) = dump(&view, cx);
+        assert_eq!(cells[0][2], "first line\nsecond line", "the break is kept");
         let table = view.read(cx).table().clone();
         table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
     })
