@@ -31,14 +31,21 @@ pub fn detect_delimiter(text: &str, file_name: &str) -> u8 {
     let mut best = (b',', 0usize, 0usize);
     for candidate in [b',', b';', b'\t', b'|'] {
         let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, candidate)).collect();
-        let first = counts.first().copied().unwrap_or(0);
-        if first == 0 {
-            continue;
+        // The count most lines share (a title line in front of the data does not decide), the larger
+        // count on a tie; a candidate no line holds is out.
+        let mut tally: Vec<(usize, usize)> = Vec::new();
+        for &c in counts.iter().filter(|&&c| c > 0) {
+            match tally.iter_mut().find(|(count, _)| *count == c) {
+                Some(entry) => entry.1 += 1,
+                None => tally.push((c, 1)),
+            }
         }
-        let agreeing = counts.iter().filter(|&&c| c == first).count();
-        // More fields, then more agreement, win; an earlier candidate wins a tie.
-        if (agreeing, first) > (best.2, best.1) {
-            best = (candidate, first, agreeing);
+        let Some(&(common, agreeing)) = tally.iter().max_by_key(|&&(count, lines)| (lines, count)) else {
+            continue;
+        };
+        // More agreement, then more fields, win; an earlier candidate wins a tie.
+        if (agreeing, common) > (best.2, best.1) {
+            best = (candidate, common, agreeing);
         }
     }
     best.0
@@ -182,7 +189,11 @@ pub struct Workbook {
 /// (`#DIV/0!`), a formula as its cached value; merged regions for the xlsx family.
 pub fn read_workbook(path: &Path) -> Result<Workbook, String> {
     let mut book = calamine::open_workbook_auto(path).map_err(|e| e.to_string())?;
-    let epoch_1904 = matches!(&book, Sheets::Xlsx(xlsx) if xlsx.has_1904_epoch());
+    let epoch_1904 = match &book {
+        Sheets::Xlsx(xlsx) => xlsx.has_1904_epoch(),
+        Sheets::Xls(xls) => xls.has_1904_epoch(),
+        _ => false,
+    };
     let names = book.sheet_names();
     let mut sheets = Vec::with_capacity(names.len());
     for name in names {
@@ -232,17 +243,35 @@ fn cell_of(data: &Data, epoch_1904: bool) -> Cell {
     }
 }
 
-/// A number as its own digits: an integral value without a fraction, otherwise up to fifteen significant
-/// digits with the trailing zeros taken off.
+/// A number as its own digits: an integral value without a fraction, otherwise the shortest form that
+/// reads back exactly, cut to fifteen significant digits as Excel shows them (so 0.1 + 0.2 is `0.3`).
 pub fn format_number(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        return format!("{}", value as i64);
+    if value.fract() == 0.0 {
+        return if value.abs() < 1e15 { format!("{}", value as i64) } else { value.to_string() };
     }
-    let text = format!("{value:.15}");
-    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-    // Round-trip through the shortest representation when it is exact.
     let shortest = value.to_string();
-    if shortest.len() < trimmed.len() && shortest.parse::<f64>() == Ok(value) { shortest } else { trimmed.to_string() }
+    let digits = shortest.chars().filter(|c| c.is_ascii_digit()).count();
+    if digits <= 15 && !shortest.contains('e') {
+        return shortest;
+    }
+    // Fifteen significant digits, written out without an exponent.
+    let sci = format!("{value:.14e}");
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    let point = exponent + 1;
+    let mut text = if point <= 0 {
+        format!("0.{}{}", "0".repeat((-point) as usize), digits)
+    } else if (point as usize) >= digits.len() {
+        format!("{digits}{}", "0".repeat(point as usize - digits.len()))
+    } else {
+        format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
+    };
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    if negative { format!("-{text}") } else { text }
 }
 
 /// An Excel serial date as `YYYY-MM-DD`, with ` HH:MM:SS` when it has a time of day; a serial below one
@@ -252,8 +281,9 @@ pub fn format_serial(serial: f64, epoch_1904: bool) -> String {
     let days = serial.floor() as i64;
     let seconds = ((serial - serial.floor()) * 86_400.0).round() as i64;
     let (h, m, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
-    if days == 0 && !epoch_1904 {
-        // Serial 0 of the 1900 system is no day: a time alone.
+    if days == 0 {
+        // A serial below one is a time of day in either system (calamine cannot tell a time cell from a
+        // date cell, and the 1900 system's day 0 is no day).
         return format!("{h:02}:{m:02}:{s:02}");
     }
     if !epoch_1904 && days == 60 {
@@ -361,6 +391,8 @@ mod tests {
         assert_eq!(detect_delimiter("a,b\n1,2\n", "x.tsv"), b'\t', "a .tsv is tabs whatever it holds");
         assert_eq!(detect_delimiter("\"a,b\";c\n\"1,2\";3\n", "x.csv"), b';', "a delimiter inside quotes does not count");
         assert_eq!(detect_delimiter("one\ntwo\n", "x.csv"), b',', "nothing to split: commas");
+        assert_eq!(detect_delimiter("title\n1;2;3\n4;5;6\n", "x.csv"), b';', "a title line in front does not decide");
+        assert_eq!(detect_delimiter("a;b\n1,5;2,5\n3,5;4,5\n", "x.csv"), b';', "decimal commas do not outvote the semicolons");
     }
 
     #[test]
@@ -371,12 +403,18 @@ mod tests {
         assert_eq!(format_serial(60.0, false), "1900-02-29", "Excel's phantom leap day keeps its serial");
         assert_eq!(format_serial(61.0, false), "1900-03-01");
         assert_eq!(format_serial(0.5, false), "12:00:00");
-        assert_eq!(format_serial(0.0, true), "1904-01-01");
+        assert_eq!(format_serial(0.5, true), "12:00:00", "a time of day in the 1904 system too");
+        assert_eq!(format_serial(1.0, true), "1904-01-02");
+        assert_eq!(format_serial(44565.0, true), "2026-01-05", "the 1904 system's serial of the fixture's date (1462 days fewer)");
         assert_eq!(format_number(12.5), "12.5");
         assert_eq!(format_number(7.0), "7");
         assert_eq!(format_number(-3.25), "-3.25");
         assert_eq!(format_number(0.1 + 0.2), "0.3");
         assert_eq!(format_number(1e20), "100000000000000000000");
+        assert_eq!(format_number(0.000123456789012345), "0.000123456789012345", "fifteen significant digits kept");
+        assert_eq!(format_number(1e-7), "0.0000001");
+        assert_eq!(format_number(-2.0 / 3.0), "-0.666666666666667", "cut to fifteen, as Excel shows it");
+        assert_eq!(format_number(123456789012345678.0), "123456789012345680");
         assert_eq!(column_name(0), "A");
         assert_eq!(column_name(25), "Z");
         assert_eq!(column_name(26), "AA");

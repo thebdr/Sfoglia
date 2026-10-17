@@ -275,7 +275,10 @@ impl SheetView {
         } else {
             let decoded = crate::text::decode(bytes);
             let encoding = decoded.encoding.label().to_string();
-            view.parse_delimited(&decoded.text, encoding, true);
+            // Parsed with line feeds alone, as the text an edit is written into (C-008's save puts the
+            // file's endings back): the record spans and the cells agree before and after an edit.
+            let text = crate::data::with_line_feeds(&decoded.text);
+            view.parse_delimited(&text, encoding, true);
             view.rebuild_table(cx);
         }
         view
@@ -371,7 +374,11 @@ impl SheetView {
             return;
         }
         let current = crate::data::with_line_feeds(&self.current_text(cx)).into_owned();
-        let Some(span) = clamp_span(&current, span) else { return };
+        let Some(span) = clamp_span(&current, span) else {
+            self.status = "the text changed under the grid; Ctrl+Shift+D and back rebuilds it".to_string();
+            cx.notify();
+            return;
+        };
         let mut next = String::with_capacity(current.len() + text.len());
         next.push_str(&current[..span.start]);
         next.push_str(&sheet::format_record(&fields, delimiter));

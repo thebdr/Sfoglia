@@ -153,6 +153,14 @@ fn the_workbook_fixtures_read_their_typed_cells() {
         assert_eq!(notes.cell(1, 1).map(|c| c.text.as_str()), Some("42"), "{name}");
         assert_eq!(book.sheets[2].rows.len(), 0, "{name}");
     }
+    // The same book saved by Excel with the 1904 date system: Excel keeps the serials, so every date shows
+    // four years and a day later, as Excel itself shows them in that book.
+    let book = sheet::read_workbook(&fixture("book1904.xls")).unwrap();
+    let data = &book.sheets[0];
+    assert_eq!(data.cell(1, 3).map(|c| c.text.as_str()), Some("2030-01-06"), "the 1904 epoch of a legacy xls");
+    assert_eq!(data.cell(2, 3).map(|c| c.text.as_str()), Some("2030-03-01 14:30:00"));
+    assert_eq!(data.cell(1, 1).map(|c| c.text.as_str()), Some("Rossi, Mario"));
+    assert_eq!(data.cell(4, 2).map(|c| c.text.as_str()), Some("16.25"));
 }
 
 #[gpui_kit::test]
@@ -396,4 +404,79 @@ fn a_large_delimited_text_opens_on_its_text(cx: &mut TestAppContext) {
     })
     .unwrap();
     std::fs::remove_file(&big).ok();
+}
+
+/// A file with CRLF endings: the grid's cells carry no carriage returns, an edit lands in its own record
+/// before and after another edit, and Ctrl+S writes the file back with its endings (C-013).
+#[gpui_kit::test]
+fn an_edit_in_a_crlf_file_keeps_its_endings(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-crlf");
+    let path = dir.join("table.csv");
+    let crlf = String::from_utf8(fixture_bytes("table.csv")).unwrap().replace('\n', "\r\n");
+    std::fs::write(&path, crlf.as_bytes()).unwrap();
+    let (handle, panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (_, cells) = dump(&view, cx);
+        assert_eq!(cells[0][2], "first line\nsecond line", "no carriage return in a cell");
+        let table = view.read(cx).table().clone();
+        // D2: the amount of the first record.
+        table.update(cx, |table, cx| table.set_selected_cell(0, 3, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "D2");
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("9", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "D2 set; Ctrl+S saves");
+        let (_, cells) = dump(&view, cx);
+        assert_eq!(cells[0][3], "9");
+        assert_eq!(cells[1][1], "Élodie", "the next record is untouched");
+        // B3 next: the second edit lands in its own record too.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3");
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("Élodie Durand", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let expected_lf = String::from_utf8(fixture_bytes("table.csv"))
+        .unwrap()
+        .replace("second line\",7,", "second line\",9,")
+        .replace("2,Élodie,plain", "2,Élodie Durand,plain");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let (_, cells) = dump(&view, cx);
+        assert_eq!(cells[1][1], "Élodie Durand");
+        assert_eq!(cells[0][3], "9", "the first edit is still there");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert_eq!(sfoglia::data::with_line_feeds(&text).as_ref(), expected_lf, "both records re-written, the rest as it was");
+        assert!(panel.read(cx).is_dirty(cx));
+        window.press("ctrl-s", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&path).unwrap(), expected_lf.replace('\n', "\r\n").as_bytes(), "saved with the file's CRLF endings");
+    let _ = std::fs::remove_dir_all(&dir);
 }
