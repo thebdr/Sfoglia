@@ -516,6 +516,97 @@ fn decode_lt_references(value: &str) -> String {
     out
 }
 
+/// How many bytes XML entities may stand for in one file: a million, or eight times the text,
+/// whichever is more. roxmltree bounds the nodes an expansion makes, not its text.
+fn xml_expansion_budget(text: &str) -> usize {
+    1_000_000usize.max(text.len().saturating_mul(8))
+}
+
+/// The general entities a DOCTYPE declares inline, by name, with their values as written.
+fn xml_entities(doctype: &str) -> Vec<(String, String)> {
+    let mut entities = Vec::new();
+    let mut from = 0;
+    while let Some(at) = doctype[from..].find("<!ENTITY") {
+        let start = from + at;
+        let rest = doctype[start + "<!ENTITY".len()..].trim_start();
+        if let Some((name, after)) = rest.split_once(char::is_whitespace) {
+            let after = after.trim_start();
+            if let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let value = after[1..].split(quote).next().unwrap_or("");
+                if !name.starts_with('%') {
+                    entities.push((name.to_string(), value.to_string()));
+                }
+            }
+        }
+        from = start + "<!ENTITY".len();
+    }
+    entities
+}
+
+/// The bytes an entity stands for once the entities inside its value are expanded too; a
+/// chain deeper than roxmltree allows (ten) stops counting, as roxmltree stops expanding.
+fn xml_expanded_len(name: &str, entities: &[(String, String)], depth: usize) -> usize {
+    let Some((_, value)) = entities.iter().find(|(n, _)| n == name) else { return 0 };
+    if depth > 10 {
+        return value.len();
+    }
+    let mut total = value.len();
+    let mut rest = value.as_str();
+    while let Some(at) = rest.find('&') {
+        let tail = &rest[at + 1..];
+        match tail.find(';') {
+            Some(end) if !tail.starts_with('#') && entities.iter().any(|(n, _)| n == &tail[..end]) => {
+                total = total - (end + 2) + xml_expanded_len(&tail[..end], entities, depth + 1);
+                rest = &tail[end + 1..];
+            }
+            _ => rest = tail,
+        }
+    }
+    total
+}
+
+/// Refuse `text` when the entities its content references stand for more than the budget.
+fn check_xml_expansion(text: &str) -> Result<(), ParseError> {
+    let Some(doctype) = xml_prolog(text).1 else { return Ok(()) };
+    let entities = xml_entities(doctype);
+    if entities.is_empty() {
+        return Ok(());
+    }
+    let budget = xml_expansion_budget(text);
+    let doctype_end = doctype.as_ptr() as usize - text.as_ptr() as usize + doctype.len();
+    let body = &text[doctype_end..];
+    let bytes = body.as_bytes();
+    let mut total = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &body[i..];
+        if rest.starts_with("<!--") {
+            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with("<![CDATA[") {
+            i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with("<?") {
+            i += rest.find("?>").map_or(rest.len(), |e| e + 2);
+        } else if bytes[i] == b'&' && !rest.starts_with("&#") {
+            let Some(end) = rest.find(';') else { break };
+            let name = &rest[1..end];
+            if entities.iter().any(|(n, _)| n == name) {
+                total += xml_expanded_len(name, &entities, 0);
+                if total > budget {
+                    return Err(ParseError {
+                        line: line_column(text, doctype_end + i).0,
+                        column: line_column(text, doctype_end + i).1,
+                        message: format!("entities expand to more than {budget} bytes"),
+                    });
+                }
+            }
+            i += end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
 /// The offset of the start tag that nests deeper than `MAX_DEPTH`, if any; comments, CDATA,
 /// processing instructions and the DOCTYPE are skipped, quotes inside tags honoured.
 fn xml_tag_overflow(text: &str) -> Option<usize> {
@@ -1144,6 +1235,7 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<
 
 fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
     check_xml_depth(text)?;
+    check_xml_expansion(text)?;
     // Entities may add a million nodes at most: a few lines can ask for billions otherwise.
     let limit = xml_nodes_limit(text);
     let options = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: limit, ..Default::default() };
@@ -2057,7 +2149,10 @@ mod tests {
             ("yaml alias bomb", Format::Yaml, (1..6).fold("l0: &l0 [x, x, x, x, x, x, x, x, x, x]\n".to_string(), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))), Err("line 6, column 20: anchors and aliases stand for more than 1000000 nodes and bytes")),
             ("yaml alias bomb on long scalars", Format::Yaml, (1..5).fold(format!("l0: &l0 [{}]\n", vec!["y".repeat(1000); 10].join(", ")), |text, i| text + &format!("l{i}: &l{i} [{}]\n", vec![format!("*l{}", i - 1); 10].join(", "))) + "l5: [*l4, *l4, *l4, *l4, *l4, *l4, *l4]\n", Err("line 3, column 45: anchors and aliases stand for more than 1000000 nodes and bytes")),
             ("yaml nested anchors over a long list", Format::Yaml, format!("x: {}{}{}\n", (0..190).map(|i| format!("&a{i} [")).collect::<String>(), vec!["1"; 100_000].join(", "), "]".repeat(190)), Err("line 1, column 1139: anchors and aliases stand for more than 2411296 nodes and bytes")),
-            ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 1: the document expands to more than 1005112 nodes")),
+            ("xml entity amplification", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "<x/>".repeat(1000), "&e0;".repeat(255), "&e1;".repeat(10)), Err("line 1, column 5069: entities expand to more than 1000000 bytes")),
+            ("xml entity amplification into text", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11069: entities expand to more than 1000000 bytes")),
+            ("xml entity amplification into an attribute", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r a=\"{}\"/>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11072: entities expand to more than 1000000 bytes")),
+            ("xml small entity used a thousand times", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"hello\">]><r>{}</r>", "&e;".repeat(1000)), Ok((1, 1))),
             ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
             ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
             ("yaml big anchor without alias", Format::Yaml, (0..100_000).fold("big: &big\n".to_string(), |text, i| text + &format!("  k{i}: value number {i}\n")), Ok((100_002, 3))),
