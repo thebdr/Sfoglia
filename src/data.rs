@@ -134,18 +134,7 @@ pub struct Tree {
 impl Tree {
     /// Parse `text` as `format`.
     pub fn parse(format: Format, text: &str) -> Result<Tree, ParseError> {
-        on_deep_stack(|| {
-            let mut nodes = Vec::new();
-            match format {
-                Format::Json => parse_json(text, &mut nodes)?,
-                Format::JsonLines => parse_json_lines(text, &mut nodes)?,
-                Format::Xml => parse_xml(text, &mut nodes)?,
-                Format::Yaml => parse_yaml(text, &mut nodes)?,
-                Format::Toml => parse_toml(text, &mut nodes)?,
-                Format::Ini => parse_ini(text, &mut nodes)?,
-            }
-            Ok(Tree { format, nodes })
-        })
+        on_deep_stack(|| Ok(Tree { format, nodes: parse_nodes(format, text)? }))
     }
 
     pub fn len(&self) -> usize {
@@ -313,6 +302,20 @@ fn close(nodes: &mut [Node], ix: usize, count: usize) {
 /// How a float prints: always with a fraction or an exponent, so `1.0` stays `1.0`.
 fn float_text(value: f64) -> String {
     format!("{value:?}")
+}
+
+/// The arena of `text` in `format`, on the current stack.
+fn parse_nodes(format: Format, text: &str) -> Result<Vec<Node>, ParseError> {
+    let mut nodes = Vec::new();
+    match format {
+        Format::Json => parse_json(text, &mut nodes)?,
+        Format::JsonLines => parse_json_lines(text, &mut nodes)?,
+        Format::Xml => parse_xml(text, &mut nodes)?,
+        Format::Yaml => parse_yaml(text, &mut nodes)?,
+        Format::Toml => parse_toml(text, &mut nodes)?,
+        Format::Ini => parse_ini(text, &mut nodes)?,
+    }
+    Ok(nodes)
 }
 
 /// The stack the parsers get. roxmltree, saphyr and toml recurse per level of nesting, and a
@@ -1158,8 +1161,9 @@ fn yaml_key_text(key: &Yaml) -> String {
         Yaml::Representation(text, _, _) => text.to_string(),
         Yaml::Tagged(_, inner) => yaml_key_text(inner),
         other => {
+            // A complex key is shown as the emitter writes it, tags dropped as the pretty form drops them.
             let mut out = String::new();
-            let _ = saphyr::YamlEmitter::new(&mut out).dump(other);
+            let _ = saphyr::YamlEmitter::new(&mut out).dump(&yaml_for_emit(other));
             out.trim_start_matches("---").trim().replace('\n', " ")
         }
     }
@@ -1474,9 +1478,24 @@ fn parse_ini(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
 
 // ---- Pretty-printing ----
 
-/// The pretty form of `text` in `format`, or why it does not parse.
+/// The pretty form of `text` in `format`, or why it does not parse. The pretty form is read back
+/// first: a file whose pretty form would not read back as the same tree (a YAML key past the
+/// parser's 1024 characters, complex keys told apart by their tags alone) is refused instead,
+/// so the text is never replaced by something that reads differently.
 pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
-    on_deep_stack(|| pretty_on_this_stack(format, text))
+    on_deep_stack(|| {
+        let out = pretty_on_this_stack(format, text)?;
+        let same = parse_nodes(format, &out).is_ok_and(|after| parse_nodes(format, text).is_ok_and(|before| before == after));
+        if same {
+            Ok(out)
+        } else {
+            Err(ParseError {
+                line: 1,
+                column: 1,
+                message: "the pretty form would not read back as the same tree, so the text stays as it is".to_string(),
+            })
+        }
+    })
 }
 
 fn pretty_on_this_stack(format: Format, text: &str) -> Result<String, ParseError> {
@@ -2221,6 +2240,23 @@ mod tests {
             assert_eq!(Tree::parse(Format::Yaml, &pretty_tagged).unwrap().nodes, Tree::parse(Format::Yaml, tagged).unwrap().nodes, "{tagged:?} -> {pretty_tagged:?}");
         }
         assert_eq!(pretty(Format::Yaml, "a: !!str 123\n").unwrap(), "a: \"123\"\n");
+        // A complex key shows without its tags, as the pretty form writes it; and a pretty form that would not
+        // read back as the same tree (complex keys told apart by a tag alone, keys past the parser's 1024
+        // characters) is refused, so the text is never replaced by something that reads differently.
+        let keyed = "? [!a {k: 1}]\n: x\n";
+        assert_eq!(rows(&Tree::parse(Format::Yaml, keyed).unwrap()), vec![(0, "$", "object", "1 entry"), (1, "- k: 1", "string", "x")]);
+        let pretty_keyed = pretty(Format::Yaml, keyed).unwrap();
+        assert_eq!(Tree::parse(Format::Yaml, &pretty_keyed).unwrap().nodes, Tree::parse(Format::Yaml, keyed).unwrap().nodes);
+        let refused = "the pretty form would not read back as the same tree, so the text stays as it is";
+        for stays in [
+            "? !a [1]\n: x\n? [1]\n: y\n".to_string(),
+            "? !a {k: 1}\n: x\n? !b {k: 1}\n: y\n".to_string(),
+            format!("? {}\n: 1\n", "k".repeat(1100)),
+            format!("\"{}\": 1\n", "\\x01".repeat(200)),
+        ] {
+            assert!(Tree::parse(Format::Yaml, &stays).is_ok(), "{stays:?}");
+            assert_eq!(pretty(Format::Yaml, &stays).unwrap_err().message, refused, "{stays:?}");
+        }
         let toml_in = "zeta=1\n[server]\nhost=\"h\"\n";
         let toml = pretty(Format::Toml, toml_in).unwrap();
         assert_eq!(toml, "zeta = 1\n\n[server]\nhost = \"h\"\n");
