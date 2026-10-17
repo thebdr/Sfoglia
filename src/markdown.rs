@@ -523,8 +523,10 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
         }
         let alt = &text[opener.len()..alt_end];
         let kept_breaks = "\n".repeat(text[alt_end..].matches('\n').count());
-        // A `|` would split a table cell, so it travels percent-encoded, as any address may.
-        let url = url.replace('|', "%7C");
+        // A `|` would split a table cell, so it travels percent-encoded, as any address may. The parser has
+        // unescaped the definition's address, so a backslash or an ampersand goes back escaped, or the second
+        // parse would read another address (`..\` ends up as `..\)` and no link at all).
+        let url = url.replace('\\', "\\\\").replace('&', "\\&").replace('|', "%7C");
         let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>', '\n']) {
             format!("<{}>", url.replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A"))
         } else {
@@ -852,6 +854,33 @@ mod tests {
         let nested = "[![badge][b]][site]\n\n[b]: b.png\n[site]: https://example.com\n";
         assert_eq!(resolve_image_references(nested), "[![badge][b]](https://example.com)\n\n[b]: b.png\n[site]: https://example.com\n");
         assert_eq!(prepare(nested).text, "[![badge](b.png)](https://example.com)\n\n[b]: b.png\n[site]: https://example.com\n");
+        // A backslash or an ampersand in an address, which the parser unescapes, is written back escaped, so
+        // the second parse reads the definition's own address: `..\` links a folder, `a\_b.md` and `a&amp;b.md`
+        // stay those files, and nothing grows round after round.
+        fn link_urls(text: &str) -> Vec<String> {
+            fn walk(node: &Node, out: &mut Vec<String>) {
+                if let Node::Link(link) = node {
+                    out.push(link.url.clone());
+                }
+                if let Some(children) = node.children() {
+                    for child in children {
+                        walk(child, out);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&to_mdast(text, &parse_options()).unwrap(), &mut out);
+            out
+        }
+        let escaped = "Open [root] or [root][] now, [t][d] and [u][e].\n\n[root]: ..\\\n[d]: a\\\\_b.md\n[e]: a&amp;amp;b.md\n";
+        assert!(link_urls(escaped).is_empty(), "before the rewrite they are references, which the renderer cannot follow, not links");
+        let prepared = prepare(escaped).text;
+        assert_eq!(
+            prepared,
+            "Open [root](..\\\\) or [root](..\\\\) now, [t](a\\\\_b.md) and [u](a\\&amp;b.md).\n\n[root]: ..\\\n[d]: a\\\\_b.md\n[e]: a&amp;amp;b.md\n"
+        );
+        assert_eq!(link_urls(&prepared), vec!["..\\", "..\\", "a\\_b.md", "a&amp;b.md"], "the same addresses after the rewrite");
+        assert_eq!(prepared.lines().count(), escaped.lines().count());
     }
 
     #[test]
