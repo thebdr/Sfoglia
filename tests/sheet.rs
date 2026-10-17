@@ -199,6 +199,11 @@ fn a_header_click_sorts_the_rows_and_a_third_restores_the_order(cx: &mut TestApp
     let ids = |view: &Entity<SheetView>, cx: &gpui_kit::App| -> Vec<String> { dump(view, cx).1.iter().map(|r| r[0].clone()).collect() };
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
+        // A selected cell first, so the sort has something to drop.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3");
         // The amount column: 7, 12.50, -3.25 in the file.
         window.click(("icon-sort", 3usize), cx);
         window.render_frame(cx);
@@ -504,5 +509,99 @@ fn an_edit_in_a_crlf_file_keeps_its_endings(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     assert_eq!(std::fs::read(&path).unwrap(), expected_lf.replace('\n', "\r\n").as_bytes(), "saved with the file's CRLF endings");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Enter on a value left as the field showed it writes nothing, whatever the record's own quoting: a literal ⏎
+/// in a cell, a record quoted all over, and an empty cell past a ragged record's end (C-013).
+#[gpui_kit::test]
+fn an_unchanged_value_writes_nothing_whatever_the_quoting(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-unchanged");
+    let path = dir.join("odd.csv");
+    let source = "\"id\",\"n\"\n\"1\",\"x⏎y\"\n\"2\",\"7\"\n3\n";
+    std::fs::write(&path, source).unwrap();
+    let (handle, panel, view) = open_sheet(cx, path.clone());
+    let press_enter = |window: &mut gpui_kit::Window, cx: &mut gpui_kit::App, view: &Entity<SheetView>| {
+        let edit = view.read(cx).edit_input().clone();
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    };
+    // B2: a literal ⏎ in the cell shows as itself and goes back untouched.
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "x⏎y");
+        press_enter(window, cx, &view);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B2 unchanged");
+        assert!(!panel.read(cx).is_dirty(cx));
+        // B3: quoted all over in the file, shown as `7`, unchanged on Enter; `9` re-writes the record minimal.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "7");
+        press_enter(window, cx, &view);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B3 unchanged");
+        assert!(!panel.read(cx).is_dirty(cx));
+        // B4: past the ragged record's end, empty, unchanged on Enter.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(2, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "");
+        press_enter(window, cx, &view);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B4 unchanged");
+        assert!(!panel.read(cx).is_dirty(cx), "no delimiter appended to the ragged record");
+        assert!(view.read(cx).text_view().is_none(), "the text viewer was never needed");
+        // A real change to B3 re-writes that record with minimal quoting, the others byte for byte.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("9", window, cx));
+        press_enter(window, cx, &view);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert_eq!(text, "\"id\",\"n\"\n\"1\",\"x⏎y\"\n2,9\n3\n", "that record alone, quoted only where needed");
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

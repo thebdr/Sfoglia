@@ -360,17 +360,25 @@ impl SheetView {
             cx.notify();
             return;
         };
-        // The field is one line: ⏎ stands for a line break and goes back as one.
-        let text = text.replace('⏎', "\n");
         let (record_ix, delimiter, span, fields) = match &self.source {
             Source::Delimited { grid, .. } => {
                 let record_ix = row + self.record_offset();
                 let Some(record) = grid.rows.get(record_ix) else { return };
+                // Left as the field showed it (a break as ⏎, a cell past the record's end empty): nothing to
+                // write, whatever the record's own quoting was.
+                let original = record.get(col).cloned().unwrap_or_default();
+                if text == original.replace('\n', "⏎") {
+                    self.status = format!("{} unchanged", cell_name(record_ix, col));
+                    cx.notify();
+                    return;
+                }
+                // The field is one line: a ⏎ typed stands for a line break and goes back as one.
+                let text = text.replace('⏎', "\n");
                 let mut fields = record.clone();
                 while fields.len() <= col {
                     fields.push(String::new());
                 }
-                fields[col] = text.to_string();
+                fields[col] = text;
                 (record_ix, grid.delimiter, grid.spans[record_ix].clone(), fields)
             }
             _ => return,
@@ -388,13 +396,7 @@ impl SheetView {
             return;
         };
         let record = sheet::format_record(&fields, delimiter);
-        if record == current[span.clone()] {
-            // Nothing to write: the text stays as it is, unmarked.
-            self.status = format!("{} unchanged", cell_name(record_ix, col));
-            cx.notify();
-            return;
-        }
-        let mut next = String::with_capacity(current.len() + text.len());
+        let mut next = String::with_capacity(current.len() + record.len());
         next.push_str(&current[..span.start]);
         next.push_str(&record);
         next.push_str(&current[span.end..]);

@@ -27,10 +27,11 @@ pub fn detect_delimiter(text: &str, file_name: &str) -> u8 {
     if file_name.to_ascii_lowercase().ends_with(".tsv") {
         return b'\t';
     }
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).take(20).collect();
+    let records = record_counts(text, 20);
     let mut best = (b',', 0usize, 0usize);
-    for candidate in [b',', b';', b'\t', b'|'] {
-        let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, candidate)).collect();
+    for (ix, _) in CANDIDATES.iter().enumerate() {
+        let candidate = CANDIDATES[ix];
+        let counts: Vec<usize> = records.iter().map(|r| r[ix]).collect();
         // The count most lines share (a title line in front of the data does not decide), the larger
         // count on a tie; a candidate no line holds is out.
         let mut tally: Vec<(usize, usize)> = Vec::new();
@@ -51,17 +52,41 @@ pub fn detect_delimiter(text: &str, file_name: &str) -> u8 {
     best.0
 }
 
-fn count_outside_quotes(line: &str, delimiter: u8) -> usize {
+const CANDIDATES: [u8; 4] = [b',', b';', b'\t', b'|'];
+
+/// For the first `limit` records (a record ending at a line break outside quotes, so a quoted field spanning
+/// lines stays one record), how many of each candidate delimiter stand outside quotes; blank records left out.
+fn record_counts(text: &str, limit: usize) -> Vec<[usize; 4]> {
+    let mut records = Vec::new();
+    let mut counts = [0usize; 4];
     let mut quoted = false;
-    let mut count = 0;
-    for b in line.bytes() {
+    let mut blank = true;
+    for b in text.bytes() {
         if b == b'"' {
             quoted = !quoted;
-        } else if b == delimiter && !quoted {
-            count += 1;
+            blank = false;
+        } else if (b == b'\n' || b == b'\r') && !quoted {
+            if !blank {
+                records.push(counts);
+                if records.len() == limit {
+                    return records;
+                }
+            }
+            counts = [0; 4];
+            blank = true;
+        } else {
+            if !b.is_ascii_whitespace() || b == b'\t' {
+                blank = false;
+            }
+            if !quoted && let Some(ix) = CANDIDATES.iter().position(|&c| c == b) {
+                counts[ix] += 1;
+            }
         }
     }
-    count
+    if !blank {
+        records.push(counts);
+    }
+    records
 }
 
 /// Parse `text` with `delimiter`: RFC 4180 quoting (a quoted field may hold the delimiter, line breaks and
@@ -403,6 +428,11 @@ mod tests {
         assert_eq!(detect_delimiter("one\ntwo\n", "x.csv"), b',', "nothing to split: commas");
         assert_eq!(detect_delimiter("title\n1;2;3\n4;5;6\n", "x.csv"), b';', "a title line in front does not decide");
         assert_eq!(detect_delimiter("a;b\n1,5;2,5\n3,5;4,5\n", "x.csv"), b';', "decimal commas do not outvote the semicolons");
+        assert_eq!(
+            detect_delimiter("id;note;x\n1;\"a, b\nc, d\";x\n2;\"e, f\ng, h\";y\n3;\"i, j\nk, l\";z\n", "x.csv"),
+            b';',
+            "a quoted field spanning lines is one record, its commas inside quotes"
+        );
     }
 
     #[test]
