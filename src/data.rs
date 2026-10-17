@@ -395,7 +395,9 @@ fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
         }
     };
     for event in saphyr_parser::Parser::new_from_str(text) {
-        let Ok((event, span)) = event else { return Ok(()) };
+        // The scanner's own error is the answer: on some inputs (a directive on the last line with no
+        // line break after it) the loader would never report it and never come back.
+        let (event, span) = event.map_err(yaml_scan_error)?;
         let depth = open.len();
         let (line, column) = at(&span);
         match event {
@@ -1199,12 +1201,14 @@ fn walk_yaml(value: &Yaml, nodes: &mut Vec<Node>, key: String, depth: u32) {
     }
 }
 
+fn yaml_scan_error(error: saphyr::ScanError) -> ParseError {
+    let marker = error.marker();
+    ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
+}
+
 fn load_yaml(text: &str) -> Result<Vec<Yaml<'_>>, ParseError> {
     check_yaml_depth(text)?;
-    Yaml::load_from_str(text).map_err(|error| {
-        let marker = error.marker();
-        ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
-    })
+    Yaml::load_from_str(text).map_err(yaml_scan_error)
 }
 
 /// One document is the root `$`; a stream of several is a root `$` with one entry each.
@@ -2322,6 +2326,17 @@ mod tests {
         assert_eq!((accented.line, accented.column), (1, 7), "{accented}");
         let ini = Tree::parse(Format::Ini, "[a]\nb = 1\n\nbroken line\n").unwrap_err();
         assert_eq!((ini.line, ini.column), (4, 1));
+        // A directive on the last line with no line break after it looped in the loader for good; the parse
+        // must come back with the scanner's error (each case is run with a time limit).
+        for text in ["a: 1\n%", "%YAML", "%", "---\n%TAG"] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let input = text.to_string();
+            std::thread::spawn(move || sender.send(Tree::parse(Format::Yaml, &input).map(|t| t.len()).map_err(|e| e.to_string())));
+            let outcome = receiver.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_else(|_| panic!("{text:?} did not come back"));
+            let error = outcome.unwrap_err();
+            assert!(error.starts_with("line "), "{text:?}: {error}");
+        }
+        assert_eq!(Tree::parse(Format::Yaml, "a: 1\n%").unwrap_err().to_string(), "line 2, column 2: while scanning a directive, could not find expected directive name");
         // CRLF endings count lines the same way.
         let crlf = Tree::parse(Format::Json, "{\r\n  \"a\": 1,\r\n  \"b\": [1, 2,\r\n}\r\n").unwrap_err();
         assert_eq!((crlf.line, crlf.column), (4, 1));
