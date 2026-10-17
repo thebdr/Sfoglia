@@ -623,8 +623,14 @@ fn split_fragment(href: &str) -> (String, Option<String>) {
     }
 }
 
-/// `%20` and friends decoded, as UTF-8; a malformed sequence stays as written.
+/// `%20` and friends decoded, as UTF-8; a malformed sequence stays as written, and so does a text whose
+/// decoded bytes are no UTF-8 (a data URL's binary payload takes `percent_decode_bytes`).
 pub fn percent_decode(text: &str) -> String {
+    String::from_utf8(percent_decode_bytes(text)).unwrap_or_else(|_| text.to_string())
+}
+
+/// `%20` and friends decoded to bytes; a `%` without two hex digits stays as written.
+pub fn percent_decode_bytes(text: &str) -> Vec<u8> {
     // Byte by byte: a `%` before a multi-byte character is kept as written, never sliced.
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -641,7 +647,7 @@ pub fn percent_decode(text: &str) -> String {
         out.push(bytes[ix]);
         ix += 1;
     }
-    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+    out
 }
 
 /// `a/./b/../c` folded, without touching the disk.
@@ -677,7 +683,8 @@ pub enum ImageSrc {
 /// Sort `src` into where its bytes come from, `folder` being the document's own folder.
 pub fn image_source(folder: &Path, src: &str) -> ImageSrc {
     let src = src.trim();
-    if let Some(rest) = src.strip_prefix("data:") {
+    if src.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:")) {
+        let rest = &src[5..];
         return match data_url(rest) {
             Some((mime, bytes)) => ImageSrc::Data { mime, bytes },
             None => ImageSrc::Invalid,
@@ -707,7 +714,7 @@ fn data_url(rest: &str) -> Option<(String, Vec<u8>)> {
     let base64 = parts.any(|part| part.trim().eq_ignore_ascii_case("base64"));
     // Percent-encoding comes off first, as the data URL rules say: a reference image's address written back
     // carries a control character as `%09`.
-    let bytes = if base64 { decode_base64(&percent_decode(data))? } else { percent_decode(data).into_bytes() };
+    let bytes = if base64 { decode_base64(&percent_decode(data))? } else { percent_decode_bytes(data) };
     Some((mime, bytes))
 }
 
@@ -1076,6 +1083,24 @@ mod tests {
         assert_eq!(decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(decode_base64("aGVsbG8"), Some(b"hello".to_vec()));
         assert_eq!(decode_base64("aGV sbG8=\n"), Some(b"hello".to_vec()));
+        // A data URL without base64 may carry any byte percent-encoded (RFC 2397): the bytes come back as
+        // bytes, not through a text round trip; and the scheme is matched in any case.
+        let png = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/dot.png")).unwrap();
+        let encoded = format!("data:image/png,{}", png.iter().map(|b| format!("%{b:02X}")).collect::<String>());
+        match image_source(folder, &encoded) {
+            ImageSrc::Data { mime, bytes } => {
+                assert_eq!(mime, "image/png");
+                assert_eq!(bytes, png, "every byte of the PNG, as encoded");
+                let decoded = image::load_from_memory(&bytes).expect("the PNG decodes");
+                assert_eq!((decoded.width(), decoded.height()), (1, 1));
+            }
+            other => panic!("{other:?}"),
+        }
+        match image_source(folder, "DATA:Image/PNG;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==") {
+            ImageSrc::Data { mime, bytes } => assert_eq!((mime.as_str(), bytes.len()), ("image/png", 70)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(percent_decode_bytes("%89PNG%0D%0A"), b"\x89PNG\r\n".to_vec());
         // A control character percent-encoded inside the base64 (a reference image's address written back)
         // is decoded first, as the data URL rules say, so the image still decodes.
         let tabbed = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ%09AAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
