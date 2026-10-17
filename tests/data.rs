@@ -885,3 +885,60 @@ fn a_value_of_several_lines_stays_on_its_row(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::remove_file(&prose).ok();
 }
+
+#[gpui_kit::test]
+fn deep_rows_keep_their_glyph_and_key_in_the_key_column(cx: &mut TestAppContext) {
+    // The key column widens with the deepest open row, up to twice its width, and the indent stops
+    // growing past that: a row forty levels deep still shows its glyph and its whole key inside the
+    // column, and its value cell is on screen.
+    let deep = scratch("deep.json");
+    let mut json = String::new();
+    for level in 1..=40 {
+        json.push_str(&format!("{{\"k{level}\":"));
+    }
+    json.push_str("\"leaf\"");
+    json.push_str(&"}".repeat(40));
+    std::fs::write(&deep, &json).unwrap();
+    let (handle, _panel, view) = open_data(cx, deep.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        window.input("k40", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let found = view.read(cx).selected_node().expect("the leaf is selected");
+        let (depth, key) = {
+            let node = &view.read(cx).tree().unwrap().nodes[found];
+            (node.depth, node.key.clone())
+        };
+        assert_eq!((depth, key.as_str()), (40, "k40"));
+        let found_row = view.read(cx).visible_nodes().iter().position(|&n| n == found).unwrap();
+        assert_eq!(label(window, ("data-row", found_row)), "40|k40|string|leaf|found");
+        let width = f32::from(window.find("data-tree").bounds().size.width);
+        let mut checked = 0;
+        for row in 0..view.read(cx).visible_nodes().len() {
+            if window.try_find(("data-row", row)).is_none() {
+                continue;
+            }
+            let column = window.find(("data-keys", row)).bounds();
+            let glyph = window.find(("data-glyph", row)).bounds();
+            let key = window.find(("data-key", row)).bounds();
+            let value = window.find(("data-value", row)).bounds();
+            let (left, right) = (f32::from(column.origin.x), f32::from(column.origin.x + column.size.width));
+            let (glyph_left, glyph_right) = (f32::from(glyph.origin.x), f32::from(glyph.origin.x + glyph.size.width));
+            let (key_left, key_right) = (f32::from(key.origin.x), f32::from(key.origin.x + key.size.width));
+            assert!(glyph_left >= left && glyph_right <= right, "row {row}: glyph {glyph:?} in {column:?}");
+            assert!(key_left >= glyph_right && key_right <= right && f32::from(key.size.width) > 0., "row {row}: key {key:?} in {column:?}");
+            assert!(f32::from(value.origin.x) + 60. < width, "row {row}: value {value:?} on a tree {width} px wide");
+            checked += 1;
+        }
+        assert!(checked >= 20, "{checked} rows rendered around the leaf");
+    })
+    .unwrap();
+    std::fs::remove_file(&deep).ok();
+}

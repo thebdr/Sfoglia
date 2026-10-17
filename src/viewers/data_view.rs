@@ -31,6 +31,14 @@ pub const TREE_CONTEXT: &str = "DataTree";
 
 /// How many characters of a value a row shows.
 const VALUE_PREVIEW: usize = 200;
+/// Pixels per level of nesting.
+const INDENT: f32 = 16.;
+/// The key column's width at rest, and at most once deep rows are open: it widens with the deepest
+/// open row so that row keeps `KEY_ROOM` for its glyph and key, and the indent stops growing past
+/// that, so the type and value columns stay on screen.
+const KEY_COLUMN: f32 = 300.;
+const KEY_COLUMN_MAX: f32 = 600.;
+const KEY_ROOM: f32 = 176.;
 
 pub struct DataView {
     focus_handle: FocusHandle,
@@ -48,6 +56,8 @@ pub struct DataView {
     expanded: Vec<bool>,
     /// The nodes shown, one per row.
     visible: Vec<usize>,
+    /// The deepest shown row's depth, which sizes the key column.
+    deepest: u32,
     /// The selected row, an index into `visible`.
     selected: Option<usize>,
     search: Entity<InputState>,
@@ -102,6 +112,7 @@ impl DataView {
             tree,
             expanded: Vec::new(),
             visible: Vec::new(),
+            deepest: 0,
             selected: None,
             search,
             matches: Vec::new(),
@@ -145,10 +156,12 @@ impl DataView {
     /// The rows in pre-order, skipping the subtrees of closed nodes.
     fn rebuild_visible(&mut self) {
         self.visible.clear();
+        self.deepest = 0;
         let Ok(tree) = &self.tree else { return };
         let mut ix = 0;
         while ix < tree.len() {
             self.visible.push(ix);
+            self.deepest = self.deepest.max(tree.nodes[ix].depth);
             ix = if self.expanded[ix] { ix + 1 } else { tree.nodes[ix].end };
         }
     }
@@ -626,10 +639,12 @@ impl Render for DataView {
                         rows,
                         cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                             let Ok(tree) = &this.tree else { return Vec::new() };
+                            let key_width = (INDENT * this.deepest as f32 + KEY_ROOM).clamp(KEY_COLUMN, KEY_COLUMN_MAX);
                             range
                                 .map(|row| {
                                     let node = this.visible[row];
                                     let n = &tree.nodes[node];
+                                    let indent = (INDENT * n.depth as f32).min(key_width - KEY_ROOM);
                                     let container = n.kind.is_container();
                                     let open = this.expanded[node];
                                     let marked = this.matches.contains(&node);
@@ -661,10 +676,12 @@ impl Render for DataView {
                                         // and value columns line up at every depth; a mark hugs its text.
                                         .child(
                                             h_flex()
-                                                .w(px(300.))
+                                                .id(("data-keys", row))
+                                                .test_support()
+                                                .w(px(key_width))
                                                 .flex_shrink_0()
                                                 .overflow_hidden()
-                                                .child(div().w(px(16. * n.depth as f32)).flex_shrink_0())
+                                                .child(div().w(px(indent)).flex_shrink_0())
                                                 .child(
                                                     div()
                                                         .id(("data-glyph", row))
@@ -685,6 +702,8 @@ impl Render for DataView {
                                                 )
                                                 .child(
                                                     div()
+                                                        .id(("data-key", row))
+                                                        .test_support()
                                                         .px_1()
                                                         .rounded_sm()
                                                         .overflow_hidden()
