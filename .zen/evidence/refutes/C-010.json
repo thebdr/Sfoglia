@@ -1,0 +1,113 @@
+{
+  "clause": "C-010",
+  "verdict": "holds",
+  "ranAt": "2026-10-17T05:55:29.826Z",
+  "headCommit": "d84f85479b83ceca80c60f4b906157c6c8f77dcd",
+  "tests": [
+    {
+      "name": "every_extension_has_its_format",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "json_builds_the_exact_arena",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "jsonl_is_one_entry_per_line_and_names_the_bad_line",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "xml_elements_attributes_text_and_comments_become_nodes",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "yaml_and_toml_keep_key_order_and_name_their_types",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "ini_sections_keys_and_the_bad_line",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "paths_are_exact_for_every_kind_of_node",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "search_matches_keys_and_values_case_insensitively",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "pretty_print_reformats_every_format_and_keeps_its_tree",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "parse_errors_name_their_line_and_column",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "a_50_mb_json_parses_with_every_node_and_a_deep_path",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "a_json_tree_opens_expands_collapses_navigates_searches_and_copies_paths",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "the_raw_text_toggles_edits_pretty_prints_and_saves",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "a_malformed_file_opens_on_its_text_at_the_error_line",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "every_format_opens_as_a_tree_with_its_root_rows",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "a_50_mb_json_file_opens_searches_and_scrolls_to_the_match",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "the_raw_text_takes_a_space_and_a_read_only_text_stays_as_it_is",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "deep_nesting_in_every_format_parses_or_is_refused_but_never_crashes",
+      "file": "src/data.rs",
+      "symbolSha": "c15b3258e82a697d601cd4a7add3fdf25994a89c7b41008f9a2cc4d70288c605"
+    },
+    {
+      "name": "the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "a_value_of_several_lines_stays_on_its_row",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    },
+    {
+      "name": "deep_rows_keep_their_glyph_and_key_in_the_key_column",
+      "file": "tests/data.rs",
+      "symbolSha": "792af7509437c5805b7f66578ee84c835d2ec8a470371190784eaa36cec45e28"
+    }
+  ]
+}
