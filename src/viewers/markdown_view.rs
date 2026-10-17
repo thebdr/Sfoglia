@@ -207,6 +207,10 @@ impl MarkdownView {
         self.raw_shown = true;
         let focus = self.text.read(cx).editor().read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+        // A fragment still waiting for the rendered side is followed here instead: the cursor goes to its heading.
+        if let Some(fragment) = self.pending_fragment.take() {
+            self.reveal_heading(&fragment, window, cx);
+        }
         cx.notify();
     }
 

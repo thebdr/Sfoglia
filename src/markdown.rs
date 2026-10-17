@@ -329,19 +329,29 @@ fn collect_images(
     }
 }
 
-/// The path a `file:` address names, `rest` being what follows `file:`: `///C:/x` and `///x` are
-/// absolute paths, `//host/share/x` stays a network path.
+/// The path a `file:` address names, `rest` being what follows `file:`: `///C:/x`, `///x`, `/C:/x` and
+/// `//localhost/x` are local paths, `//host/share/x` stays a network path.
 fn file_url_path(rest: &str) -> PathBuf {
     let decoded = percent_decode(rest);
     let path = match decoded.strip_prefix("//") {
-        Some(after) => match after.strip_prefix('/') {
-            Some(abs) if abs.len() >= 2 && abs.as_bytes()[0].is_ascii_alphabetic() && abs.as_bytes()[1] == b':' => abs.to_string(),
-            Some(abs) => format!("/{abs}"),
-            None => format!("//{after}"),
-        },
-        None => decoded,
+        Some(after) => {
+            let (host, path) = match after.split_once('/') {
+                Some((host, path)) => (host, format!("/{path}")),
+                None => (after, String::new()),
+            };
+            if host.is_empty() || host.eq_ignore_ascii_case("localhost") { local_path(&path) } else { format!("//{after}") }
+        }
+        None => local_path(&decoded),
     };
     PathBuf::from(path)
+}
+
+/// `/C:/x` is the drive path `C:/x`; any other path stays as it is.
+fn local_path(path: &str) -> String {
+    match path.strip_prefix('/') {
+        Some(rest) if rest.len() >= 2 && rest.as_bytes()[0].is_ascii_alphabetic() && rest.as_bytes()[1] == b':' => rest.to_string(),
+        _ => path.to_string(),
+    }
 }
 
 /// The byte offsets where lines start, so a block's line is a binary search and not a rescan of the
@@ -927,6 +937,15 @@ mod tests {
         }
         // A network share keeps its host on both systems.
         assert_eq!(link_target(folder, "file://server/share/x.md"), file("//server/share/x.md", None));
+        // `localhost` is no host, and a single slash (`file:/C:/x`, as Java writes it) names a local path too.
+        if cfg!(windows) {
+            assert_eq!(link_target(folder, "file://localhost/C:/z/w.md"), file("C:/z/w.md", None));
+            assert_eq!(link_target(folder, "file:/C:/z/w.md"), file("C:/z/w.md", None));
+        } else {
+            assert_eq!(link_target(folder, "file://localhost/z/w.md"), file("/z/w.md", None));
+            assert_eq!(link_target(folder, "file:/z/w.md"), file("/z/w.md", None));
+        }
+        assert_eq!(link_target(folder, "FILE://LOCALHOST/share/x.md"), file("/share/x.md", None));
         assert_eq!(slugify("Links and images"), "links-and-images");
         assert_eq!(slugify("  C++ & Rust: 2 things! "), "c--rust-2-things");
         assert_eq!(slugify("Ünïcödé Köpfe"), "ünïcödé-köpfe");
@@ -953,6 +972,11 @@ mod tests {
         let on_disk = if cfg!(windows) { "C:/pics/a b.png" } else { "/pics/a b.png" };
         assert_eq!(image_source(folder, from_url), ImageSrc::File(PathBuf::from(on_disk)));
         assert_eq!(image_source(folder, "file://server/share/x.png"), ImageSrc::File(PathBuf::from("//server/share/x.png")));
+        let local = if cfg!(windows) { "file://localhost/C:/pics/a.png" } else { "file://localhost/pics/a.png" };
+        let on_disk = if cfg!(windows) { "C:/pics/a.png" } else { "/pics/a.png" };
+        assert_eq!(image_source(folder, local), ImageSrc::File(PathBuf::from(on_disk)));
+        let single = if cfg!(windows) { "file:/C:/pics/a.png" } else { "file:/pics/a.png" };
+        assert_eq!(image_source(folder, single), ImageSrc::File(PathBuf::from(on_disk)));
         // A 1x1 red PNG as a data URL decodes to its 70 bytes, which start with the PNG signature.
         let data = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
         match image_source(folder, data) {
