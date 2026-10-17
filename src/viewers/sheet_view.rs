@@ -517,12 +517,29 @@ impl SheetView {
 
     /// The text viewer ran a save, a reload or a keep-mine: its message shows, and after a reload the
     /// grid follows the text it holds now.
-    fn follow_text(&mut self, idle: String, _: &mut Window, cx: &mut Context<Self>) {
+    fn follow_text(&mut self, idle: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.text.clone() {
             self.show_text_message(cx);
             let reloads = text.read(cx).reloads();
             if reloads != self.seen_reloads {
                 self.seen_reloads = reloads;
+                // The budget and the encoding are measured again on the text as read now.
+                let size = self.current_text(cx).len();
+                if size > MAX_GRID_BYTES {
+                    self.source = Source::None;
+                    self.rebuild_table(cx);
+                    self.status = too_big_message(size);
+                    self.show_raw(window, cx);
+                    return;
+                }
+                let encoding = text.read(cx).status().encoding.label().to_string();
+                match &mut self.source {
+                    Source::Delimited { encoding: read_as, .. } => *read_as = encoding,
+                    _ => {
+                        let text = crate::data::with_line_feeds(&self.current_text(cx)).into_owned();
+                        self.parse_delimited(&text, encoding, true);
+                    }
+                }
                 self.reparse(cx);
                 self.rebuild_table(cx);
                 self.status = idle;
@@ -594,7 +611,8 @@ impl SheetView {
             return;
         }
         if matches!(self.source, Source::None) {
-            let decoded_encoding = self.text.as_ref().map(|t| t.read(cx).save_encoding().label().to_string()).unwrap_or_default();
+            // The encoding the file was read in (not the one chosen for the next save).
+            let decoded_encoding = self.text.as_ref().map(|t| t.read(cx).status().encoding.label().to_string()).unwrap_or_default();
             let text = crate::data::with_line_feeds(&self.current_text(cx)).into_owned();
             self.parse_delimited(&text, decoded_encoding, true);
         } else {

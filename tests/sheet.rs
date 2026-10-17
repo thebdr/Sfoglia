@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use gpui_kit::component::table::ColumnSort;
 use gpui_kit::test::TestWindowExt;
@@ -601,6 +602,106 @@ fn an_unchanged_value_writes_nothing_whatever_the_quoting(cx: &mut TestAppContex
         assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
         let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
         assert_eq!(text, "\"id\",\"n\"\n\"1\",\"x⏎y\"\n2,9\n3\n", "that record alone, quoted only where needed");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Another program changes the file: the bar shows on the grid side, Reload rebuilds the grid from the file
+/// as read now (its encoding named afresh, the budget measured again), Keep mine marks the tab (C-013).
+#[gpui_kit::test]
+fn a_reload_follows_the_file_its_encoding_and_its_budget(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-reload");
+    let path = dir.join("latin.csv");
+    std::fs::write(&path, b"id,name\n1,caf\xe9\n").unwrap();
+    let (handle, panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, comma, Latin-1");
+        assert_eq!(dump(&view, cx).1[0][1], "café");
+        assert!(window.try_find("sheet-changed-on-disk").is_none());
+    })
+    .unwrap();
+    // Rewritten outside as UTF-8 with a third column: the bar comes up within two seconds.
+    std::fs::write(&path, "id,name,more\n1,café,x\n".as_bytes()).unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some(), "the bar shows on the grid side");
+        window.click("sheet-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 3 columns, comma, UTF-8", "the file as read now");
+        assert_eq!(label(window, "sheet-message"), "reloaded");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "café", "x"]));
+        assert!(!panel.read(cx).is_dirty(cx));
+        assert!(window.try_find("sheet-changed-on-disk").is_none());
+    })
+    .unwrap();
+    // Changed again: Keep mine marks the tab, the next save overwrites.
+    std::fs::write(&path, "id,name,more\n1,café,y\n".as_bytes()).unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some());
+        window.click("sheet-keep-mine", cx);
+        window.render_frame(cx);
+        assert!(panel.read(cx).is_dirty(cx), "kept yours: the tab is modified");
+        assert_eq!(label(window, "sheet-message"), "kept yours; the next save overwrites the file");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "café", "x"]), "the grid keeps what was read");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Grown past the budget outside: Reload shows the raw text and says so.
+    {
+        use std::io::Write as _;
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let line = format!("{},x\n", "a".repeat(1000));
+        let mut written = 0usize;
+        while written < 65 * 1024 * 1024 {
+            file.write_all(line.as_bytes()).unwrap();
+            written += line.len();
+        }
+    }
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some());
+        window.click("sheet-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "past the budget after a reload: the text shows");
+        assert_eq!(label(window, "sheet-summary"), "CSV, past the grid's 64 MB");
+        assert!(label(window, "sheet-message").contains("past the grid's 64 MB"));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A workbook that does not open says why in the status row (C-013).
+#[gpui_kit::test]
+fn a_workbook_that_does_not_open_says_why(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-bad-book");
+    let path = dir.join("bad.xlsx");
+    std::fs::write(&path, b"not a workbook at all").unwrap();
+    let (handle, panel, view) = open_sheet(cx, path);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "Excel, did not open");
+        assert!(label(window, "sheet-message").starts_with("cannot open the workbook:"), "{}", label(window, "sheet-message"));
+        assert!(dump(&view, cx).1.is_empty());
+        assert!(panel.read(cx).editable_text(cx).is_none());
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
