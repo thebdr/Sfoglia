@@ -332,50 +332,14 @@ fn on_deep_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     })
 }
 
-/// How deep any format may nest. The parsers that recurse per level (roxmltree, saphyr, toml) are
-/// not given a pathological file: the text is scanned for its bracket or tag nesting first.
+/// How deep XML may nest. roxmltree recurses per element with no limit of its own (saphyr stops
+/// flow collections at 256 levels and toml at about 80, both with their own message), so the
+/// text is scanned for its tag nesting before it is parsed.
 const MAX_DEPTH: usize = 200;
 
 fn too_deep(text: &str, offset: usize, what: &str) -> ParseError {
     let (line, column) = line_column(text, offset);
     ParseError { line, column, message: format!("{what} nested deeper than {MAX_DEPTH} levels") }
-}
-
-/// Refuse `text` when its `[` and `{` nest deeper than `MAX_DEPTH` outside quotes and comments
-/// (`#` to the end of the line, as YAML and TOML write them).
-fn check_bracket_depth(text: &str) -> Result<(), ParseError> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' | b'\'' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    if bytes[i] == b'\\' && quote == b'"' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            b'#' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'[' | b'{' => {
-                depth += 1;
-                if depth > MAX_DEPTH {
-                    return Err(too_deep(text, i, "values"));
-                }
-            }
-            b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        i += 1;
-    }
-    Ok(())
 }
 
 /// Refuse `text` when its elements nest deeper than `MAX_DEPTH`; comments, CDATA, processing
@@ -811,7 +775,6 @@ fn walk_yaml(value: &Yaml, nodes: &mut Vec<Node>, key: String, depth: u32) {
 }
 
 fn load_yaml(text: &str) -> Result<Vec<Yaml<'_>>, ParseError> {
-    check_bracket_depth(text)?;
     Yaml::load_from_str(text).map_err(|error| {
         let marker = error.marker();
         ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
@@ -917,7 +880,6 @@ fn walk_toml_value(value: &toml::Value, nodes: &mut Vec<Node>, key: String, dept
 }
 
 fn load_toml(text: &str) -> Result<toml::Table, ParseError> {
-    check_bracket_depth(text)?;
     text.parse().map_err(|error: toml::de::Error| {
         let (line, column) = error.span().map(|span| line_column(text, span.start)).unwrap_or((1, 1));
         ParseError { line, column, message: error.message().to_string() }
@@ -1859,35 +1821,35 @@ mod tests {
     #[test]
     fn deep_nesting_in_every_format_parses_or_is_refused_but_never_crashes() {
         // The window's main thread has a megabyte of stack on Windows; each parser is called from a thread
-        // of that size and must come back with a tree or an error, however the input nests.
-        let cases: Vec<(Format, String)> = vec![
-            (Format::Json, format!("{}1{}", "[".repeat(50_000), "]".repeat(50_000))),
-            (Format::JsonLines, format!("{}1{}\n", "[".repeat(50_000), "]".repeat(50_000))),
-            (Format::Yaml, format!("{}1{}\n", "[".repeat(5_000), "]".repeat(5_000))),
-            (Format::Yaml, format!("{}1{}\n", "[".repeat(300), "]".repeat(300))),
-            (Format::Toml, format!("a = {}1{}\n", "[".repeat(5_000), "]".repeat(5_000))),
-            (Format::Toml, format!("a = {}1{}\n", "[".repeat(300), "]".repeat(300))),
-            (Format::Xml, format!("{}x{}", "<a>".repeat(20_000), "</a>".repeat(20_000))),
-            (Format::Xml, format!("{}x{}", "<a>".repeat(150), "</a>".repeat(150))),
+        // of that size and must come back with the exact tree or the exact refusal, however the input nests.
+        // JSON nests without limit; YAML stops flow collections at saphyr's 256 and takes block nesting as
+        // deep as a file can indent; TOML stops at its parser's limit of about eighty; XML at the scan's 200.
+        let flow = |open: &str, close: &str, n: usize| format!("{}1{}\n", open.repeat(n), close.repeat(n));
+        let block_yaml: String = (0..1000).map(|i| format!("{}a:\n", "  ".repeat(i))).collect::<String>() + &"  ".repeat(1000) + "1\n";
+        let recursion = "line 1, column 256: recursion limit exceeded";
+        let toml_limit = "line 1, column 85: cannot recurse further; max recursion depth met";
+        let cases: Vec<(&str, Format, String, Result<(usize, usize), &str>)> = vec![
+            ("json 50000", Format::Json, flow("[", "]", 50_000), Ok((50_001, 50_001))),
+            ("jsonl 50000", Format::JsonLines, flow("[", "]", 50_000), Ok((50_002, 50_002))),
+            ("yaml flow 5000", Format::Yaml, flow("[", "]", 5_000), Err(recursion)),
+            ("yaml flow 150", Format::Yaml, flow("[", "]", 150), Ok((151, 151))),
+            ("yaml block 1000", Format::Yaml, block_yaml, Ok((1001, 1001))),
+            ("yaml apostrophe then 230", Format::Yaml, format!("it's: 1\nb: {}", flow("[", "]", 230)), Ok((233, 232))),
+            ("yaml block scalar of brackets", Format::Yaml, format!("a: |\n  {}\n", "[".repeat(250)), Ok((2, 2))),
+            ("toml 5000", Format::Toml, format!("a = {}", flow("[", "]", 5_000)), Err(toml_limit)),
+            ("toml 150", Format::Toml, format!("a = {}", flow("[", "]", 150)), Err(toml_limit)),
+            ("toml 79", Format::Toml, format!("a = {}", flow("[", "]", 79)), Ok((81, 81))),
+            ("xml 20000", Format::Xml, format!("{}x{}", "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 601: elements nested deeper than 200 levels")),
+            ("xml 150", Format::Xml, format!("{}x{}", "<a>".repeat(150), "</a>".repeat(150)), Ok((150, 150))),
         ];
-        for (format, text) in cases {
+        for (name, format, text, expected) in cases {
             let outcome = std::thread::Builder::new()
                 .stack_size(1024 * 1024)
                 .spawn(move || Tree::parse(format, &text).map(|tree| (tree.len(), tree.levels())).map_err(|e| e.to_string()))
                 .unwrap()
                 .join()
-                .unwrap_or_else(|_| panic!("{format:?} panicked"));
-            match (format, outcome) {
-                (Format::Json | Format::JsonLines, Ok((nodes, levels))) => assert!(nodes >= 50_001 && levels >= 50_001, "{format:?}: {nodes} nodes, {levels} levels"),
-                (Format::Xml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (150, 150)),
-                (Format::Xml, Err(error)) => assert_eq!(error, "line 1, column 601: elements nested deeper than 200 levels"),
-                (Format::Yaml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (151, 151)),
-                (Format::Yaml, Err(error)) => assert_eq!(error, "line 1, column 201: values nested deeper than 200 levels"),
-                (Format::Toml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (152, 152)),
-                (Format::Toml, Err(error)) => assert_eq!(error, "line 1, column 205: values nested deeper than 200 levels"),
-                (_, Ok((nodes, levels))) => assert!(nodes > 0 && levels > 0, "{format:?}: {nodes} nodes, {levels} levels"),
-                (_, Err(error)) => assert!(error.contains("line "), "{format:?}: {error}"),
-            }
+                .unwrap_or_else(|_| panic!("{name} panicked"));
+            assert_eq!(outcome, expected.map_err(String::from), "{name}");
         }
     }
 
