@@ -516,3 +516,67 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::remove_file(&big).ok();
 }
+
+#[gpui_kit::test]
+fn the_place_is_kept_while_the_renderer_catches_up(cx: &mut TestAppContext) {
+    // A text past the renderer's synchronous limit parses on its own task after the outline lands: a toggle
+    // to the raw text in that window leaves the cursor where it was, and a fragment clicked while the
+    // rendered side is still preparing has its way over the toggle's own scroll once the outline is there.
+    let long = scratch("catch-up.md");
+    let mut text = String::new();
+    for n in 0..200 {
+        text.push_str(&format!("## Section {n}\n\nparagraph {n} [to five](#section-5)\n\n"));
+    }
+    std::fs::write(&long, &text).unwrap();
+    let (handle, _panel, view) = open_markdown(cx, long.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 400 blocks, 200 headings");
+        view.read(cx).rich_text().read(cx).list_state().scroll_to(ListOffset { item_ix: 40, offset_in_item: px(0.) });
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(80, 0), "section 20, the block at the top");
+        // Eight lines above everything move every block down; the cursor goes to line 191, inside section 45
+        // of the new text.
+        let edited = format!("one\n\ntwo\n\nthree\n\nfour\n\n{text}");
+        editor.update(cx, |editor, cx| editor.set_value(edited, window, cx));
+        editor.update(cx, |editor, cx| editor.set_cursor_position(Position::new(190, 0), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+        assert!(view.read(cx).is_preparing());
+    })
+    .unwrap();
+    // Step until the outline has landed but before the renderer's own parse of the new text has.
+    while cx.update(|cx| view.read(cx).is_preparing()) {
+        cx.background_executor.tick();
+    }
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).rich_text().read(cx).rendered_text().source(), text, "the renderer still shows the old text");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(190, 0), "the cursor stays while the renderer still shows the old text");
+        // Back to the rendered side, and a fragment clicked while it prepares wins over the toggle's scroll.
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).is_preparing());
+        view.update(cx, |view, cx| view.follow_link("#section-5", window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Section 5");
+        let top = view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix;
+        assert!(top <= 14, "section 5 (block 14 after the four new paragraphs) is on screen, not the cursor's block: the top row is {top}");
+    })
+    .unwrap();
+    std::fs::remove_file(&long).ok();
+}

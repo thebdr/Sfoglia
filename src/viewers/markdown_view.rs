@@ -73,6 +73,9 @@ pub struct MarkdownView {
     preparing: Option<Task<()>>,
     /// The search for a fragment's heading in the raw text, run off the window thread too.
     finding: Option<Task<()>>,
+    /// A fragment clicked on the rendered side while a preparation ran: resolved against the new outline
+    /// when it lands, and the newer of the two wishes, so the toggle's own scroll yields to it.
+    pending_fragment: Option<String>,
     /// A source range to scroll the rendered view to once the parse of `source` has landed.
     pending_reveal: Option<Range<usize>>,
     status: String,
@@ -108,6 +111,7 @@ impl MarkdownView {
             source: String::new(),
             preparing: None,
             finding: None,
+            pending_fragment: None,
             pending_reveal: None,
             status: if too_big { too_big_message(size) } else { String::new() },
             seen_operations: 0,
@@ -131,6 +135,9 @@ impl MarkdownView {
     /// the outline built), then handed to the renderer; a reveal of the block holding `reveal_line`
     /// waits for the renderer's own parse. A newer call cancels an older one still running.
     fn render_source(&mut self, source: String, reveal_line: Option<usize>, cx: &mut Context<Self>) {
+        // Whatever an older text was still about to scroll to is no longer meant.
+        self.pending_reveal = None;
+        self.pending_fragment = None;
         self.preparing = Some(cx.spawn(async move |this, cx| {
             let prepared = cx.background_spawn(async move { markdown::prepare(&source) }).await;
             this.update(cx, |this, cx| {
@@ -138,7 +145,9 @@ impl MarkdownView {
                 this.rich.update(cx, |rich, cx| rich.set_text(&prepared.text, cx));
                 this.source = prepared.text;
                 this.preparing = None;
-                if let Some(line) = reveal_line
+                if let Some(fragment) = this.pending_fragment.take() {
+                    this.reveal_heading_now(&fragment, cx);
+                } else if let Some(line) = reveal_line
                     && let Some(span) =
                         this.outline.top_block_at_line(line).and_then(|ix| this.outline.top_block(ix)).map(|b| b.span.clone())
                 {
@@ -149,6 +158,12 @@ impl MarkdownView {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Whether the rendered side shows the text as last prepared: the outline is in and the renderer's
+    /// own parse of that text has landed, so its list and the outline speak of the same blocks.
+    fn rendered_is_current(&self, cx: &App) -> bool {
+        self.preparing.is_none() && self.rich.read(cx).rendered_text().source() == self.source
     }
 
     /// The rich text changed (a parse landed, a scroll, a selection): carry out a waiting reveal once
@@ -178,11 +193,11 @@ impl MarkdownView {
     }
 
     /// The raw text, with the cursor on the first line of the block at the top of the rendered view. While
-    /// the rendered side is still being prepared the list and the outline are the old ones, so the cursor
-    /// stays where the user left it.
+    /// the rendered side still shows an older text (its preparation or the renderer's parse running) the
+    /// list and the outline would not agree, so the cursor stays where the user left it.
     fn show_raw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let top = self.rich.read(cx).list_state().logical_scroll_top().item_ix;
-        if self.preparing.is_none()
+        if self.rendered_is_current(cx)
             && let Some(block) = self.outline.top_block(top)
         {
             let position = Position::new(block.line.saturating_sub(1) as u32, 0);
@@ -336,6 +351,17 @@ impl MarkdownView {
             cx.notify();
             return;
         }
+        if self.preparing.is_some() {
+            // The outline is the old text's: the click waits for the new one and then has its way.
+            self.pending_fragment = Some(fragment.to_string());
+            cx.notify();
+            return;
+        }
+        self.reveal_heading_now(fragment, cx);
+    }
+
+    /// The rendered side's heading for `fragment`, in the outline as it stands.
+    fn reveal_heading_now(&mut self, fragment: &str, cx: &mut Context<Self>) {
         match self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone())) {
             Some((span, text)) => {
                 self.status = format!("at {text}");
