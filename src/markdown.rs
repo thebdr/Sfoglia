@@ -365,12 +365,14 @@ fn split_fragment(href: &str) -> (String, Option<String>) {
 
 /// `%20` and friends decoded, as UTF-8; a malformed sequence stays as written.
 pub fn percent_decode(text: &str) -> String {
+    // Byte by byte: a `%` before a multi-byte character is kept as written, never sliced.
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut ix = 0;
     while ix < bytes.len() {
-        if bytes[ix] == b'%' && ix + 2 < bytes.len() + 0 && ix + 2 <= bytes.len() - 1 {
-            if let Ok(value) = u8::from_str_radix(&text[ix + 1..ix + 3], 16) {
+        if bytes[ix] == b'%' && ix + 2 < bytes.len() && bytes[ix + 1].is_ascii_hexdigit() && bytes[ix + 2].is_ascii_hexdigit() {
+            let digits = std::str::from_utf8(&bytes[ix + 1..ix + 3]).unwrap_or("");
+            if let Ok(value) = u8::from_str_radix(digits, 16) {
                 out.push(value);
                 ix += 3;
                 continue;
@@ -560,6 +562,13 @@ mod tests {
         assert_eq!(slugify("Links and images"), "links-and-images");
         assert_eq!(slugify("  C++ & Rust: 2 things! "), "c--rust-2-things");
         assert_eq!(slugify("Ünïcödé Köpfe"), "ünïcödé-köpfe");
+        // A percent sign before a multi-byte character, or without two hex digits, stays as written.
+        assert_eq!(percent_decode("%aé.png"), "%aé.png");
+        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("%41%zz%"), "A%zz%");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        let odd = if cfg!(windows) { r"C:\docs\book\%aé.md" } else { "/docs/book/%aé.md" };
+        assert_eq!(link_target(folder, "%aé.md"), file(odd, None));
     }
 
     #[test]
@@ -579,10 +588,14 @@ mod tests {
                 assert_eq!(mime, "image/png");
                 assert_eq!(bytes.len(), 70);
                 assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+                let decoded = image::load_from_memory(&bytes).expect("a PNG the image crate reads");
+                assert_eq!((decoded.width(), decoded.height()), (1, 1), "the exact size");
             }
             other => panic!("{other:?}"),
         }
         assert_eq!(image_source(folder, "data:image/png;base64,!!!"), ImageSrc::Invalid);
+        let odd = if cfg!(windows) { r"C:\docs\book\%aé.png" } else { "/docs/book/%aé.png" };
+        assert_eq!(image_source(folder, "%aé.png"), ImageSrc::File(PathBuf::from(odd)));
         assert_eq!(image_source(folder, "data:,hi%20there"), ImageSrc::Data { mime: "text/plain".into(), bytes: b"hi there".to_vec() });
         assert_eq!(decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(decode_base64("aGVsbG8"), Some(b"hello".to_vec()));

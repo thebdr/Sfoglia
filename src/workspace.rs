@@ -33,6 +33,8 @@ actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, 
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
+    // GPUI ships no HTTP client: without one every remote image in a Markdown file fails at once (C-011).
+    cx.set_http_client(crate::net::UreqClient::shared());
     cx.bind_keys([
         KeyBinding::new("ctrl-o", OpenFiles, Some("Workspace")),
         KeyBinding::new("ctrl-shift-t", ToggleTheme, Some("Workspace")),

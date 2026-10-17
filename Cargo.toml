@@ -33,6 +33,9 @@ saphyr = "0.2"
 toml_edit = "0.25"
 saphyr-parser = "0.2"
 markdown = "1.0"
+ureq = "3"
+futures = "0.3"
+anyhow = "1"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }

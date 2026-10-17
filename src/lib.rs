@@ -9,6 +9,7 @@ pub mod generated;
 pub mod hex;
 pub mod images;
 pub mod markdown;
+pub mod net;
 pub mod rules;
 pub mod shell;
 pub mod text;

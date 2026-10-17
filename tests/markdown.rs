@@ -309,3 +309,64 @@ fn the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx:
     .unwrap();
     std::fs::remove_file(&kept).ok();
 }
+
+#[gpui_kit::test]
+fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
+    // A link to a file opens it in a second tab, scrolled to the heading its fragment names; a bare
+    // fragment scrolls the document itself; the app's own HTTP client stands behind remote images.
+    let folder = scratch("linked");
+    std::fs::create_dir_all(&folder).unwrap();
+    let a = folder.join("a.md");
+    let b = folder.join("b.md");
+    let mut text = String::new();
+    for n in 0..60 {
+        text.push_str(&format!("## Section {n}\n\nparagraph {n}\n\n"));
+    }
+    std::fs::write(&a, "# A\n\nSee [b](b.md#section-50) and [the top](#a).\n\n## Second\n\nmore\n").unwrap();
+    std::fs::write(&b, &text).unwrap();
+    let (handle, workspace) = open_workspace(cx);
+    let agent = cx.update(|cx| cx.http_client().user_agent().map(|agent| agent.to_str().unwrap_or_default().to_string()));
+    assert_eq!(agent.as_deref(), Some("Sfoglia"), "the app's HTTP client is installed, so remote images are fetched");
+    let view = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[a.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)[0].read(cx).markdown_view().expect("rendered").clone()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| view.follow_link("#second", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Second");
+        view.update(cx, |view, cx| view.follow_link("#nowhere", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "no heading named #nowhere");
+        view.update(cx, |view, cx| view.follow_link("b.md#section-50", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), format!("opening {}", b.display()));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let other = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let panels = workspace.read(cx).panels(cx);
+            assert_eq!(panels.len(), 2, "the linked file opened in a second tab");
+            panels[1].read(cx).markdown_view().expect("the linked file is rendered").clone()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(other.read(cx).path(), b.as_path());
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 120 blocks, 60 headings");
+        assert_eq!(label(window, "markdown-message"), "at Section 50");
+        let top = other.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix;
+        assert!((70..=100).contains(&top), "section 50 (block 100) is on screen: the top row is {top}");
+    })
+    .unwrap();
+    std::fs::remove_dir_all(&folder).ok();
+}

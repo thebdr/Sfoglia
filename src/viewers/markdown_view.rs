@@ -34,13 +34,15 @@ pub struct OpenLinkedFile {
 /// The key context of the whole view: the chord works from the raw text too.
 pub const KEY_CONTEXT: &str = "MarkdownView";
 
-/// A 1×1 transparent PNG, shown for an image whose address cannot be read.
-const BLANK_PNG: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
-    0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
-    0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00, 0x00, 0x05, 0x00, 0x01, 0xe2, 0x26,
-    0x05, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-];
+/// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
+fn blank_png() -> &'static [u8] {
+    static BLANK: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BLANK.get_or_init(|| {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut bytes, image::ImageFormat::Png).expect("a 1x1 PNG encodes");
+        bytes.into_inner()
+    })
+}
 
 pub struct MarkdownView {
     focus_handle: FocusHandle,
@@ -220,7 +222,9 @@ impl MarkdownView {
             }
             LinkTarget::File { path, fragment } => {
                 self.status = format!("opening {}", path.display());
-                self.focus_handle.dispatch_action(&OpenLinkedFile { path, fragment }, window, cx);
+                // After this update ends: the workspace then reads every Markdown view, this one included.
+                let focus = self.focus_handle.clone();
+                window.defer(cx, move |window, cx| focus.dispatch_action(&OpenLinkedFile { path, fragment }, window, cx));
             }
             LinkTarget::Heading(fragment) => self.reveal_heading(&fragment, cx),
             LinkTarget::None => {}
@@ -278,7 +282,7 @@ impl MarkdownView {
 
 /// An image's bytes for the kit, from where C-011 says they come.
 fn to_image_source(src: ImageSrc) -> ImageSource {
-    let blank = || ImageSource::Image(Arc::new(Image::from_bytes(ImageFormat::Png, BLANK_PNG.to_vec())));
+    let blank = || ImageSource::Image(Arc::new(Image::from_bytes(ImageFormat::Png, blank_png().to_vec())));
     match src {
         ImageSrc::File(path) => ImageSource::Resource(Resource::Path(Arc::from(path))),
         ImageSrc::Remote(url) => ImageSource::Resource(Resource::Uri(SharedUri::from(url))),
@@ -401,5 +405,36 @@ impl Render for MarkdownView {
                     .child(div().id("markdown-summary").test_support().aria_label(summary.clone()).child(summary))
                     .child(div().id("markdown-message").test_support().aria_label(status.clone()).flex_1().overflow_hidden().child(status)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_images_take_their_format_from_the_media_type_or_a_blank() {
+        assert_eq!(image_format("image/png"), Some(ImageFormat::Png));
+        assert_eq!(image_format("image/jpeg"), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format("image/svg+xml"), Some(ImageFormat::Svg));
+        assert_eq!(image_format("image/avif"), None);
+        match to_image_source(ImageSrc::Data { mime: "image/gif".into(), bytes: vec![1, 2, 3] }) {
+            ImageSource::Image(image) => assert_eq!((image.format, image.bytes.as_slice()), (ImageFormat::Gif, &[1u8, 2, 3][..])),
+            _ => panic!("a data image is an in-memory image"),
+        }
+        // A media type the kit lacks, or an unreadable address, shows the blank 1x1 PNG.
+        for src in [ImageSrc::Data { mime: "image/avif".into(), bytes: vec![1] }, ImageSrc::Invalid] {
+            match to_image_source(src) {
+                ImageSource::Image(image) => {
+                    assert_eq!(image.format, ImageFormat::Png);
+                    let decoded = image::load_from_memory(&image.bytes).expect("the blank PNG decodes");
+                    assert_eq!((decoded.width(), decoded.height()), (1, 1));
+                }
+                _ => panic!("the blank is an in-memory image"),
+            }
+        }
+        let folder = std::path::Path::new("x");
+        assert!(matches!(to_image_source(markdown::image_source(folder, "https://example.com/a.png")), ImageSource::Resource(Resource::Uri(_))));
+        assert!(matches!(to_image_source(markdown::image_source(folder, "a.png")), ImageSource::Resource(Resource::Path(_))));
     }
 }
