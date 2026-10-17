@@ -20,7 +20,7 @@ data trees, Markdown, closing with modified tabs).
 | P-021 → C-014 | Archives, read side: list entries, open an entry inside Sfoglia, extract; container and codec traits | `zip`, `tar`, `flate2`, `bzip2`, `xz`/`lzma-rs`, `zstd`, `sevenz-rust2` (all in the registry); rar and exotic containers through an installed 7-Zip | large |
 | P-030 | Archive writing (create, add, remove, update; 7z first, AES) | the same crates' writers | large |
 | P-025 | External tools detected with graceful fallback (7-Zip, LibreOffice, VLC, a DWG converter) | own detection, status messages | small |
-| P-008 | PDF and XPS viewing | decision pending between `hayro` (pure Rust, no text or links yet), `pdfium-render` (needs the pdfium binary per platform), `mupdf` (C build): the user wanted a wide candidate list for stack choices | large |
+| P-008 | PDF and XPS viewing | decided by the user: SumatraPDF embedded on Windows (plugin mode, command line and DDE), `mutool` / `pdftoppm` page images on Linux, both detected as external tools (P-025) | large |
 | P-009 | PDF in-document links jump and blink (the user's specific ask) | depends on P-008's stack exposing annotations | medium |
 | P-014 | Email messages (eml, msg, winmail.dat) | `mail-parser`, `cfb` for msg, TNEF to write | medium |
 | P-015 | Web pages (structural renderer, mhtml) | `html5ever`; a webview is out of reach in gpui | medium |
@@ -38,8 +38,8 @@ data trees, Markdown, closing with modified tabs).
 
 ## Decisions that are the user's
 
-- The PDF stack (P-008): I will present the candidate list with trade-offs before choosing, as the user asked
-  for stack decisions; the rest proceed autonomously.
+- The PDF stack (P-008): SumatraPDF, decided on 2026-10-18. One caveat: P-009's blink on the link's destination
+  cannot be drawn inside Sumatra's own window; the jump itself is Sumatra's.
 - The disk: the system pagefile (about 22 GB) and the Linux VM's 66 GB disk keep C: tight; both are the user's
   settings, worked around with pruning and polling.
 

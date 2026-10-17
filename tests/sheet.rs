@@ -11,6 +11,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext};
 use sfoglia::generated::families::Family;
 use sfoglia::sheet::{self, CellKind, Merge};
+use sfoglia::text::Encoding;
 use sfoglia::viewers::SheetView;
 use sfoglia::workspace::FilePanel;
 use sfoglia::{Workspace, window_options};
@@ -415,8 +416,8 @@ fn a_workbook_opens_on_its_sheets_with_merges_and_dates(cx: &mut TestAppContext)
 
 #[gpui_kit::test]
 fn a_large_delimited_text_opens_on_its_text(cx: &mut TestAppContext) {
-    // One fixed name, removed at the end: a leftover once filled the disk.
-    let big = std::env::temp_dir().join("sfoglia-sheet-big.csv");
+    // One fixed name, removed at the end: a leftover once filled the disk. A `.tsv`, so the label is checked.
+    let big = std::env::temp_dir().join("sfoglia-sheet-big.tsv");
     {
         use std::io::Write as _;
         let mut file = std::io::BufWriter::new(std::fs::File::create(&big).unwrap());
@@ -432,7 +433,7 @@ fn a_large_delimited_text_opens_on_its_text(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(view.read(cx).raw_shown(), "past the budget the text shows");
         assert!(label(window, "sheet-message").contains("past the grid's 64 MB"), "{}", label(window, "sheet-message"));
-        assert_eq!(label(window, "sheet-summary"), "CSV, past the grid's 64 MB");
+        assert_eq!(label(window, "sheet-summary"), "TSV, past the grid's 64 MB");
     })
     .unwrap();
     std::fs::remove_file(&big).ok();
@@ -702,6 +703,75 @@ fn a_workbook_that_does_not_open_says_why(cx: &mut TestAppContext) {
         assert!(label(window, "sheet-message").starts_with("cannot open the workbook:"), "{}", label(window, "sheet-message"));
         assert!(dump(&view, cx).1.is_empty());
         assert!(panel.read(cx).editable_text(cx).is_none());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A save in another encoding renames it in the summary: the file holds UTF-8 now, so the grid says so (C-013).
+#[gpui_kit::test]
+fn a_save_in_another_encoding_renames_it_in_the_summary(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-save-encoding");
+    let path = dir.join("latin.csv");
+    std::fs::write(&path, b"id,name\n1,caf\xe9\n").unwrap();
+    let (handle, _panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, comma, Latin-1");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        let text = view.read(cx).text_view().unwrap().clone();
+        text.update(cx, |text, cx| text.set_save_encoding(Encoding::Utf8, cx));
+        let focus = text.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("!", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&path).unwrap(), "!id,name\n1,café\n".as_bytes(), "written as UTF-8");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, comma, UTF-8", "as last written");
+        assert_eq!(dump(&view, cx).0[0], "!id");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A workbook changed on disk raises the bar; a Reload that cannot read it keeps the sheets as read, says why
+/// and takes the bar down (C-013).
+#[gpui_kit::test]
+fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-book-reload");
+    let path = copy_fixture("book.xlsx", &dir);
+    let (handle, _panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns");
+    })
+    .unwrap();
+    std::fs::write(&path, b"no longer a workbook").unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_some(), "the bar shows for a workbook too");
+        window.click("sheet-reload", cx);
+        window.render_frame(cx);
+        assert!(label(window, "sheet-message").starts_with("cannot open the workbook:"), "{}", label(window, "sheet-message"));
+        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns", "the sheets as read stay");
+        assert_eq!(dump(&view, cx).1[1][1], "Rossi, Mario");
+        assert!(window.try_find("sheet-changed-on-disk").is_none(), "the bar is down");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

@@ -485,11 +485,12 @@ impl SheetView {
 
     fn on_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_workbook() {
+            // The bar comes down either way: the sheets as read stay when the file cannot be read now.
+            self.read_at = DiskStamp::of(&self.path);
+            self.disk_changed = false;
             match sheet::read_workbook(&self.path) {
                 Ok(book) => {
                     self.source = Source::Workbook { book, sheet: 0 };
-                    self.read_at = DiskStamp::of(&self.path);
-                    self.disk_changed = false;
                     self.rebuild_table(cx);
                     self.status = "reloaded".to_string();
                 }
@@ -721,10 +722,13 @@ impl SheetView {
         self.text.as_ref().is_some_and(|text| text.read(cx).is_dirty())
     }
 
-    /// `CSV, N rows, C columns, comma, UTF-8` or `Excel, S sheets · Name: N rows, C columns`.
-    pub fn summary(&self) -> String {
+    /// `CSV, N rows, C columns, comma, UTF-8` or `Excel, S sheets · Name: N rows, C columns`; the encoding is
+    /// the one the file holds as last read or written (the text viewer's, once it exists).
+    pub fn summary(&self, cx: &App) -> String {
+        let written_as = self.text.as_ref().map(|t| t.read(cx).status().encoding.label().to_string());
         match &self.source {
             Source::Delimited { grid, encoding, header } => {
+                let encoding = written_as.unwrap_or_else(|| encoding.clone());
                 let rows = grid.rows.len().saturating_sub(usize::from(*header && !grid.rows.is_empty()));
                 let kind = if grid.delimiter == b'\t' { "TSV" } else { "CSV" };
                 let delimiter = match grid.delimiter {
@@ -748,7 +752,12 @@ impl SheetView {
                 )
             }
             Source::None => {
-                if is_workbook_name(&self.name) { "Excel, did not open".to_string() } else { format!("CSV, past the grid's {} MB", MAX_GRID_BYTES / (1024 * 1024)) }
+                if is_workbook_name(&self.name) {
+                    "Excel, did not open".to_string()
+                } else {
+                    let kind = if self.name.to_ascii_lowercase().ends_with(".tsv") { "TSV" } else { "CSV" };
+                    format!("{kind}, past the grid's {} MB", MAX_GRID_BYTES / (1024 * 1024))
+                }
             }
         }
     }
@@ -795,7 +804,7 @@ impl Render for SheetView {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let summary = self.summary();
+        let summary = self.summary(cx);
         let workbook = self.is_workbook();
         let hint = if self.raw_shown {
             "Ctrl+Shift+D shows the grid"
