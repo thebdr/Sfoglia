@@ -83,6 +83,9 @@ pub struct TextView {
     /// Goes up with every save, reload and keep-mine, so a viewer that mirrors the message sees a
     /// repeated one as new.
     operations: u64,
+    /// Goes up with every reload that read the file, so a viewer that mirrors the text knows when
+    /// to parse it again.
+    reloads: u64,
     on_disk: Option<DiskStamp>,
     changed_on_disk: bool,
     rules: Entity<RulesStore>,
@@ -159,6 +162,7 @@ impl TextView {
             dirty: false,
             message: None,
             operations: 0,
+            reloads: 0,
             on_disk: read_at,
             changed_on_disk: false,
             rules: rules.clone(),
@@ -250,6 +254,11 @@ impl TextView {
     /// How many saves, reloads and keep-mines have run: a repeated message counts as new when this changed.
     pub fn operations(&self) -> u64 {
         self.operations
+    }
+
+    /// How many reloads read the file: the text is another one when this changed.
+    pub fn reloads(&self) -> u64 {
+        self.reloads
     }
 
     pub fn message(&self) -> Option<&str> {
@@ -399,6 +408,7 @@ impl TextView {
                 self.editable = replaced == 0;
                 self.message = None;
                 self.dirty = false;
+                self.reloads += 1;
             }
             Err(error) => {
                 self.message = Some(format!("cannot read {}: {error}", self.path.display()));

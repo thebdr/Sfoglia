@@ -60,8 +60,10 @@ pub struct DataView {
     /// Another writer noticed while the text viewer does not exist yet; once it exists, it watches
     /// the disk itself (C-008).
     disk_changed: bool,
-    /// The text viewer's operation count when its message was last copied into the status row.
+    /// The text viewer's operation and reload counts as last followed, so a message shows once per
+    /// operation and the tree is parsed again once per reload.
     seen_operations: u64,
+    seen_reloads: u64,
     _subscriptions: Vec<Subscription>,
     _watch: Task<()>,
 }
@@ -109,6 +111,7 @@ impl DataView {
             scroll: UniformListScrollHandle::new(),
             disk_changed: false,
             seen_operations: 0,
+            seen_reloads: 0,
             _subscriptions: vec![on_search],
             _watch: watch,
         };
@@ -260,19 +263,44 @@ impl DataView {
         let text = self.ensure_text(window, cx);
         text.update(cx, |text, cx| text.reload(window, cx));
         self.disk_changed = false;
-        self.reparse(cx);
-        self.seen_operations = text.read(cx).operations();
-        self.status = match (text.read(cx).message(), &self.tree) {
-            (Some(message), _) => message.to_string(),
-            (None, Ok(_)) => "reloaded".to_string(),
-            (None, Err(error)) => error.to_string(),
-        };
-        // A reloaded text that does not parse gets what such a file gets when it opens: its raw text,
-        // with the cursor on the error's line.
-        if let Err(error) = &self.tree {
-            let error = error.clone();
-            self.show_raw(window, cx);
-            self.place_cursor(&error, window, cx);
+        self.follow_text("reloaded".to_string(), window, cx);
+    }
+
+    /// The text viewer's messages (a save, a refused save, a failed reload) show on the tree side too,
+    /// once per operation, so a repeated refusal shows again.
+    fn show_text_message(&mut self, cx: &App) {
+        let Some(text) = &self.text else { return };
+        let operations = text.read(cx).operations();
+        if operations != self.seen_operations {
+            self.seen_operations = operations;
+            if let Some(message) = text.read(cx).message() {
+                self.status = message.to_string();
+            }
+        }
+    }
+
+    /// The text viewer ran a save, a reload or a keep-mine, from its own bar or the tree side's: its
+    /// message shows in the status row, and after a reload that read the file the tree follows the
+    /// text it holds now. A reloaded text that does not parse gets what such a file gets when it
+    /// opens: the error in the status row, the raw text and the cursor on the error; one that parses
+    /// gets `idle` as its status.
+    fn follow_text(&mut self, idle: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.text.clone() {
+            self.show_text_message(cx);
+            let reloads = text.read(cx).reloads();
+            if reloads != self.seen_reloads {
+                self.seen_reloads = reloads;
+                self.reparse(cx);
+                match &self.tree {
+                    Ok(_) => self.status = idle,
+                    Err(error) => {
+                        let error = error.clone();
+                        self.status = error.to_string();
+                        self.show_raw(window, cx);
+                        self.place_cursor(&error, window, cx);
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -294,7 +322,7 @@ impl DataView {
             return text.clone();
         }
         let text = cx.new(|cx| TextView::new_as_read(&self.path, &self.bytes, self.read_at, &self.rules, window, cx));
-        self._subscriptions.push(cx.observe(&text, |_, _, cx| cx.notify()));
+        self._subscriptions.push(cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(String::new(), window, cx)));
         self.text = Some(text.clone());
         text
     }
@@ -526,17 +554,7 @@ impl Focusable for DataView {
 
 impl Render for DataView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The text viewer's messages (a save, a refused save, a failed reload) show on the tree side too,
-        // once per operation, so a repeated refusal shows again.
-        if let Some(text) = &self.text {
-            let operations = text.read(cx).operations();
-            if operations != self.seen_operations {
-                self.seen_operations = operations;
-                if let Some(message) = text.read(cx).message() {
-                    self.status = message.to_string();
-                }
-            }
-        }
+        self.show_text_message(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let border = theme.border;

@@ -780,4 +780,63 @@ fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mu
     })
     .unwrap();
     std::fs::remove_file(&spoiled).ok();
+
+    // The text viewer's own Reload on the raw side is followed too, with no toggle in between: a Reload
+    // that mends a malformed file clears the error and the summary counts the nodes, and one that spoils
+    // the file puts the error in the status row with the cursor on it.
+    let mended = scratch("mended.json");
+    std::fs::write(&mended, "{\"a\": }").unwrap();
+    let (handle, panel, view) = open_data(cx, mended.clone());
+    let text = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(view.read(cx).raw_shown());
+            assert_eq!(label(window, "data-message"), "line 1, column 7: expected value");
+            view.read(cx).text_view().expect("the text viewer exists at once").clone()
+        })
+        .unwrap();
+    std::fs::write(&mended, "{\"a\": 3}").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(text.read(cx).changed_on_disk());
+        window.click("text-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "Ctrl+Shift+D shows the tree, Ctrl+Shift+P pretty-prints");
+        assert_eq!(label(window, "data-summary"), "JSON, 2 nodes, 2 levels");
+        assert!(view.read(cx).error().is_none());
+        assert!(view.read(cx).raw_shown(), "the raw side stays");
+    })
+    .unwrap();
+    std::fs::write(&mended, "{\"a\":1,\n\"b\": }").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("text-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "line 2, column 6: expected value");
+        assert_eq!(label(window, "data-summary"), "JSON, does not parse");
+        let editor = text.read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(1, 5), "the cursor sits on the error");
+        assert!(!panel.read(cx).is_dirty(cx));
+        // Back on the tree side the same error shows instead of rows.
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-error"), "line 2, column 6: expected value");
+        assert!(window.try_find(("data-row", 0usize)).is_none());
+    })
+    .unwrap();
+    std::fs::remove_file(&mended).ok();
 }
