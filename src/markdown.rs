@@ -526,9 +526,17 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
         // A `|` would split a table cell, so it travels percent-encoded, as any address may. The parser has
         // unescaped the definition's address, so a backslash or an ampersand goes back escaped, or the second
         // parse would read another address (`..\` ends up as `..\)` and no link at all).
-        let url = url.replace('\\', "\\\\").replace('&', "\\&").replace('|', "%7C");
-        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>', '\n']) {
-            format!("<{}>", url.replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A"))
+        // A control character would end the destination or count as a line ending: percent-encoded, as every
+        // consumer decodes the address again.
+        let url: String = url
+            .replace('\\', "\\\\")
+            .replace('&', "\\&")
+            .replace('|', "%7C")
+            .chars()
+            .map(|c| if c.is_ascii_control() { format!("%{:02X}", c as u32) } else { c.to_string() })
+            .collect();
+        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>']) {
+            format!("<{}>", url.replace('<', "%3C").replace('>', "%3E"))
         } else {
             url
         };
@@ -881,6 +889,16 @@ mod tests {
         );
         assert_eq!(link_urls(&prepared), vec!["..\\", "..\\", "a\\_b.md", "a&amp;b.md"], "the same addresses after the rewrite");
         assert_eq!(prepared.lines().count(), escaped.lines().count());
+        // A control character in an address (a tab, a carriage return, a form feed, written as a character
+        // reference) ends an unbracketed destination and counts as a line ending inside brackets: it travels
+        // percent-encoded, which every consumer decodes again.
+        let control = "[t][d] ![i][e]\n\n[d]: a&#9;b.png\n[e]: a&#13;b&#x0C;.png\n";
+        let prepared = prepare(control).text;
+        assert_eq!(link_urls(&prepared), vec!["a%09b.png"]);
+        assert_eq!(images(&prepared), vec!["i|a%0Db%0C.png"]);
+        assert_eq!(percent_decode("a%09b.png"), "a\tb.png");
+        assert_eq!(percent_decode("a%0Db%0C.png"), "a\rb\x0C.png");
+        assert_eq!(prepared.lines().count(), control.lines().count());
     }
 
     #[test]
