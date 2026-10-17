@@ -1,0 +1,93 @@
+{
+  "clause": "C-011",
+  "verdict": "holds",
+  "ranAt": "2026-10-17T15:52:48.065Z",
+  "headCommit": "01bf2e9fd107bc485b7e03939b86c8fe57679470",
+  "tests": [
+    {
+      "name": "the_markdown_extensions_map_to_their_family",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "the_outline_lists_every_block_with_its_kind_depth_and_text",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "links_are_sorted_into_browser_file_and_heading_targets",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "image_sources_resolve_against_the_file",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "a_markdown_file_opens_rendered_with_its_summary_and_text",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "the_raw_text_toggles_edits_saves_and_re_renders",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "the_toggle_carries_the_place_between_the_views",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "a_link_to_another_file_opens_it_at_its_heading",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "remote_images_are_fetched_through_the_apps_http_client",
+      "file": "src/net.rs",
+      "symbolSha": "9f24fe427839bfddd535e741989eea9275d27a3b939ca4bb23b2f811ec5db240"
+    },
+    {
+      "name": "data_images_take_their_format_from_the_media_type_or_a_blank",
+      "file": "src/viewers/markdown_view.rs",
+      "symbolSha": "7ff85de3a895465d946c393a7015f9cb5bb82ff95d886689a4fd85f971920e3b"
+    },
+    {
+      "name": "reference_images_are_written_inline_for_the_renderer",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "code_fences_name_their_grammar",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "a_large_markdown_file_opens_on_its_text",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "repeated_headings_get_numbered_slugs_in_linear_time",
+      "file": "src/markdown.rs",
+      "symbolSha": "822ac9de2f9722bc5aab72c6b5d9e4f706932d939490da9df31e9d71679b33f6"
+    },
+    {
+      "name": "the_place_is_kept_while_the_renderer_catches_up",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    },
+    {
+      "name": "a_reference_link_opens_like_an_inline_one",
+      "file": "tests/markdown.rs",
+      "symbolSha": "b1dc82786cf4a512067ea5989b45b424d9ef1cb3b808db95438ec2e7c4c517a2"
+    }
+  ]
+}

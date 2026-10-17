@@ -40,6 +40,11 @@ pub const KEY_CONTEXT: &str = "MarkdownView";
 /// the text (as decoded, line feeds alone, measured again after every reload and toggle) is that long.
 pub const MAX_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 
+/// Up to this size the text is prepared on the window thread when the file opens, so the renderer gets its
+/// blocks in its first frame; a longer text is prepared off the thread and the renderer waits for it (a
+/// list laid out empty and filled later could land scrolled to its end under load).
+const SYNC_PREPARE_BYTES: usize = 64 * 1024;
+
 /// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
 fn blank_png() -> &'static [u8] {
     static BLANK: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
@@ -94,7 +99,10 @@ impl MarkdownView {
         let decoded = Self::source_of(&text, cx);
         let size = decoded.len();
         let too_big = size > MAX_RENDERED_BYTES;
-        let rich = cx.new(|cx| TextViewState::markdown("", cx).scrollable(true).selectable(true));
+        // A short text is prepared here and now, so the renderer has its blocks from the first frame on.
+        let ready = (!too_big && size <= SYNC_PREPARE_BYTES).then(|| markdown::prepare(&decoded));
+        let initial = ready.as_ref().map(|prepared| prepared.text.as_str()).unwrap_or("");
+        let rich = cx.new(|cx| TextViewState::markdown(initial, cx).scrollable(true).selectable(true));
         let follow = cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(window, cx));
         let parsed = cx.observe(&rich, |this, _, cx| this.on_parsed(cx));
         let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -107,8 +115,8 @@ impl MarkdownView {
             raw_shown: too_big,
             too_big,
             size,
-            outline: Outline::default(),
-            source: String::new(),
+            outline: ready.as_ref().map(|prepared| prepared.outline.clone()).unwrap_or_default(),
+            source: ready.as_ref().map(|prepared| prepared.text.clone()).unwrap_or_default(),
             preparing: None,
             finding: None,
             pending_fragment: None,
@@ -119,7 +127,7 @@ impl MarkdownView {
             requested: Arc::default(),
             _subscriptions: vec![follow, parsed],
         };
-        if !too_big {
+        if !too_big && ready.is_none() {
             view.render_source(decoded, None, cx);
         }
         view
@@ -506,6 +514,9 @@ impl Render for MarkdownView {
         let view = cx.entity().downgrade();
         let body = if self.raw_shown {
             div().id("markdown-raw").size_full().min_h_0().child(self.text.clone()).into_any_element()
+        } else if self.source.is_empty() && self.preparing.is_some() {
+            // The renderer has no text yet: nothing is laid out until it has, so its list never starts empty.
+            div().id("markdown-preparing").test_support().size_full().min_h_0().px_4().py_2().text_color(muted).child("preparing…").into_any_element()
         } else {
             v_flex()
                 .size_full()

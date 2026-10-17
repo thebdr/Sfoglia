@@ -138,6 +138,7 @@ fn a_markdown_file_opens_rendered_with_its_summary_and_text(cx: &mut TestAppCont
             }
         }
         assert!(view.read(cx).focus_handle(cx).is_focused(window), "the rendered side has the focus");
+        assert_eq!(view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix, 0, "it opens at the top");
     })
     .unwrap();
 }

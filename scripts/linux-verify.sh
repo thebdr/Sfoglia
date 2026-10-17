@@ -16,6 +16,9 @@
 #   HEX_BYTES=1      with HEX_SEARCH: press Ctrl+M first, so the text is hexadecimal pairs
 #   DATA_WALK=1      in the data tree: press Down three times and Return (opens the node), then
 #                    Ctrl+Shift+F, type "deep", Return, capture ~/sfoglia-linux-data.png
+#   MD_WALK=1        in the Markdown view: scroll the rendered side down (mouse wheel), press
+#                    Ctrl+Shift+D and capture ~/sfoglia-linux-mdraw.png (the raw text, the cursor on
+#                    the block that was at the top), press it again and capture ~/sfoglia-linux-mdback.png
 #   EDIT=1           click into the text, type "X" (the tab shows its marker), then append a
 #                    line to the first FILE from outside and capture ~/sfoglia-linux-edit.png
 #                    once the changed-on-disk bar has appeared
@@ -34,6 +37,8 @@ PNGRULES="$HOME/sfoglia-linux-rules.png"
 PNGHEX="$HOME/sfoglia-linux-hex.png"
 PNGEDIT="$HOME/sfoglia-linux-edit.png"
 PNGDATA="$HOME/sfoglia-linux-data.png"
+PNGMDRAW="$HOME/sfoglia-linux-mdraw.png"
+PNGMDBACK="$HOME/sfoglia-linux-mdback.png"
 : > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX" "$PNGEDIT" "$PNGDATA"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
@@ -99,6 +104,16 @@ if [ -n "$WID" ]; then
     xdotool type --delay 20 "deep"; sleep 0.3
     xdotool key Return; sleep 1.5
     shot "$PNGDATA" "after Down x3, Return, Ctrl+Shift+F, deep, Return"
+  fi
+  if [ "${MD_WALK:-0}" = "1" ]; then
+    # The Markdown view (C-011): scroll the rendered side, toggle to the raw text and back.
+    eval "$GEOM"
+    xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2)); sleep 0.3
+    xdotool click --repeat 12 --delay 60 5; sleep 1
+    xdotool key --window "$WID" ctrl+shift+d; sleep 1.5
+    shot "$PNGMDRAW" "after 12 wheel steps down and Ctrl+Shift+D"
+    xdotool key --window "$WID" ctrl+shift+d; sleep 2
+    shot "$PNGMDBACK" "after Ctrl+Shift+D back"
   fi
   if [ "${EDIT:-0}" = "1" ] && [ "$#" -gt 0 ]; then
     eval "$GEOM"
