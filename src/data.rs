@@ -1222,7 +1222,9 @@ fn parse_yaml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// The emitter writes non-finite floats as Rust does; give it their YAML spelling instead.
+/// The emitter writes non-finite floats as Rust does; give it their YAML spelling instead. Tags
+/// are dropped: the tree never shows them, the emitter writes most of them in a form that does
+/// not read back, and it quotes any scalar that would read as another type without its tag.
 fn yaml_for_emit(value: &Yaml<'_>) -> Yaml<'static> {
     match value {
         Yaml::Value(Scalar::FloatingPoint(f)) if !f.is_finite() => {
@@ -1235,10 +1237,8 @@ fn yaml_for_emit(value: &Yaml<'_>) -> Yaml<'static> {
             Scalar::FloatingPoint(f) => Scalar::FloatingPoint(*f),
             Scalar::String(s) => Scalar::String(s.to_string().into()),
         }),
-        Yaml::Representation(text, style, tag) => {
-            Yaml::Representation(text.to_string().into(), *style, tag.as_ref().map(|t| std::borrow::Cow::Owned(t.clone().into_owned())))
-        }
-        Yaml::Tagged(tag, inner) => Yaml::Tagged(std::borrow::Cow::Owned(tag.clone().into_owned()), Box::new(yaml_for_emit(inner))),
+        Yaml::Representation(text, style, _) => Yaml::Representation(text.to_string().into(), *style, None),
+        Yaml::Tagged(_, inner) => yaml_for_emit(inner),
         Yaml::Alias(a) => Yaml::Alias(*a),
         Yaml::BadValue => Yaml::BadValue,
         Yaml::Sequence(items) => Yaml::Sequence(items.iter().map(yaml_for_emit).collect()),
@@ -2202,6 +2202,25 @@ mod tests {
         assert_eq!(Tree::parse(Format::Yaml, &yaml).unwrap().nodes, Tree::parse(Format::Yaml, yaml_in).unwrap().nodes);
         let stream = pretty(Format::Yaml, "---\na: 1\n---\nb: [1,2]\n").unwrap();
         assert_eq!(stream, "---\na: 1\n---\nb:\n  - 1\n  - 2\n");
+        // Tags are not rows, and the emitter writes most of them in a form that does not read back: the
+        // pretty form drops them and quotes what would read as another type, so the tree is the same.
+        for tagged in [
+            "a: !<tag:yaml.org,2002:str> x\n",
+            "a: !<tag:yaml.org,2002:int> 5\n",
+            "a: !<tag:example.com,2000:app/foo> x\n",
+            "a: ! 12\n",
+            "- ! 12\n- ! true\n",
+            "a: !<!local> x\n",
+            "a: &x !<!t> v\nb: *x\n",
+            "!<!k> key: v\n",
+            "%TAG !e! tag:example.com,2000:\n---\na: !e!foo x\n",
+            "a: !!str 123\nb: !!str true\n",
+        ] {
+            let pretty_tagged = pretty(Format::Yaml, tagged).unwrap();
+            assert!(saphyr::Yaml::load_from_str(&pretty_tagged).is_ok(), "{tagged:?} -> {pretty_tagged:?}");
+            assert_eq!(Tree::parse(Format::Yaml, &pretty_tagged).unwrap().nodes, Tree::parse(Format::Yaml, tagged).unwrap().nodes, "{tagged:?} -> {pretty_tagged:?}");
+        }
+        assert_eq!(pretty(Format::Yaml, "a: !!str 123\n").unwrap(), "a: \"123\"\n");
         let toml_in = "zeta=1\n[server]\nhost=\"h\"\n";
         let toml = pretty(Format::Toml, toml_in).unwrap();
         assert_eq!(toml, "zeta = 1\n\n[server]\nhost = \"h\"\n");
