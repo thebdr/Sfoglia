@@ -34,8 +34,9 @@ pub struct OpenLinkedFile {
 /// The key context of the whole view: the chord works from the raw text too.
 pub const KEY_CONTEXT: &str = "MarkdownView";
 
-/// The largest file that opens rendered: past this the outline and the renderer's parse would take seconds
-/// on the window thread, so the file opens on its raw text and stays there.
+/// The longest text that renders: past this the outline and the renderer's parse would take seconds on the
+/// window thread, so the file opens on its raw text and the toggle keeps it there while the text (as decoded,
+/// line feeds alone, measured again after every reload and toggle) is that long.
 pub const MAX_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 
 /// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
@@ -58,9 +59,9 @@ pub struct MarkdownView {
     /// The raw text (C-005, C-008), built at open: it watches the disk and holds the edits.
     text: Entity<TextView>,
     raw_shown: bool,
-    /// Past `MAX_RENDERED_BYTES`: the raw text alone, the toggle refused.
+    /// Past `MAX_RENDERED_BYTES`: the raw text alone, the toggle refused until the text is shorter.
     too_big: bool,
-    /// The file's size, for the status row of a file too big to render.
+    /// The text's size as last measured, for the status row of a text too long to render.
     size: usize,
     /// The blocks of the source last rendered, which the status row, the toggle and links use.
     outline: Outline,
@@ -81,12 +82,11 @@ impl MarkdownView {
     /// Open `bytes`, the file at `path`, rendered.
     pub fn new(path: &Path, bytes: &[u8], rules: &Entity<RulesStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = cx.new(|cx| TextView::new(path, bytes, rules, window, cx));
-        let too_big = bytes.len() > MAX_RENDERED_BYTES;
-        let Prepared { text: source, outline } = if too_big {
-            Prepared { text: String::new(), outline: Outline::default() }
-        } else {
-            markdown::prepare(&Self::source_of(&text, cx))
-        };
+        let decoded = Self::source_of(&text, cx);
+        let size = decoded.len();
+        let too_big = size > MAX_RENDERED_BYTES;
+        let Prepared { text: source, outline } =
+            if too_big { Prepared { text: String::new(), outline: Outline::default() } } else { markdown::prepare(&decoded) };
         let rich = cx.new(|cx| TextViewState::markdown(&source, cx).scrollable(true).selectable(true));
         let follow = cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(window, cx));
         let parsed = cx.observe(&rich, |this, _, cx| this.on_parsed(cx));
@@ -99,11 +99,11 @@ impl MarkdownView {
             text,
             raw_shown: too_big,
             too_big,
-            size: bytes.len(),
+            size,
             outline,
             source,
             pending_reveal: None,
-            status: if too_big { too_big_message(bytes.len()) } else { String::new() },
+            status: if too_big { too_big_message(size) } else { String::new() },
             seen_operations: 0,
             seen_reloads: 0,
             requested: Arc::default(),
@@ -166,9 +166,18 @@ impl MarkdownView {
         cx.notify();
     }
 
-    /// The rendered view, built from the text as edited and scrolled to the block holding the cursor's line.
+    /// The rendered view, built from the text as edited and scrolled to the block holding the cursor's line;
+    /// a text past the budget stays raw and says so.
     fn show_rendered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = Self::source_of(&self.text, cx);
+        self.size = source.len();
+        self.too_big = self.size > MAX_RENDERED_BYTES;
+        if self.too_big {
+            self.raw_shown = true;
+            self.status = too_big_message(self.size);
+            cx.notify();
+            return;
+        }
         let line = self.text.read(cx).editor().read(cx).cursor_position().line as usize + 1;
         self.render_source(source, cx);
         self.raw_shown = false;
@@ -180,11 +189,6 @@ impl MarkdownView {
     }
 
     fn on_toggle_raw(&mut self, _: &ToggleRaw, window: &mut Window, cx: &mut Context<Self>) {
-        if self.too_big {
-            self.status = too_big_message(self.size);
-            cx.notify();
-            return;
-        }
         if self.raw_shown {
             self.show_rendered(window, cx);
         } else {

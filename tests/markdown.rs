@@ -414,5 +414,37 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         assert_eq!(view.read(cx).outline().blocks.len(), 0, "no outline is built for it");
     })
     .unwrap();
+    // Shrunk on disk and reloaded, the text fits again and the next toggle renders it; grown past the budget
+    // in the editor, the toggle keeps the raw text and says so, with the new size.
+    std::fs::write(&big, "# Small\n\nagain\n").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("text-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let grown = format!("# Grown\n\n{}\n", "x".repeat(2_200_000));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "a reload leaves the side as it was");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown(), "the text fits now");
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 1 heading");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        editor.update(cx, |editor, cx| editor.set_value(grown.clone(), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "the grown text stays raw");
+        let message = format!("{:.1} MB of Markdown opens as text: the rendered view is kept for files under 2 MB", grown.len() as f64 / (1024.0 * 1024.0));
+        assert_eq!(label(window, "markdown-message"), message);
+        assert_eq!(label(window, "markdown-summary"), format!("Markdown, {:.1} MB", grown.len() as f64 / (1024.0 * 1024.0)));
+    })
+    .unwrap();
     std::fs::remove_file(&big).ok();
 }
