@@ -6,3 +6,4 @@ publish = false
 description = "Repository tasks: `cargo run -p xtask -- formats` regenerates FORMATS.md from .zen/contract.md"
 
 [dependencies]
+rust_xlsxwriter = "0.100.0"

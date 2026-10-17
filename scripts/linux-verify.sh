@@ -22,6 +22,8 @@
 #   EDIT=1           click into the text, type "X" (the tab shows its marker), then append a
 #                    line to the first FILE from outside and capture ~/sfoglia-linux-edit.png
 #                    once the changed-on-disk bar has appeared
+#   OPEN_FILE=path   the file the Ctrl+O step opens (default tests/fixtures/data.json), captured as
+#                    ~/sfoglia-linux-dialog.png
 #   CLOSE_ASK=1      click into the text, type "X", then press Alt+F4 (the window manager's close
 #                    request) and capture ~/sfoglia-linux-close.png with the closing question (C-012);
 #                    the window is expected to stay, and the log says whether it did
@@ -159,7 +161,7 @@ if [ -n "$WID" ]; then
     if [ -n "$DIALOG" ] && [ "$DIALOG" != "$WID" ]; then
       # GTK file chooser: Ctrl+L focuses the location entry; type an absolute path and confirm.
       xdotool key --window "$DIALOG" ctrl+l; sleep 0.5
-      xdotool type --delay 20 "$HOME/Sfoglia/tests/fixtures/data.json"; sleep 0.3
+      xdotool type --delay 20 "$HOME/Sfoglia/${OPEN_FILE:-tests/fixtures/data.json}"; sleep 0.3
       xdotool key Return; sleep 2.5
       xdotool windowactivate --sync "$WID" 2>/dev/null; sleep 0.5
       shot "$PNG2" "after dialog"

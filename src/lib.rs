@@ -11,6 +11,7 @@ pub mod images;
 pub mod markdown;
 pub mod net;
 pub mod rules;
+pub mod sheet;
 pub mod shell;
 pub mod text;
 pub mod viewers;

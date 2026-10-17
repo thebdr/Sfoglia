@@ -13,12 +13,12 @@ pub enum Family {
     DataTrees,
     /// Markdown rendering (C-011).
     Markdown,
+    /// Spreadsheets and delimited tables (C-013).
+    Spreadsheets,
     /// Word-processing documents (P-007).
     WordProcessing,
     /// PDF and XPS viewing (P-008).
     PdfXps,
-    /// Spreadsheets and delimited tables (P-010).
-    Spreadsheets,
     /// Presentations (P-011).
     Presentations,
     /// Visio diagrams (P-012).
@@ -48,9 +48,9 @@ impl Family {
         Family::Images,
         Family::DataTrees,
         Family::Markdown,
+        Family::Spreadsheets,
         Family::WordProcessing,
         Family::PdfXps,
-        Family::Spreadsheets,
         Family::Presentations,
         Family::Visio,
         Family::Project,
@@ -70,9 +70,9 @@ impl Family {
             Family::Images => "images",
             Family::DataTrees => "data-trees",
             Family::Markdown => "markdown",
+            Family::Spreadsheets => "spreadsheets",
             Family::WordProcessing => "word-processing",
             Family::PdfXps => "pdf-xps",
-            Family::Spreadsheets => "spreadsheets",
             Family::Presentations => "presentations",
             Family::Visio => "visio",
             Family::Project => "project",
@@ -93,9 +93,9 @@ impl Family {
             Family::Images => "Images",
             Family::DataTrees => "Structured data trees",
             Family::Markdown => "Markdown rendering",
+            Family::Spreadsheets => "Spreadsheets and delimited tables",
             Family::WordProcessing => "Word-processing documents",
             Family::PdfXps => "PDF and XPS viewing",
-            Family::Spreadsheets => "Spreadsheets and delimited tables",
             Family::Presentations => "Presentations",
             Family::Visio => "Visio diagrams",
             Family::Project => "Microsoft Project files",
@@ -116,9 +116,9 @@ impl Family {
             Family::Images => "C-009",
             Family::DataTrees => "C-010",
             Family::Markdown => "C-011",
+            Family::Spreadsheets => "C-013",
             Family::WordProcessing => "P-007",
             Family::PdfXps => "P-008",
-            Family::Spreadsheets => "P-010",
             Family::Presentations => "P-011",
             Family::Visio => "P-012",
             Family::Project => "P-013",

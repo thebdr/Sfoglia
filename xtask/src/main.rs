@@ -21,8 +21,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("fixtures") => match fixtures(&repo_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
-            eprintln!("usage: cargo run -p xtask -- formats [--check]");
+            eprintln!("usage: cargo run -p xtask -- formats [--check] | fixtures");
             ExitCode::FAILURE
         }
     }
@@ -855,4 +862,62 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
             requested_by(&family.clause).expect("every committed family has an origin and a date");
         }
     }
+}
+
+/// `cargo run -p xtask -- fixtures`: write the binary test fixtures the tests read, so they can be rebuilt
+/// from source instead of being hand-made (C-013: tests/fixtures/book.xlsx).
+fn fixtures(root: &Path) -> Result<(), String> {
+    use rust_xlsxwriter::{ExcelDateTime, Format, FormatAlign, Formula, Workbook};
+    let mut book = Workbook::new();
+    let date = Format::new().set_num_format("yyyy-mm-dd");
+    let stamp = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
+    let money = Format::new().set_num_format("0.00");
+    let bold = Format::new().set_bold();
+    let centre = Format::new().set_align(FormatAlign::Center).set_bold();
+    let err = |e: rust_xlsxwriter::XlsxError| e.to_string();
+
+    let data = book.add_worksheet();
+    data.set_name("Data").map_err(err)?;
+    for (col, head) in ["id", "name", "amount", "when", "paid", "note"].iter().enumerate() {
+        data.write_string_with_format(0, col as u16, *head, &bold).map_err(err)?;
+    }
+    data.write_number(1, 0, 1.0).map_err(err)?;
+    data.write_string(1, 1, "Rossi, Mario").map_err(err)?;
+    data.write_number_with_format(1, 2, 12.5, &money).map_err(err)?;
+    data.write_datetime_with_format(1, 3, &ExcelDateTime::from_ymd(2026, 1, 5).map_err(err)?, &date).map_err(err)?;
+    data.write_boolean(1, 4, true).map_err(err)?;
+    data.write_string(1, 5, "first line\nsecond line").map_err(err)?;
+    data.write_number(2, 0, 2.0).map_err(err)?;
+    data.write_string(2, 1, "Élodie").map_err(err)?;
+    data.write_number_with_format(2, 2, 7.0, &money).map_err(err)?;
+    data.write_datetime_with_format(
+        2,
+        3,
+        &ExcelDateTime::from_ymd(2026, 2, 28).map_err(err)?.and_hms(14, 30, 0).map_err(err)?,
+        &stamp,
+    )
+    .map_err(err)?;
+    data.write_boolean(2, 4, false).map_err(err)?;
+    data.write_number(3, 0, 3.0).map_err(err)?;
+    data.write_string(3, 1, "quote \"inside\"").map_err(err)?;
+    data.write_number_with_format(3, 2, -3.25, &money).map_err(err)?;
+    // A formula with its cached result, as Excel saves it.
+    data.write_formula(4, 2, Formula::new("=SUM(C2:C4)").set_result("16.25")).map_err(err)?;
+    data.write_string(4, 1, "total").map_err(err)?;
+    // A merged title row under the data and a column width Excel would show.
+    data.merge_range(6, 0, 6, 2, "merged across three", &centre).map_err(err)?;
+    data.set_column_width(1, 24.0).map_err(err)?;
+
+    let notes = book.add_worksheet();
+    notes.set_name("Notes").map_err(err)?;
+    notes.write_string(0, 0, "a note").map_err(err)?;
+    notes.write_number(1, 1, 42.0).map_err(err)?;
+
+    let empty = book.add_worksheet();
+    empty.set_name("Empty").map_err(err)?;
+
+    let path = root.join("tests").join("fixtures").join("book.xlsx");
+    book.save(&path).map_err(err)?;
+    println!("wrote {}", path.display());
+    Ok(())
 }

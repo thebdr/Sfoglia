@@ -29,7 +29,8 @@ use crate::viewers::data_view::{self, Collapse, CopyPath, Expand, PrettyPrint, S
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
 use crate::viewers::markdown_view::{self, OpenLinkedFile};
-use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, TextView};
+use crate::viewers::sheet_view;
+use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, SheetView, TextView};
 
 actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs]);
 
@@ -63,6 +64,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-p", PrettyPrint, Some(data_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", ToggleRaw, Some(data_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", markdown_view::ToggleRaw, Some(markdown_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", sheet_view::ToggleRaw, Some(sheet_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", sheet_view::FocusSearch, Some(sheet_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -127,6 +130,8 @@ enum PanelView {
     Data(Entity<DataView>),
     /// The Markdown viewer (C-011).
     Markdown(Entity<MarkdownView>),
+    /// The spreadsheet viewer (C-013).
+    Sheet(Entity<SheetView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -166,6 +171,11 @@ impl FilePanel {
                 Ok(bytes) => PanelView::Markdown(cx.new(|cx| MarkdownView::new(&info.path, &bytes, rules, window, cx))),
                 Err(_) => PanelView::Info,
             }
+        } else if info.error.is_none() && info.route() == Route::Family(Family::Spreadsheets) {
+            match std::fs::read(&info.path) {
+                Ok(bytes) => PanelView::Sheet(cx.new(|cx| SheetView::new(&info.path, &bytes, rules, window, cx))),
+                Err(_) => PanelView::Info,
+            }
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -187,6 +197,10 @@ impl FilePanel {
                 cx.notify();
             })),
             PanelView::Markdown(view) => Some(cx.observe(view, |_, _, cx| {
+                cx.emit(PanelEvent::LayoutChanged);
+                cx.notify();
+            })),
+            PanelView::Sheet(view) => Some(cx.observe(view, |_, _, cx| {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
@@ -217,6 +231,10 @@ impl FilePanel {
                 window.focus(&focus, cx);
             }
             PanelView::Markdown(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Sheet(view) => {
                 let focus = view.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
@@ -269,12 +287,21 @@ impl FilePanel {
         }
     }
 
+    /// The spreadsheet viewer, while the grid shows (C-013).
+    pub fn sheet_view(&self) -> Option<&Entity<SheetView>> {
+        match &self.view {
+            PanelView::Sheet(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
     /// The text that Ctrl+S saves: the text viewer, or the data viewer's raw text once it exists.
     pub fn editable_text(&self, cx: &App) -> Option<Entity<TextView>> {
         match &self.view {
             PanelView::Text(view) => Some(view.clone()),
             PanelView::Data(view) => view.read(cx).text_view().cloned(),
             PanelView::Markdown(view) => Some(view.read(cx).text_view().clone()),
+            PanelView::Sheet(view) => view.read(cx).text_view().cloned(),
             PanelView::Image(_) | PanelView::Info => None,
         }
     }
@@ -329,6 +356,7 @@ impl FilePanel {
             PanelView::Text(text) => text.read(cx).is_dirty(),
             PanelView::Data(data) => data.read(cx).is_dirty(cx),
             PanelView::Markdown(view) => view.read(cx).is_dirty(cx),
+            PanelView::Sheet(view) => view.read(cx).is_dirty(cx),
             PanelView::Image(_) | PanelView::Info => false,
         }
     }
@@ -383,6 +411,7 @@ impl Focusable for FilePanel {
             PanelView::Image(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Data(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Markdown(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            PanelView::Sheet(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -439,6 +468,14 @@ impl Render for FilePanel {
                 .into_any_element();
         }
         if let PanelView::Markdown(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
+        if let PanelView::Sheet(view) = &self.view {
             return div()
                 .id("file-panel")
                 .track_focus(&self.focus_handle)

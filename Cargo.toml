@@ -36,6 +36,8 @@ markdown = "1.0"
 ureq = "3"
 futures = "0.3"
 anyhow = "1"
+calamine = "0.36.1"
+csv = "1.4.0"
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
