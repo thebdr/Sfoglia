@@ -535,7 +535,7 @@ fn xml_entities(doctype: &str) -> Vec<(String, String)> {
         } else if rest.starts_with("<?") {
             i += rest.find("?>").map_or(rest.len(), |e| e + 2);
         } else if rest.starts_with("<!DOCTYPE") {
-            i += rest.find('[').map_or_else(|| xml_declaration_end(rest), |b| b + 1);
+            i += xml_doctype_header_end(rest);
         } else if rest.starts_with("<!ENTITY") {
             let after = rest["<!ENTITY".len()..].trim_start();
             let (name, after_name) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
@@ -576,35 +576,82 @@ fn xml_declaration_end(text: &str) -> usize {
     text.len()
 }
 
-/// The bytes each entity stands for once the entities inside its value are expanded too,
-/// computed once per entity (a chain back to itself counts its text once; roxmltree refuses
-/// such a file anyway).
-fn xml_expanded_lengths(entities: &[(String, String)]) -> std::collections::HashMap<String, usize> {
-    fn length(name: &str, entities: &[(String, String)], memo: &mut std::collections::HashMap<String, usize>) -> usize {
-        if let Some(&known) = memo.get(name) {
-            return known;
+/// The end of the `<!DOCTYPE ...` header that starts `text`: just past its `[` outside quotes,
+/// or past its `>` when it has no internal subset.
+fn xml_doctype_header_end(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = "<!DOCTYPE".len();
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'[' | b'>' => return i + 1,
+            _ => i += 1,
         }
-        let Some((_, value)) = entities.iter().find(|(n, _)| n == name) else { return 0 };
-        memo.insert(name.to_string(), value.len());
-        let mut total = value.len();
-        let mut rest = value.as_str();
+    }
+    text.len()
+}
+
+/// The bytes each entity stands for once the entities inside its value are expanded too,
+/// computed once per entity with an index by name (the first declaration wins, as in
+/// roxmltree) and an explicit stack, so many declarations or a long chain cost no more than
+/// their text. A chain back to itself counts its text once; roxmltree refuses such a file.
+fn xml_expanded_lengths(entities: &[(String, String)]) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
+    let mut index: HashMap<&str, &str> = HashMap::new();
+    for (name, value) in entities {
+        index.entry(name.as_str()).or_insert(value.as_str());
+    }
+    let references = |value: &str| -> Vec<String> {
+        let mut refs = Vec::new();
+        let mut rest = value;
         while let Some(at) = rest.find('&') {
             let tail = &rest[at + 1..];
             match tail.find(';') {
-                Some(end) if !tail.starts_with('#') && entities.iter().any(|(n, _)| n == &tail[..end]) => {
-                    let inner = length(&tail[..end], entities, memo);
-                    total = total.saturating_sub(end + 2).saturating_add(inner);
+                Some(end) if !tail.starts_with('#') && index.contains_key(&tail[..end]) => {
+                    refs.push(tail[..end].to_string());
                     rest = &tail[end + 1..];
                 }
                 _ => rest = tail,
             }
         }
-        memo.insert(name.to_string(), total);
-        total
-    }
-    let mut memo = std::collections::HashMap::new();
+        refs
+    };
+    let mut memo: HashMap<String, usize> = HashMap::new();
     for (name, _) in entities {
-        length(name, entities, &mut memo);
+        if memo.contains_key(name.as_str()) {
+            continue;
+        }
+        let value = index[name.as_str()];
+        memo.insert(name.clone(), value.len());
+        // Frames: the entity, the entities its value references, the next one to take, the total so far.
+        let mut stack: Vec<(String, Vec<String>, usize, usize)> = vec![(name.clone(), references(value), 0, value.len())];
+        loop {
+            let Some(top) = stack.last_mut() else { break };
+            if top.2 < top.1.len() {
+                let reference = top.1[top.2].clone();
+                top.2 += 1;
+                match memo.get(&reference).copied() {
+                    Some(known) => top.3 = top.3.saturating_sub(reference.len() + 2).saturating_add(known),
+                    None => {
+                        let value = index[reference.as_str()];
+                        memo.insert(reference.clone(), value.len());
+                        stack.push((reference, references(value), 0, value.len()));
+                    }
+                }
+            } else {
+                let (done, _, _, total) = stack.pop().expect("a frame");
+                memo.insert(done.clone(), total);
+                if let Some(parent) = stack.last_mut() {
+                    parent.3 = parent.3.saturating_sub(done.len() + 2).saturating_add(total);
+                }
+            }
+        }
     }
     memo
 }
@@ -1399,7 +1446,8 @@ fn xml_prolog(text: &str) -> (Option<&str>, Option<&str>) {
     let mut doctype = None;
     let mut rest = text;
     loop {
-        let trimmed = rest.trim_start();
+        // A byte-order mark that decoding left in place is skipped here, as roxmltree skips it.
+        let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
         if let Some(after) = trimmed.strip_prefix("<?xml").filter(|after| after.starts_with(char::is_whitespace)) {
             let Some(end) = after.find("?>") else { break };
             let end = "<?xml".len() + end + "?>".len();
@@ -2197,6 +2245,10 @@ mod tests {
             ("xml decoy entity in a doctype instruction", Format::Xml, format!("<!DOCTYPE r [<?x <!ENTITY e1 \"a\"> ?><!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11092: entities expand to more than 1000000 bytes")),
             ("xml decoy entity in another value", Format::Xml, format!("<!DOCTYPE r [<!ENTITY d '<!ENTITY e1 \"a\">'><!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11099: entities expand to more than 1000000 bytes")),
             ("xml billion laughs", Format::Xml, (1..=9).fold("<!DOCTYPE r [<!ENTITY lol0 \"lol\">".to_string(), |text, i| text + &format!("<!ENTITY lol{i} \"{}\">", format!("&lol{};", i - 1).repeat(10))) + "]><r>&lol9;</r>", Err("line 1, column 732: entities expand to more than 1000000 bytes")),
+            ("xml entity 20000 behind a stray byte-order mark", Format::Xml, format!("{}<!DOCTYPE r [<!ENTITY e \"{}x{}\">]><r>&e;</r>", '\u{FEFF}', "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 15: elements nested deeper than 200 levels")),
+            ("xml amplification behind a stray byte-order mark", Format::Xml, format!("{}<!DOCTYPE r [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", '\u{FEFF}', "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11070: entities expand to more than 1000000 bytes")),
+            ("xml decoy entity in the system literal", Format::Xml, format!("<!DOCTYPE r SYSTEM \"[<!ENTITY e1 'a'>\" [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11096: entities expand to more than 1000000 bytes")),
+            ("xml fifty thousand chained entities", Format::Xml, (0..50_000).map(|i| format!("<!ENTITY e{i} \"&e{};\">", i + 1)).fold("<!DOCTYPE r [".to_string(), |text, d| text + &d) + "<!ENTITY e50000 \"x\">]><r>&e0;</r>", Ok((1, 1))),
             ("xml small entity used a thousand times", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"hello\">]><r>{}</r>", "&e;".repeat(1000)), Ok((1, 1))),
             ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
             ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
