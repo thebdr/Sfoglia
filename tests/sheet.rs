@@ -191,8 +191,68 @@ fn a_csv_opens_as_a_grid_with_its_summary_and_header_toggle(cx: &mut TestAppCont
         assert_eq!(names, rows(&["A", "B", "C", "D", "E"]));
         assert_eq!(cells[0], rows(&["id", "name", "note", "amount", "when"]));
         assert_eq!(cells.len(), 4);
+        // With the header off, the first record is row 1.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 0, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "A1");
     })
     .unwrap();
+}
+
+/// A `.csv` that holds tabs is read by tabs and labelled by its delimiter (C-013).
+#[gpui_kit::test]
+fn a_tab_delimited_csv_is_labelled_by_its_delimiter(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-tabs-csv");
+    let path = dir.join("tabs.csv");
+    std::fs::write(&path, "a\tb\n1\t2\n").unwrap();
+    let (handle, _panel, view) = open_sheet(cx, path);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "TSV, 1 row, 2 columns, tab, UTF-8");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "2"]));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A ⏎ typed into a changed value goes back as a line break, in the record and in the saved bytes (C-013).
+#[gpui_kit::test]
+fn a_typed_break_glyph_goes_back_as_a_break(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-typed-break");
+    let path = copy_fixture("table.csv", &dir);
+    let (handle, _panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 2, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("first line⏎second line!", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "C2 set; Ctrl+S saves");
+        assert_eq!(dump(&view, cx).1[0][2], "first line\nsecond line!", "the glyph went back as a break");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert!(text.contains("\"first line\nsecond line!\",7,"), "{text}");
+        window.press("ctrl-s", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let expected = String::from_utf8(fixture_bytes("table.csv")).unwrap().replace("second line\",7,", "second line!\",7,");
+    assert_eq!(std::fs::read(&path).unwrap(), expected.as_bytes());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[gpui_kit::test]
@@ -264,6 +324,14 @@ fn the_search_field_finds_cells_and_counts_them(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-message"), "match 2 of 2");
         assert_eq!(label(window, "sheet-cell"), "E3");
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "match 1 of 2", "around the end");
+        assert_eq!(label(window, "sheet-cell"), "E2");
         let input = view.read(cx).search_input().clone();
         input.update(cx, |input, cx| input.set_value("zzz", window, cx));
         window.press("enter", cx);
@@ -398,6 +466,27 @@ fn a_workbook_opens_on_its_sheets_with_merges_and_dates(cx: &mut TestAppContext)
         assert_eq!(cells[2], rows(&["2", "Élodie", "7", "2026-02-28 14:30:00", "FALSE", ""]));
         assert_eq!(cells[4][2], "16.25", "the formula's cached value");
         assert_eq!(cells[6], rows(&["merged across three", "", "", "", "", ""]), "the merged value once, the covered cells blank");
+        // Sorting, search and cell selection work on a workbook too: C's arrow (text first, then by value,
+        // the empty cells last), then `Élodie` found at B3 (the sort dropped, the file's order again).
+        window.click(("icon-sort", 2usize), cx);
+        window.render_frame(cx);
+        let amounts: Vec<String> = dump(&view, cx).1.iter().map(|r| r[2].clone()).collect();
+        assert_eq!(amounts, rows(&["amount", "16.25", "12.5", "7", "-3.25", "", ""]));
+        window.click(("icon-sort", 2usize), cx);
+        window.render_frame(cx);
+        window.click(("icon-sort", 2usize), cx);
+        window.render_frame(cx);
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        window.input("Élodie", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "match 1 of 1");
+        assert_eq!(label(window, "sheet-cell"), "B3");
         window.click(("sheet-tab-button", 1usize), cx);
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Notes: 2 rows, 2 columns");
@@ -434,6 +523,11 @@ fn a_large_delimited_text_opens_on_its_text(cx: &mut TestAppContext) {
         assert!(view.read(cx).raw_shown(), "past the budget the text shows");
         assert!(label(window, "sheet-message").contains("past the grid's 64 MB"), "{}", label(window, "sheet-message"));
         assert_eq!(label(window, "sheet-summary"), "TSV, past the grid's 64 MB");
+        // The toggle measures again: the text stays, with the message.
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "still past the budget after the toggle");
+        assert!(label(window, "sheet-message").contains("past the grid's 64 MB"));
     })
     .unwrap();
     std::fs::remove_file(&big).ok();
@@ -767,9 +861,9 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Notes: 2 rows, 2 columns");
     })
     .unwrap();
-    // Rewritten outside (the same book, a later stamp): Reload reads it afresh and opens on the first sheet.
+    // Rewritten outside as another book: Reload reads it afresh and opens on its first sheet.
     std::thread::sleep(Duration::from_millis(20));
-    std::fs::write(&path, fixture_bytes("book.xlsx")).unwrap();
+    std::fs::write(&path, fixture_bytes("book2.xlsx")).unwrap();
     cx.background_executor.advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -778,7 +872,8 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         window.click("sheet-reload", cx);
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-message"), "reloaded");
-        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns", "the first sheet again");
+        assert_eq!(label(window, "sheet-summary"), "Excel, 1 sheet · Only: 1 row, 1 column", "the other book, on its first sheet");
+        assert_eq!(dump(&view, cx).1[0][0], "changed", "read afresh");
         assert!(window.try_find("sheet-changed-on-disk").is_none());
     })
     .unwrap();
@@ -795,11 +890,11 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         assert_eq!(label(window, "sheet-message"), "kept the sheets as read");
         assert!(window.try_find("sheet-changed-on-disk").is_none());
         assert!(!panel.read(cx).is_dirty(cx), "a workbook has nothing to save");
-        assert_eq!(dump(&view, cx).1[1][1], "Rossi, Mario");
+        assert_eq!(dump(&view, cx).1[0][0], "changed");
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    std::fs::write(&path, b"no longer a workbook").unwrap();
+    std::fs::write(&path, b"no longer a workbook at all").unwrap();
     cx.background_executor.advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
@@ -808,8 +903,8 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         window.click("sheet-reload", cx);
         window.render_frame(cx);
         assert!(label(window, "sheet-message").starts_with("cannot open the workbook:"), "{}", label(window, "sheet-message"));
-        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns", "the sheets as read stay");
-        assert_eq!(dump(&view, cx).1[1][1], "Rossi, Mario");
+        assert_eq!(label(window, "sheet-summary"), "Excel, 1 sheet · Only: 1 row, 1 column", "the sheets as read stay");
+        assert_eq!(dump(&view, cx).1[0][0], "changed");
         assert!(window.try_find("sheet-changed-on-disk").is_none(), "the bar is down");
     })
     .unwrap();
