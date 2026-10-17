@@ -262,7 +262,18 @@ impl DataView {
         self.disk_changed = false;
         self.reparse(cx);
         self.seen_operations = text.read(cx).operations();
-        self.status = text.read(cx).message().map_or_else(|| "reloaded".to_string(), str::to_string);
+        self.status = match (text.read(cx).message(), &self.tree) {
+            (Some(message), _) => message.to_string(),
+            (None, Ok(_)) => "reloaded".to_string(),
+            (None, Err(error)) => error.to_string(),
+        };
+        // A reloaded text that does not parse gets what such a file gets when it opens: its raw text,
+        // with the cursor on the error's line.
+        if let Err(error) = &self.tree {
+            let error = error.clone();
+            self.show_raw(window, cx);
+            self.place_cursor(&error, window, cx);
+        }
         cx.notify();
     }
 

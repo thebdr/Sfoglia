@@ -742,4 +742,42 @@ fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mu
     })
     .unwrap();
     std::fs::remove_file(&gone).ok();
+
+    // A Reload that brings in a file that no longer parses gets what such a file gets when it opens: the
+    // error in the status row, the raw text with the cursor on the error, and the tree side showing the
+    // error instead of rows.
+    let spoiled = scratch("spoiled.json");
+    std::fs::write(&spoiled, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, spoiled.clone());
+    std::fs::write(&spoiled, "{\"a\":1,\n\"b\": }").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-changed-on-disk"), "The file changed on disk.");
+        window.click("data-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "line 2, column 6: expected value");
+        assert_eq!(label(window, "data-summary"), "JSON, does not parse");
+        assert!(view.read(cx).raw_shown(), "the raw text shows");
+        assert!(window.try_find("data-changed-on-disk").is_none());
+        let text = view.read(cx).text_view().expect("the text viewer exists").clone();
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":1,\n\"b\": }");
+        let editor = text.read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(1, 5), "the cursor sits on the error");
+        assert!(editor.read(cx).focus_handle(cx).is_focused(window));
+        assert!(!panel.read(cx).is_dirty(cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+        assert_eq!(label(window, "data-error"), "line 2, column 6: expected value");
+        assert!(window.try_find(("data-row", 0usize)).is_none());
+    })
+    .unwrap();
+    std::fs::remove_file(&spoiled).ok();
 }
