@@ -785,6 +785,8 @@ impl Render for Workspace {
 struct Closing {
     queue: Vec<Entity<FilePanel>>,
     message: Option<String>,
+    /// The tab whose restore could not read the file back: a second `Discard changes` drops its edit.
+    refused_restore: Option<gpui_kit::EntityId>,
 }
 
 /// What a button of the closing dialog decides.
@@ -837,7 +839,7 @@ impl Workspace {
             return true;
         }
         if self.closing.is_none() {
-            self.closing = Some(Closing { queue, message: None });
+            self.closing = Some(Closing { queue, message: None, refused_restore: None });
             self.open_closing_dialog(window, cx);
         }
         cx.notify();
@@ -849,7 +851,9 @@ impl Workspace {
     fn closing_facts(&self, cx: &App) -> Option<(String, String, usize, Option<String>)> {
         let closing = self.closing.as_ref()?;
         let first = closing.queue.first()?.read(cx);
-        let folder = first.info.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        // The folder as it stands on disk, whatever spelling the path came with (a bare name has none).
+        let path = std::path::absolute(&first.info.path).unwrap_or_else(|_| first.info.path.clone());
+        let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
         Some((first.info.name.clone(), folder, closing.queue.len().saturating_sub(1), closing.message.clone()))
     }
 
@@ -963,12 +967,17 @@ impl Workspace {
                         closing.message = Some(message);
                         return;
                     }
+                } else if closing.refused_restore == Some(panel.entity_id()) {
+                    // Asked a second time with the message in view: the edit is dropped as asked, file or no file.
                 } else {
                     text.update(cx, |text, cx| text.reload(window, cx));
                     if text.read(cx).is_dirty() {
                         // The saved text could not be read back (the file is gone): nothing was restored, so
-                        // the question stays on this tab with the viewer's message, as after a refused save.
-                        closing.message = text.read(cx).message().map(str::to_string);
+                        // the question stays on this tab with the viewer's message, as after a refused save;
+                        // the next Discard changes drops the edit.
+                        closing.message =
+                            text.read(cx).message().map(|m| format!("{m}; Discard changes again drops the edit"));
+                        closing.refused_restore = Some(panel.entity_id());
                         return;
                     }
                 }

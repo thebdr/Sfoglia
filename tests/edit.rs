@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use gpui_kit::component::Placement;
 use gpui_kit::component::dock::{BasePanel as _, ClosePanel, DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, Panel as _, PanelId};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
@@ -912,30 +913,46 @@ fn a_restore_the_viewer_refuses_keeps_the_window_open_like_a_refused_save(cx: &m
         window.render_frame(cx);
         let (title, _, _, message) = closing_dialog(window, cx);
         assert_eq!(title, "Save changes to “hello.txt”?", "the dialog stays on the tab");
-        assert!(message.unwrap_or_default().starts_with("cannot read "), "with the viewer's message");
+        assert!(message.as_deref().unwrap_or("").starts_with("cannot read "), "with the viewer's message");
         assert!(panels[0].read(cx).is_dirty(cx), "nothing was restored");
         let view = panels[0].read(cx).text_view().unwrap().clone();
         assert_eq!(view.read(cx).text(cx).as_ref(), "QSfoglia reads anything.\nSecond line.\n", "the edit is kept");
+        assert!(message.unwrap_or_default().ends_with("; Discard changes again drops the edit"), "and says what a second Discard does");
         window.click("close-cancel", cx);
     })
     .unwrap();
     cx.run_until_parked();
     assert_eq!(cx.windows().len(), 1, "the window stays");
+    // Asked again and told twice: the edit is dropped as asked and the window goes.
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        settle_dialog(window, cx);
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("close-message").is_some(), "the first Discard of a new request reports the failure again");
+        window.click("close-discard", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(cx.windows().is_empty(), "the second Discard drops the edit and the window is gone");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The question follows the tabs as they stand, not the order the files were opened in: a tab dragged to the
-/// front is asked about first (C-012).
+
+/// The question follows the tabs as they stand, group by group and left to right, not the order the files
+/// were opened in: a tab moved to the front of its group, then one split off to the left, come first (C-012).
 #[gpui_kit::test]
 fn the_question_follows_the_tabs_order_not_the_opening_order(cx: &mut TestAppContext) {
     let (handle, workspace) = open_workspace(cx);
     let dir = scratch_dir("close-tab-order");
     let hello = copy_fixture("hello.txt", &dir);
     let utf16 = copy_fixture("utf16le.txt", &dir);
+    let latin = copy_fixture("latin1.txt", &dir);
     let mut vcx = VisualTestContext::from_window(handle, cx);
     let panels = cx
         .update_window(handle, |_, window, cx| {
-            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone()], window, cx));
+            workspace.update(cx, |w, cx| w.open_paths(&[hello.clone(), utf16.clone(), latin.clone()], window, cx));
             window.render_frame(cx);
             workspace.read(cx).panels(cx)
         })
@@ -943,24 +960,38 @@ fn the_question_follows_the_tabs_order_not_the_opening_order(cx: &mut TestAppCon
     cx.run_until_parked();
     type_into(cx, handle, &workspace, &hello, &panels[0], "Q");
     type_into(cx, handle, &workspace, &utf16, &panels[1], "Y");
-    cx.update_window(handle, |_, window, cx| {
-        // Move utf16le.txt's tab in front of hello.txt's, as a drag onto the first tab would.
-        let dock = workspace.read(cx).dock_area().clone();
-        fn first_tabs(node: &PaneNode) -> Option<NodeId> {
-            match node.kind() {
-                PaneRef::Tabs { .. } => Some(node.id()),
-                PaneRef::Split { children, .. } => children.iter().find_map(first_tabs),
-            }
+    type_into(cx, handle, &workspace, &latin, &panels[2], "Z");
+    fn first_tabs(node: &PaneNode) -> Option<NodeId> {
+        match node.kind() {
+            PaneRef::Tabs { .. } => Some(node.id()),
+            PaneRef::Split { children, .. } => children.iter().find_map(first_tabs),
         }
+    }
+    let order = |workspace: &Entity<Workspace>, cx: &gpui_kit::App| -> Vec<String> {
+        workspace.read(cx).panels_in_tab_order(cx).iter().map(|p| p.read(cx).info().name.clone()).collect()
+    };
+    cx.update_window(handle, |_, window, cx| {
+        let dock = workspace.read(cx).dock_area().clone();
         let node = first_tabs(dock.read(cx).layout(DockPlacement::Center).expect("the centre layout").root()).expect("a tab group");
+        // utf16le.txt's tab in front of hello.txt's, as a drag onto the first tab would put it.
         dock.update(cx, |dock, cx| {
             dock.move_panel(PanelId::from(panels[1].entity_id()), InsertTarget::Tabs { node, ix: Some(0), activate: true }, window, cx)
         });
         window.render_frame(cx);
-        let order: Vec<String> = workspace.read(cx).panels_in_tab_order(cx).iter().map(|p| p.read(cx).info().name.clone()).collect();
-        assert_eq!(order, ["utf16le.txt", "hello.txt"], "the tabs as they stand");
+        assert_eq!(order(&workspace, cx), ["utf16le.txt", "hello.txt", "latin1.txt"], "the tabs as they stand");
+        // latin1.txt split off to the left of the group: its own group comes first of all.
+        dock.update(cx, |dock, cx| {
+            dock.move_panel(
+                PanelId::from(panels[2].entity_id()),
+                InsertTarget::Split { node, placement: Placement::Left, size: None },
+                window,
+                cx,
+            )
+        });
+        window.render_frame(cx);
+        assert_eq!(order(&workspace, cx), ["latin1.txt", "utf16le.txt", "hello.txt"], "group by group, left to right");
         let opened: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
-        assert_eq!(opened, ["hello.txt", "utf16le.txt"], "the opening order is unchanged");
+        assert_eq!(opened, ["hello.txt", "utf16le.txt", "latin1.txt"], "the opening order is unchanged");
     })
     .unwrap();
     cx.run_until_parked();
@@ -968,11 +999,89 @@ fn the_question_follows_the_tabs_order_not_the_opening_order(cx: &mut TestAppCon
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         let (title, _, more, _) = closing_dialog(window, cx);
-        assert_eq!(title, "Save changes to “utf16le.txt”?", "the first tab as the tabs stand");
-        assert_eq!(more.as_deref(), Some("1 more file has unsaved changes"));
+        assert_eq!(title, "Save changes to “latin1.txt”?", "the first tab as the tabs stand");
+        assert_eq!(more.as_deref(), Some("2 more files have unsaved changes"));
         window.click("close-cancel", cx);
     })
     .unwrap();
     cx.run_until_parked();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Enter is Save: on the last modified tab it writes the file and the window goes; on a tab whose save is
+/// refused the dialog stays with the message, a second Enter too (C-012).
+#[gpui_kit::test]
+fn enter_is_save_and_a_refused_enter_keeps_the_dialog(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-enter");
+    let latin = copy_fixture("latin1.txt", &dir);
+    let hello = copy_fixture("hello.txt", &dir);
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[latin.clone(), hello.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &latin, &panels[0], "€");
+    type_into(cx, handle, &workspace, &hello, &panels[1], "Q");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, _, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “latin1.txt”?");
+        window.press("enter", cx);
+        window.render_frame(cx);
+        let (title, _, _, message) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “latin1.txt”?", "a refused Enter keeps the dialog on the tab");
+        assert_eq!(message.as_deref(), Some("Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding"));
+        window.press("enter", cx);
+        window.render_frame(cx);
+        let (_, _, _, message) = closing_dialog(window, cx);
+        assert!(message.is_some(), "and a second Enter too");
+        // Discard the refused tab: the dialog moves to hello.txt, where Enter saves and closes the window.
+        window.click("close-discard", cx);
+        window.render_frame(cx);
+        let (title, _, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&hello).unwrap(), b"QSfoglia reads anything.\nSecond line.\n", "Enter saved");
+    assert_eq!(std::fs::read(&latin).unwrap(), fixture_bytes("latin1.txt"), "the refused tab's file untouched");
+    assert!(cx.windows().is_empty(), "the last modified tab saved: the window is gone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file opened by a relative path shows its folder as it stands on disk, absolute (C-012).
+#[gpui_kit::test]
+fn a_relative_path_shows_its_absolute_folder(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    // Relative to the crate root, where cargo runs the tests; nothing is written (Cancel).
+    let relative = PathBuf::from("tests").join("fixtures").join("hello.txt");
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[relative.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &relative, &panels[0], "Q");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, folder, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        let expected = std::env::current_dir().unwrap().join("tests").join("fixtures");
+        assert_eq!(folder, expected.display().to_string(), "the folder is absolute");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&relative).unwrap(), fixture_bytes("hello.txt"), "nothing written");
 }
