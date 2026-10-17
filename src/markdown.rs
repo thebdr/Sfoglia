@@ -101,9 +101,7 @@ impl Outline {
 
     /// The heading a fragment names, by slug, the fragment taken as written or slugified.
     pub fn heading_for_fragment(&self, fragment: &str) -> Option<&Heading> {
-        let wanted = fragment.trim_start_matches('#');
-        let slug = slugify(wanted);
-        self.headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug)
+        heading_for_fragment(&self.headings, fragment)
     }
 
     /// `Markdown, N blocks, H headings`.
@@ -487,6 +485,87 @@ fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
     edits
 }
 
+/// The heading a fragment names among `headings`, by slug, the fragment taken as written or slugified.
+pub fn heading_for_fragment<'a>(headings: &'a [Heading], fragment: &str) -> Option<&'a Heading> {
+    let wanted = fragment.trim_start_matches('#');
+    let slug = slugify(wanted);
+    headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug)
+}
+
+/// The `#` headings of `source` by one pass over its lines, fenced code skipped: for a text too long
+/// to parse, where a fragment link still has to find its heading. Underlined headings are not seen.
+pub fn quick_headings(source: &str) -> Vec<Heading> {
+    let mut headings = Vec::new();
+    let mut slugs: Vec<String> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    let mut offset = 0;
+    for (ix, line) in source.split_inclusive('\n').enumerate() {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim_start_matches(' ');
+        let indent = body.len() - trimmed.len();
+        if indent <= 3 {
+            if let Some((ch, len)) = fence_of(trimmed) {
+                match fence {
+                    None => fence = Some((ch, len)),
+                    Some((open, open_len)) if open == ch && len >= open_len && trimmed[len..].trim().is_empty() => fence = None,
+                    Some(_) => {}
+                }
+            } else if fence.is_none()
+                && let Some((level, text)) = atx_heading(trimmed)
+            {
+                let slug = unique_slug(&text, &mut slugs);
+                headings.push(Heading { level, text, slug, span: offset..offset + body.len(), line: ix + 1 });
+            }
+        }
+        offset += line.len();
+    }
+    headings
+}
+
+/// A fence opener or closer: the run of three or more backticks or tildes the line starts with.
+fn fence_of(line: &str) -> Option<(char, usize)> {
+    let ch = line.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = line.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then_some((ch, len))
+}
+
+/// `## Text ##` as a level and the text, the closing run of `#` and inline tags dropped; the slug
+/// drops the rest of the markup itself.
+fn atx_heading(line: &str) -> Option<(u8, String)> {
+    let level = line.chars().take_while(|c| *c == '#').count();
+    if level == 0 || level > 6 {
+        return None;
+    }
+    let rest = &line[level..];
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let mut text = rest.trim();
+    let without = text.trim_end_matches('#');
+    if without.len() != text.len() && (without.is_empty() || without.ends_with([' ', '\t'])) {
+        text = without.trim_end();
+    }
+    Some((level as u8, strip_inline_tags(text)))
+}
+
+/// Inline HTML tags dropped, as the parser's heading text has none.
+fn strip_inline_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Where a link goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -773,6 +852,23 @@ mod tests {
         assert_eq!(shown, "| ![x](a%7Cb.png) | b |\n| --- | --- |\n\n[x]: a|b.png\n");
         assert_eq!(images(&shown), vec!["x|a%7Cb.png"]);
         assert_eq!(outline(&shown).blocks[0].text, "x | b (0 rows)");
+    }
+
+    #[test]
+    fn quick_headings_match_the_outline() {
+        // The line scan a text past the budget gets finds the same `#` headings as the parser, slugs and lines
+        // alike, and skips a `#` line inside a fence, a closing run of `#` and inline tags.
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/guide.md")).unwrap();
+        let quick: Vec<(u8, String, usize)> = quick_headings(&source).iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
+        let parsed: Vec<(u8, String, usize)> = outline(&source).headings.iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
+        assert_eq!(quick, parsed);
+        let tricky = "# A\n\n```\n# not one\n```\n\n## B ##\n\n### C#\n\n#### <a name=\"d\"></a> D\n\n~~~~\n```\n# still code\n~~~~\n\n##### E\n#NotHeading\n    # indented\n";
+        let found = quick_headings(tricky);
+        let quick: Vec<(u8, &str, &str, usize)> = found.iter().map(|h| (h.level, h.text.as_str(), h.slug.as_str(), h.line)).collect();
+        assert_eq!(quick, vec![(1, "A", "a", 1), (2, "B", "b", 7), (3, "C#", "c", 9), (4, "D", "d", 11), (5, "E", "e", 18)]);
+        let parsed: Vec<(u8, String, usize)> = outline(tricky).headings.iter().map(|h| (h.level, h.slug.clone(), h.line)).collect();
+        assert_eq!(quick.iter().map(|(l, _, s, n)| (*l, s.to_string(), *n)).collect::<Vec<_>>(), parsed);
+        assert_eq!(heading_for_fragment(&found, "#C").map(|h| h.line), Some(9));
     }
 
     #[test]

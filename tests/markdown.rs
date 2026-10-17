@@ -380,6 +380,13 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
         assert_eq!(label(window, "markdown-message"), "at Section 20");
         let editor = other.read(cx).text_view().read(cx).editor().clone();
         assert_eq!(editor.read(cx).cursor_position(), Position::new(80, 0));
+        // Two lines typed above it move the heading: the fragment follows the text as edited (line 83).
+        let edited = format!("intro\n\n{}", std::fs::read_to_string(&b).unwrap());
+        editor.update(cx, |editor, cx| editor.set_value(edited, window, cx));
+        other.update(cx, |view, cx| view.reveal_heading("section-20", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Section 20");
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(82, 0));
     })
     .unwrap();
     std::fs::remove_dir_all(&folder).ok();
@@ -390,7 +397,7 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
     // Past 2 MB the outline and the renderer's parse would take seconds on the window thread: the file
     // opens on its raw text with the status row saying so, and Ctrl+Shift+D keeps it there.
     let big = scratch("big.md");
-    let mut text = String::from("# Big\n\n");
+    let mut text = String::from("# Big\n\n## Target\n\n");
     let mut n = 0;
     while text.len() < 2_600_000 {
         text.push_str(&format!("A paragraph of text in the big file, number {n}, long enough.\n\n"));
@@ -412,6 +419,11 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         assert!(view.read(cx).raw_shown(), "the toggle keeps the text");
         assert_eq!(label(window, "markdown-message"), message);
         assert_eq!(view.read(cx).outline().blocks.len(), 0, "no outline is built for it");
+        // A fragment into the raw text past the budget still finds its heading, by a scan of the lines.
+        view.update(cx, |view, cx| view.reveal_heading("target", window, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "at Target");
+        assert_eq!(view.read(cx).text_view().read(cx).editor().read(cx).cursor_position(), Position::new(2, 0));
     })
     .unwrap();
     // Shrunk on disk and reloaded, the text fits again and the next toggle renders it; grown past the budget
@@ -444,6 +456,13 @@ fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
         let message = format!("{:.1} MB of Markdown opens as text: the rendered view is kept for files under 2 MB", grown.len() as f64 / (1024.0 * 1024.0));
         assert_eq!(label(window, "markdown-message"), message);
         assert_eq!(label(window, "markdown-summary"), format!("Markdown, {:.1} MB", grown.len() as f64 / (1024.0 * 1024.0)));
+        // Cut below the budget in the editor, the next toggle renders it and the hint is back.
+        editor.update(cx, |editor, cx| editor.set_value("# Small\n\nagain\n".to_string(), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown(), "the cut text renders");
+        assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the text, a click follows a link");
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 1 heading");
     })
     .unwrap();
     std::fs::remove_file(&big).ok();

@@ -181,6 +181,8 @@ impl MarkdownView {
         let line = self.text.read(cx).editor().read(cx).cursor_position().line as usize + 1;
         self.render_source(source, cx);
         self.raw_shown = false;
+        // Back to the rendered side: the hint again, whatever the raw side said last (the budget message included).
+        self.status = String::new();
         if let Some(span) = self.outline.top_block_at_line(line).and_then(|ix| self.outline.top_block(ix)).map(|b| b.span.clone()) {
             self.reveal_source(span, cx);
         }
@@ -269,9 +271,20 @@ impl MarkdownView {
     }
 
     /// Scroll the rendered view to the heading `fragment` names, or say there is none; while the raw
-    /// text shows, the cursor goes to the heading's line instead, so the next toggle lands there too.
+    /// text shows, the cursor goes to the heading's line in the text as it stands (edited, or past the
+    /// budget and so never parsed: then by a scan of its lines), so the next toggle lands there too.
     pub fn reveal_heading(&mut self, fragment: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let heading = self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone(), h.line));
+        let heading = if self.raw_shown {
+            let source = Self::source_of(&self.text, cx);
+            let headings = if source.len() > MAX_RENDERED_BYTES {
+                markdown::quick_headings(&source)
+            } else {
+                markdown::outline(&source).headings
+            };
+            markdown::heading_for_fragment(&headings, fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))
+        } else {
+            self.outline.heading_for_fragment(fragment).map(|h| (h.span.clone(), h.text.clone(), h.line))
+        };
         match heading {
             Some((span, text, line)) => {
                 self.status = format!("at {text}");
