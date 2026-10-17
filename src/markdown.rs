@@ -705,7 +705,9 @@ fn data_url(rest: &str) -> Option<(String, Vec<u8>)> {
     let mime = parts.next().unwrap_or("").trim();
     let mime = if mime.is_empty() { "text/plain".to_string() } else { mime.to_ascii_lowercase() };
     let base64 = parts.any(|part| part.trim().eq_ignore_ascii_case("base64"));
-    let bytes = if base64 { decode_base64(data)? } else { percent_decode(data).into_bytes() };
+    // Percent-encoding comes off first, as the data URL rules say: a reference image's address written back
+    // carries a control character as `%09`.
+    let bytes = if base64 { decode_base64(&percent_decode(data))? } else { percent_decode(data).into_bytes() };
     Some((mime, bytes))
 }
 
@@ -1074,5 +1076,19 @@ mod tests {
         assert_eq!(decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
         assert_eq!(decode_base64("aGVsbG8"), Some(b"hello".to_vec()));
         assert_eq!(decode_base64("aGV sbG8=\n"), Some(b"hello".to_vec()));
+        // A control character percent-encoded inside the base64 (a reference image's address written back)
+        // is decoded first, as the data URL rules say, so the image still decodes.
+        let tabbed = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ%09AAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+        match image_source(folder, tabbed) {
+            ImageSrc::Data { bytes, .. } => assert_eq!(bytes.len(), 70),
+            other => panic!("{other:?}"),
+        }
+        let by_reference = prepare("![j][e]\n\n[e]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ\tAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==>\n").text;
+        let url = by_reference.split("](").nth(1).unwrap().split(')').next().unwrap().to_string();
+        assert!(url.contains("%09"), "{by_reference}");
+        match image_source(folder, &url) {
+            ImageSrc::Data { bytes, .. } => assert_eq!(bytes.len(), 70),
+            other => panic!("{other:?}"),
+        }
     }
 }
