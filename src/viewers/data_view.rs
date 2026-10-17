@@ -530,6 +530,7 @@ impl Render for DataView {
                                         .test_support()
                                         .role(Role::Row)
                                         .aria_label(Self::row_label(tree, node, marked))
+                                        .w_full()
                                         .h(px(24.))
                                         .px_3()
                                         .gap_2()
@@ -540,40 +541,51 @@ impl Render for DataView {
                                             this.select_row(row, ScrollStrategy::Top, cx);
                                             this.toggle(node, cx);
                                         }))
-                                        .child(div().w(px(16. * n.depth as f32)).flex_shrink_0())
+                                        // The key column holds the indent, the glyph and the key, so the type
+                                        // and value columns line up at every depth; a mark hugs its text.
                                         .child(
-                                            div()
-                                                .id(("data-glyph", row))
-                                                .test_support()
-                                                .w(px(16.))
-                                                .flex_shrink_0()
-                                                .text_color(muted)
-                                                .child(glyph)
-                                                .when(container, |glyph| {
-                                                    glyph.on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |this, _, _, cx| {
-                                                            cx.stop_propagation();
-                                                            this.toggle(node, cx);
-                                                        }),
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .w(px(260.))
+                                            h_flex()
+                                                .w(px(300.))
                                                 .flex_shrink_0()
                                                 .overflow_hidden()
-                                                .when(marked, |key| key.bg(marked_bg).text_color(marked_fg).rounded_sm())
-                                                .child(n.key.clone()),
+                                                .child(div().w(px(16. * n.depth as f32)).flex_shrink_0())
+                                                .child(
+                                                    div()
+                                                        .id(("data-glyph", row))
+                                                        .test_support()
+                                                        .w(px(16.))
+                                                        .flex_shrink_0()
+                                                        .text_color(muted)
+                                                        .child(glyph)
+                                                        .when(container, |glyph| {
+                                                            glyph.on_mouse_down(
+                                                                MouseButton::Left,
+                                                                cx.listener(move |this, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    this.toggle(node, cx);
+                                                                }),
+                                                            )
+                                                        }),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px_1()
+                                                        .rounded_sm()
+                                                        .overflow_hidden()
+                                                        .when(marked, |key| key.bg(marked_bg).text_color(marked_fg))
+                                                        .child(n.key.clone()),
+                                                ),
                                         )
                                         .child(div().w(px(90.)).flex_shrink_0().text_color(muted).child(n.kind.label()))
                                         .child(
-                                            div()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .when(marked, |value| value.bg(marked_bg).text_color(marked_fg).rounded_sm())
-                                                .child(preview(&n.value)),
+                                            h_flex().flex_1().overflow_hidden().child(
+                                                div()
+                                                    .px_1()
+                                                    .rounded_sm()
+                                                    .overflow_hidden()
+                                                    .when(marked, |value| value.bg(marked_bg).text_color(marked_fg))
+                                                    .child(preview(&n.value)),
+                                            ),
                                         )
                                 })
                                 .collect()

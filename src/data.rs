@@ -134,16 +134,18 @@ pub struct Tree {
 impl Tree {
     /// Parse `text` as `format`.
     pub fn parse(format: Format, text: &str) -> Result<Tree, ParseError> {
-        let mut nodes = Vec::new();
-        match format {
-            Format::Json => parse_json(text, &mut nodes)?,
-            Format::JsonLines => parse_json_lines(text, &mut nodes)?,
-            Format::Xml => parse_xml(text, &mut nodes)?,
-            Format::Yaml => parse_yaml(text, &mut nodes)?,
-            Format::Toml => parse_toml(text, &mut nodes)?,
-            Format::Ini => parse_ini(text, &mut nodes)?,
-        }
-        Ok(Tree { format, nodes })
+        on_deep_stack(|| {
+            let mut nodes = Vec::new();
+            match format {
+                Format::Json => parse_json(text, &mut nodes)?,
+                Format::JsonLines => parse_json_lines(text, &mut nodes)?,
+                Format::Xml => parse_xml(text, &mut nodes)?,
+                Format::Yaml => parse_yaml(text, &mut nodes)?,
+                Format::Toml => parse_toml(text, &mut nodes)?,
+                Format::Ini => parse_ini(text, &mut nodes)?,
+            }
+            Ok(Tree { format, nodes })
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -313,6 +315,125 @@ fn float_text(value: f64) -> String {
     format!("{value:?}")
 }
 
+/// The stack the parsers get. roxmltree, saphyr and toml recurse per level of nesting, and a
+/// debug build of roxmltree overflows the window thread's megabyte at six hundred levels, so
+/// every parse and pretty-print runs on a scoped thread with this reservation (address space,
+/// committed only as used).
+const DEEP_STACK: usize = 256 * 1024 * 1024;
+
+fn on_deep_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(DEEP_STACK)
+            .spawn_scoped(scope, work)
+            .expect("a thread for the parser")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// How deep any format may nest. The parsers that recurse per level (roxmltree, saphyr, toml) are
+/// not given a pathological file: the text is scanned for its bracket or tag nesting first.
+const MAX_DEPTH: usize = 200;
+
+fn too_deep(text: &str, offset: usize, what: &str) -> ParseError {
+    let (line, column) = line_column(text, offset);
+    ParseError { line, column, message: format!("{what} nested deeper than {MAX_DEPTH} levels") }
+}
+
+/// Refuse `text` when its `[` and `{` nest deeper than `MAX_DEPTH` outside quotes and comments
+/// (`#` to the end of the line, as YAML and TOML write them).
+fn check_bracket_depth(text: &str) -> Result<(), ParseError> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' && quote == b'"' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(too_deep(text, i, "values"));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Refuse `text` when its elements nest deeper than `MAX_DEPTH`; comments, CDATA, processing
+/// instructions and the DOCTYPE are skipped, quotes inside tags honoured.
+fn check_xml_depth(text: &str) -> Result<(), ParseError> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        if rest.starts_with("<!--") {
+            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with("<![CDATA[") {
+            i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
+        } else if rest.starts_with("<?") {
+            i += rest.find("?>").map_or(rest.len(), |e| e + 2);
+        } else if rest.starts_with("<!DOCTYPE") {
+            i += doctype_end(rest).unwrap_or(rest.len());
+        } else if rest.starts_with("</") {
+            depth = depth.saturating_sub(1);
+            i += rest.find('>').map_or(rest.len(), |e| e + 1);
+        } else {
+            // A start tag: find its `>` outside quotes; `/>` closes the element at once.
+            let start = i;
+            let mut j = i + 1;
+            let mut self_closing = false;
+            while j < bytes.len() {
+                match bytes[j] {
+                    quote @ (b'"' | b'\'') => {
+                        j += 1;
+                        while j < bytes.len() && bytes[j] != quote {
+                            j += 1;
+                        }
+                    }
+                    b'>' => {
+                        self_closing = j > 0 && bytes[j - 1] == b'/';
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if !self_closing {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(too_deep(text, start, "elements"));
+                }
+            }
+            i = j + 1;
+        }
+    }
+    Ok(())
+}
+
 /// The 1-based line and column of a byte offset.
 fn line_column(text: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(text.len());
@@ -361,80 +482,78 @@ impl JsonScan<'_> {
         self.bytes.get(self.pos).copied().unwrap_or(0)
     }
 
+    /// Scan one value with its subtree into the arena. Containers are kept on an explicit
+    /// stack, so a file nested a hundred thousand levels deep costs no call frames.
     fn value(&mut self, nodes: &mut Vec<Node>, key: String, depth: u32) {
-        self.skip_whitespace();
-        match self.peek() {
-            b'{' => {
-                self.pos += 1;
-                let ix = push(nodes, depth, key, Kind::Object, String::new());
-                let mut count = 0;
-                loop {
-                    self.skip_whitespace();
-                    match self.peek() {
-                        b'}' => {
-                            self.pos += 1;
-                            break;
-                        }
-                        b',' => {
-                            self.pos += 1;
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    let name = self.string();
-                    self.skip_whitespace();
-                    self.pos += 1; // the colon
-                    self.value(nodes, name, depth + 1);
-                    count += 1;
-                }
-                close(nodes, ix, count);
-            }
-            b'[' => {
-                self.pos += 1;
-                let ix = push(nodes, depth, key, Kind::Array, String::new());
-                let mut count = 0;
-                loop {
-                    self.skip_whitespace();
-                    match self.peek() {
-                        b']' => {
-                            self.pos += 1;
-                            break;
-                        }
-                        b',' => {
-                            self.pos += 1;
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    self.value(nodes, count.to_string(), depth + 1);
-                    count += 1;
-                }
-                close(nodes, ix, count);
-            }
-            b'"' => {
-                let text = self.string();
-                push(nodes, depth, key, Kind::String, text);
-            }
-            b't' => {
-                self.pos += 4;
-                push(nodes, depth, key, Kind::Boolean, "true".to_string());
-            }
-            b'f' => {
-                self.pos += 5;
-                push(nodes, depth, key, Kind::Boolean, "false".to_string());
-            }
-            b'n' => {
-                self.pos += 4;
-                push(nodes, depth, key, Kind::Null, "null".to_string());
-            }
-            _ => {
-                let start = self.pos;
-                while self.pos < self.bytes.len()
-                    && !matches!(self.bytes[self.pos], b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r')
-                {
+        // Open containers: the node index, whether it is an object, and its entries so far.
+        let mut open: Vec<(usize, bool, usize)> = Vec::new();
+        let mut key = key;
+        loop {
+            self.skip_whitespace();
+            let depth = depth + open.len() as u32;
+            match self.peek() {
+                b'{' => {
                     self.pos += 1;
+                    let ix = push(nodes, depth, key, Kind::Object, String::new());
+                    open.push((ix, true, 0));
                 }
-                push(nodes, depth, key, Kind::Number, self.text[start..self.pos].to_string());
+                b'[' => {
+                    self.pos += 1;
+                    let ix = push(nodes, depth, key, Kind::Array, String::new());
+                    open.push((ix, false, 0));
+                }
+                b'"' => {
+                    let text = self.string();
+                    push(nodes, depth, key, Kind::String, text);
+                }
+                b't' => {
+                    self.pos += 4;
+                    push(nodes, depth, key, Kind::Boolean, "true".to_string());
+                }
+                b'f' => {
+                    self.pos += 5;
+                    push(nodes, depth, key, Kind::Boolean, "false".to_string());
+                }
+                b'n' => {
+                    self.pos += 4;
+                    push(nodes, depth, key, Kind::Null, "null".to_string());
+                }
+                _ => {
+                    let start = self.pos;
+                    while self.pos < self.bytes.len()
+                        && !matches!(self.bytes[self.pos], b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r')
+                    {
+                        self.pos += 1;
+                    }
+                    push(nodes, depth, key, Kind::Number, self.text[start..self.pos].to_string());
+                }
+            }
+            // The next entry of the innermost open container, closing containers on the way.
+            loop {
+                let Some(&(ix, is_object, count)) = open.last() else { return };
+                self.skip_whitespace();
+                match self.peek() {
+                    b',' => {
+                        self.pos += 1;
+                    }
+                    b'}' | b']' => {
+                        self.pos += 1;
+                        close(nodes, ix, count);
+                        open.pop();
+                    }
+                    _ => {
+                        key = if is_object {
+                            let name = self.string();
+                            self.skip_whitespace();
+                            self.pos += 1; // the colon
+                            name
+                        } else {
+                            count.to_string()
+                        };
+                        open.last_mut().expect("an open container").2 += 1;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -466,7 +585,7 @@ impl JsonScan<'_> {
                         b'n' => out.push('\n'),
                         b'r' => out.push('\r'),
                         b't' => out.push('\t'),
-                        b'u' => out.push(self.unicode_escape()),
+                        b'u' => self.unicode_escape(&mut out),
                         _ => {}
                     }
                     start = self.pos;
@@ -478,19 +597,26 @@ impl JsonScan<'_> {
         out
     }
 
-    /// The four hex digits after `\u` (and a second escape for a surrogate pair), as a char.
-    fn unicode_escape(&mut self) -> char {
+    /// The four hex digits after `\u`, as a char; a high surrogate takes the low one that
+    /// follows, and stands as U+FFFD when none does (the next escape is then read on its own).
+    fn unicode_escape(&mut self, out: &mut String) {
         let first = self.hex4();
-        if (0xD800..=0xDBFF).contains(&first) && self.text[self.pos.min(self.text.len())..].starts_with("\\u") {
-            self.pos += 2;
-            let second = self.hex4();
-            if (0xDC00..=0xDFFF).contains(&second) {
-                let code = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
-                return char::from_u32(code).unwrap_or('\u{FFFD}');
+        if (0xD800..=0xDBFF).contains(&first) {
+            let after = self.pos.min(self.text.len());
+            if self.text[after..].starts_with("\\u") {
+                self.pos += 2;
+                let second = self.hex4();
+                if (0xDC00..=0xDFFF).contains(&second) {
+                    let code = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+                    out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
+                    return;
+                }
+                self.pos = after;
             }
-            return '\u{FFFD}';
+            out.push('\u{FFFD}');
+            return;
         }
-        char::from_u32(first).unwrap_or('\u{FFFD}')
+        out.push(char::from_u32(first).unwrap_or('\u{FFFD}'));
     }
 
     fn hex4(&mut self) -> u32 {
@@ -685,6 +811,7 @@ fn walk_yaml(value: &Yaml, nodes: &mut Vec<Node>, key: String, depth: u32) {
 }
 
 fn load_yaml(text: &str) -> Result<Vec<Yaml<'_>>, ParseError> {
+    check_bracket_depth(text)?;
     Yaml::load_from_str(text).map_err(|error| {
         let marker = error.marker();
         ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
@@ -790,6 +917,7 @@ fn walk_toml_value(value: &toml::Value, nodes: &mut Vec<Node>, key: String, dept
 }
 
 fn load_toml(text: &str) -> Result<toml::Table, ParseError> {
+    check_bracket_depth(text)?;
     text.parse().map_err(|error: toml::de::Error| {
         let (line, column) = error.span().map(|span| line_column(text, span.start)).unwrap_or((1, 1));
         ParseError { line, column, message: error.message().to_string() }
@@ -826,11 +954,14 @@ fn xml_children<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Vec<roxmltree:
         .collect()
 }
 
-fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
+fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<(), ParseError> {
     use roxmltree::NodeType;
     match node.node_type() {
         NodeType::Root => {}
         NodeType::Element => {
+            if depth as usize >= MAX_DEPTH {
+                return Err(too_deep(node.document().input_text(), node.range().start, "elements"));
+            }
             let ix = push(nodes, depth, xml_element_name(node), Kind::Element, String::new());
             let mut count = 0;
             let input = node.document().input_text();
@@ -845,10 +976,10 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
                 let end = nodes.len();
                 nodes[ix].end = end;
                 nodes[ix].value = text;
-                return;
+                return Ok(());
             }
             for child in children {
-                walk_xml(child, nodes, depth + 1);
+                walk_xml(child, nodes, depth + 1)?;
                 count += 1;
             }
             close(nodes, ix, count);
@@ -870,9 +1001,11 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) {
             push(nodes, depth, "processing-instruction()".to_string(), Kind::Instruction, pi.unwrap_or_default());
         }
     }
+    Ok(())
 }
 
 fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
+    check_xml_depth(text)?;
     let options = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
     roxmltree::Document::parse_with_options(text, options).map_err(|error| {
         let at = error.pos();
@@ -883,7 +1016,7 @@ fn load_xml(text: &str) -> Result<roxmltree::Document<'_>, ParseError> {
 fn parse_xml(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
     let document = load_xml(text)?;
     for child in document.root().children() {
-        walk_xml(child, nodes, 0);
+        walk_xml(child, nodes, 0)?;
     }
     Ok(())
 }
@@ -940,6 +1073,10 @@ fn parse_ini(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
 
 /// The pretty form of `text` in `format`, or why it does not parse.
 pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
+    on_deep_stack(|| pretty_on_this_stack(format, text))
+}
+
+fn pretty_on_this_stack(format: Format, text: &str) -> Result<String, ParseError> {
     match format {
         Format::Json => {
             check_json(text, 0)?;
@@ -1028,6 +1165,8 @@ fn doctype_end(text: &str) -> Option<usize> {
 }
 
 fn pretty_xml(text: &str) -> Result<String, ParseError> {
+    // The same walk as the tree's, so a file too deep for it is refused here too.
+    parse_xml(text, &mut Vec::new())?;
     let document = load_xml(text)?;
     let mut out = String::new();
     let (declaration, doctype) = xml_prolog(text);
@@ -1323,6 +1462,22 @@ mod tests {
         let escaped = Tree::parse(Format::Json, r#"["a\"b\\c\/d\n\u00e9\ud83d\ude00", "\u0041"]"#).unwrap();
         assert_eq!(escaped.nodes[1].value, "a\"b\\c/d\né😀");
         assert_eq!(escaped.nodes[2].value, "A");
+        // A high surrogate without its low one stands as U+FFFD, and the escape after it is read on its own.
+        let lone = Tree::parse(Format::Json, r#"["\uD800\u0041", "\uD800\uD83D\uDE00", "\uD800", "\uDC00A"]"#).unwrap();
+        let values: Vec<&str> = lone.nodes[1..].iter().map(|n| n.value.as_str()).collect();
+        assert_eq!(values, vec!["\u{FFFD}A", "\u{FFFD}😀", "\u{FFFD}", "\u{FFFD}A"]);
+        // Nesting costs no call frames: a hundred thousand levels build their arena on a small stack.
+        let deep = format!("{}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        let tree = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || Tree::parse(Format::Json, &deep).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(tree.len(), 100_001);
+        assert_eq!(tree.levels(), 100_001);
+        assert_eq!(tree.nodes[100_000].value, "1");
+        assert_eq!(tree.nodes[0].end, 100_001);
         let empty = Tree::parse(Format::Json, r#"{"a": [], "b": {}}"#).unwrap();
         assert_eq!(rows(&empty), vec![(0, "$", "object", "2 entries"), (1, "a", "array", "0 entries"), (1, "b", "object", "0 entries")]);
         // Duplicate keys are two nodes, as the file has them.
@@ -1699,6 +1854,41 @@ mod tests {
         assert_eq!((crlf.line, crlf.column), (4, 1));
         let crlf_toml = Tree::parse(Format::Toml, "a = 1\r\n[server\r\nhost = 1\r\n").unwrap_err();
         assert_eq!(crlf_toml.line, 2, "{crlf_toml}");
+    }
+
+    #[test]
+    fn deep_nesting_in_every_format_parses_or_is_refused_but_never_crashes() {
+        // The window's main thread has a megabyte of stack on Windows; each parser is called from a thread
+        // of that size and must come back with a tree or an error, however the input nests.
+        let cases: Vec<(Format, String)> = vec![
+            (Format::Json, format!("{}1{}", "[".repeat(50_000), "]".repeat(50_000))),
+            (Format::JsonLines, format!("{}1{}\n", "[".repeat(50_000), "]".repeat(50_000))),
+            (Format::Yaml, format!("{}1{}\n", "[".repeat(5_000), "]".repeat(5_000))),
+            (Format::Yaml, format!("{}1{}\n", "[".repeat(300), "]".repeat(300))),
+            (Format::Toml, format!("a = {}1{}\n", "[".repeat(5_000), "]".repeat(5_000))),
+            (Format::Toml, format!("a = {}1{}\n", "[".repeat(300), "]".repeat(300))),
+            (Format::Xml, format!("{}x{}", "<a>".repeat(20_000), "</a>".repeat(20_000))),
+            (Format::Xml, format!("{}x{}", "<a>".repeat(150), "</a>".repeat(150))),
+        ];
+        for (format, text) in cases {
+            let outcome = std::thread::Builder::new()
+                .stack_size(1024 * 1024)
+                .spawn(move || Tree::parse(format, &text).map(|tree| (tree.len(), tree.levels())).map_err(|e| e.to_string()))
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| panic!("{format:?} panicked"));
+            match (format, outcome) {
+                (Format::Json | Format::JsonLines, Ok((nodes, levels))) => assert!(nodes >= 50_001 && levels >= 50_001, "{format:?}: {nodes} nodes, {levels} levels"),
+                (Format::Xml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (150, 150)),
+                (Format::Xml, Err(error)) => assert_eq!(error, "line 1, column 601: elements nested deeper than 200 levels"),
+                (Format::Yaml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (151, 151)),
+                (Format::Yaml, Err(error)) => assert_eq!(error, "line 1, column 201: values nested deeper than 200 levels"),
+                (Format::Toml, Ok((nodes, levels))) => assert_eq!((nodes, levels), (152, 152)),
+                (Format::Toml, Err(error)) => assert_eq!(error, "line 1, column 205: values nested deeper than 200 levels"),
+                (_, Ok((nodes, levels))) => assert!(nodes > 0 && levels > 0, "{format:?}: {nodes} nodes, {levels} levels"),
+                (_, Err(error)) => assert!(error.contains("line "), "{format:?}: {error}"),
+            }
+        }
     }
 
     #[test]
