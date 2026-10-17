@@ -126,21 +126,9 @@ pub fn parse_options() -> ParseOptions {
     }
 }
 
-/// The outline of `source`.
-pub fn outline(source: &str) -> Outline {
-    let mut outline = Outline::default();
-    let Ok(root) = to_mdast(source, &parse_options()) else { return outline };
-    let Some(children) = root.children() else { return outline };
-    let mut slugs: Vec<String> = Vec::new();
-    for child in children {
-        walk(child, 0, source, &mut outline, &mut slugs);
-    }
-    outline
-}
-
-fn walk(node: &Node, depth: u32, source: &str, outline: &mut Outline, slugs: &mut Vec<String>) {
+fn walk(node: &Node, depth: u32, source: &str, lines: &LineIndex, outline: &mut Outline, slugs: &mut Vec<String>) {
     let span = span_of(node, source);
-    let line = line_of(source, span.start);
+    let line = lines.line_of(span.start);
     let push = |outline: &mut Outline, kind: Kind, text: String| {
         outline.blocks.push(Block { kind, depth, text, span: span.clone(), line });
     };
@@ -155,7 +143,7 @@ fn walk(node: &Node, depth: u32, source: &str, outline: &mut Outline, slugs: &mu
         Node::List(list) => {
             push(outline, Kind::List, if list.ordered { "ordered".to_string() } else { "unordered".to_string() });
             for item in &list.children {
-                walk(item, depth + 1, source, outline, slugs);
+                walk(item, depth + 1, source, lines, outline, slugs);
             }
         }
         Node::ListItem(item) => {
@@ -177,13 +165,13 @@ fn walk(node: &Node, depth: u32, source: &str, outline: &mut Outline, slugs: &mu
             };
             push(outline, Kind::ListItem, text);
             for child in rest {
-                walk(child, depth + 1, source, outline, slugs);
+                walk(child, depth + 1, source, lines, outline, slugs);
             }
         }
         Node::Blockquote(quote) => {
             push(outline, Kind::Quote, String::new());
             for child in &quote.children {
-                walk(child, depth + 1, source, outline, slugs);
+                walk(child, depth + 1, source, lines, outline, slugs);
             }
         }
         Node::Code(code) => push(outline, Kind::Code, code.lang.clone().unwrap_or_default()),
@@ -204,7 +192,7 @@ fn walk(node: &Node, depth: u32, source: &str, outline: &mut Outline, slugs: &mu
         Node::FootnoteDefinition(note) => {
             push(outline, Kind::Footnote, note.identifier.clone());
             for child in &note.children {
-                walk(child, depth + 1, source, outline, slugs);
+                walk(child, depth + 1, source, lines, outline, slugs);
             }
         }
         Node::Definition(definition) => push(outline, Kind::Definition, definition.identifier.clone()),
@@ -226,7 +214,6 @@ fn inline_text(nodes: &[Node]) -> String {
             Node::Image(image) => text.push_str(&image.alt),
             Node::ImageReference(image) => text.push_str(&image.alt),
             Node::Break(_) => text.push(' '),
-            Node::Html(html) => text.push_str(&html.value),
             Node::FootnoteReference(note) => {
                 text.push('[');
                 text.push_str(&note.identifier);
@@ -303,43 +290,6 @@ fn unique_slug(text: &str, slugs: &mut Vec<String>) -> String {
     slug
 }
 
-/// `![alt][id]` images written with a reference, rewritten as `![alt](url)` with the address their
-/// definition gives, since the renderer draws inline images only. The alt is copied as written
-/// (it is valid between `![` and `]` already), the dropped label's line break stays inside it and
-/// titles are left out, so no line moves and the outline still agrees with the editor line for line.
-pub fn resolve_image_references(source: &str) -> String {
-    let Ok(root) = to_mdast(source, &parse_options()) else { return source.to_string() };
-    let mut definitions: Vec<(String, String)> = Vec::new();
-    let mut references: Vec<(Range<usize>, String, ReferenceKind)> = Vec::new();
-    collect_images(&root, source, &mut definitions, &mut references);
-    if references.is_empty() {
-        return source.to_string();
-    }
-    let mut out = source.to_string();
-    references.sort_by_key(|(span, _, _)| std::cmp::Reverse(span.start));
-    for (span, identifier, kind) in references {
-        let Some((_, url)) = definitions.iter().find(|(id, _)| *id == identifier) else { continue };
-        let text = &source[span.clone()];
-        if !text.starts_with("![") || text.len() < 3 {
-            continue;
-        }
-        let alt_end = match kind {
-            ReferenceKind::Full => text.rfind("][").unwrap_or(text.len() - 1),
-            ReferenceKind::Collapsed => text.len() - 3,
-            ReferenceKind::Shortcut => text.len() - 1,
-        };
-        let alt = &text[2..alt_end];
-        let kept_breaks = "\n".repeat(text[alt_end..].matches('\n').count());
-        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>', '\n']) {
-            format!("<{}>", url.replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A"))
-        } else {
-            url.clone()
-        };
-        out.replace_range(span, &format!("![{alt}{kept_breaks}]({destination})"));
-    }
-    out
-}
-
 fn collect_images(
     node: &Node,
     source: &str,
@@ -375,6 +325,168 @@ fn file_url_path(rest: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// The byte offsets where lines start, so a block's line is a binary search and not a rescan of the
+/// text from the top for every block.
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(source: &str) -> Self {
+        let mut starts = vec![0];
+        starts.extend(source.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(ix, _)| ix + 1));
+        Self { starts }
+    }
+
+    /// The 1-based line `offset` is on.
+    fn line_of(&self, offset: usize) -> usize {
+        self.starts.partition_point(|&start| start <= offset).max(1)
+    }
+}
+
+/// The outline of `source`.
+pub fn outline(source: &str) -> Outline {
+    match to_mdast(source, &parse_options()) {
+        Ok(root) => outline_from(&root, source),
+        Err(_) => Outline::default(),
+    }
+}
+
+fn outline_from(root: &Node, source: &str) -> Outline {
+    let mut outline = Outline::default();
+    let Some(children) = root.children() else { return outline };
+    let lines = LineIndex::new(source);
+    let mut slugs: Vec<String> = Vec::new();
+    for child in children {
+        walk(child, 0, source, &lines, &mut outline, &mut slugs);
+    }
+    outline
+}
+
+/// The source as the renderer gets it, and its outline.
+pub struct Prepared {
+    pub text: String,
+    pub outline: Outline,
+}
+
+/// Prepare `source` for the renderer: images written with a reference become inline and fenced code
+/// names its grammar as the kit knows it, both without moving a line, and the outline is built on the
+/// result. One parse when nothing needs rewriting, two when something does.
+pub fn prepare(source: &str) -> Prepared {
+    let Ok(root) = to_mdast(source, &parse_options()) else {
+        return Prepared { text: source.to_string(), outline: Outline::default() };
+    };
+    let mut edits = image_edits(&root, source);
+    collect_fences(&root, source, &mut edits);
+    if edits.is_empty() {
+        return Prepared { text: source.to_string(), outline: outline_from(&root, source) };
+    }
+    let text = apply_edits(source, edits);
+    let outline = outline(&text);
+    Prepared { text, outline }
+}
+
+fn apply_edits(source: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
+    let mut out = source.to_string();
+    edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    for (span, replacement) in edits {
+        out.replace_range(span, &replacement);
+    }
+    out
+}
+
+/// The grammar a fenced code block's info string names, as C-005 names grammars: its first word, in
+/// any case, taken as a grammar name (`Rust`), a file extension (`py`, `yml`) or a shell alias.
+pub fn grammar_for_info(info: &str) -> Option<&'static str> {
+    let token = info.trim().split([' ', '\t', ',', '{', ';', ':']).next().unwrap_or("").trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(name) = crate::text::LANGUAGES.iter().find(|name| **name == token) {
+        return Some(name);
+    }
+    match token.as_str() {
+        "shell" | "shell-session" | "console" | "sh" | "zsh" | "bash" | "dockerfile" => return Some("bash"),
+        "c++" => return Some("cpp"),
+        "c#" => return Some("csharp"),
+        "xml" | "svg" | "htm" | "vue" => return Some("html"),
+        "mk" | "makefile" => return Some("make"),
+        _ => {}
+    }
+    crate::text::language_for(&format!("f.{token}"))
+}
+
+/// The edits that make every fenced code block name its grammar as the kit knows it: the info string
+/// is replaced by the grammar name on the fence's own line, so no line moves.
+fn collect_fences(node: &Node, source: &str, edits: &mut Vec<(Range<usize>, String)>) {
+    if let Node::Code(code) = node
+        && let Some(lang) = &code.lang
+    {
+        let span = span_of(node, source);
+        let line_end = source[span.start..].find('\n').map_or(source.len(), |ix| span.start + ix);
+        let line = &source[span.start..line_end];
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let fence = &line[indent..];
+        let fence_char = fence.chars().next();
+        if matches!(fence_char, Some('`') | Some('~')) {
+            let fence_len = fence.chars().take_while(|c| Some(*c) == fence_char).count();
+            let info_start = span.start + indent + fence_len;
+            let rest = &source[info_start..line_end];
+            let leading = rest.len() - rest.trim_start().len();
+            if let Some(name) = grammar_for_info(lang)
+                && rest.trim() != name
+            {
+                edits.push((info_start + leading..line_end, name.to_string()));
+            }
+        }
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_fences(child, source, edits);
+        }
+    }
+}
+
+/// `![alt][id]` images written with a reference, rewritten as `![alt](url)` with the address their
+/// definition gives, since the renderer draws inline images only. The alt is copied as written
+/// (it is valid between `![` and `]` already), the dropped label's line break stays inside it and
+/// titles are left out, so no line moves and the outline still agrees with the editor line for line.
+pub fn resolve_image_references(source: &str) -> String {
+    let Ok(root) = to_mdast(source, &parse_options()) else { return source.to_string() };
+    let edits = image_edits(&root, source);
+    if edits.is_empty() { source.to_string() } else { apply_edits(source, edits) }
+}
+
+fn image_edits(root: &Node, source: &str) -> Vec<(Range<usize>, String)> {
+    let mut definitions: Vec<(String, String)> = Vec::new();
+    let mut references: Vec<(Range<usize>, String, ReferenceKind)> = Vec::new();
+    collect_images(root, source, &mut definitions, &mut references);
+    let mut edits = Vec::new();
+    for (span, identifier, kind) in references {
+        let Some((_, url)) = definitions.iter().find(|(id, _)| *id == identifier) else { continue };
+        let text = &source[span.clone()];
+        if !text.starts_with("![") || text.len() < 3 {
+            continue;
+        }
+        let alt_end = match kind {
+            ReferenceKind::Full => text.rfind("][").unwrap_or(text.len() - 1),
+            ReferenceKind::Collapsed => text.len() - 3,
+            ReferenceKind::Shortcut => text.len() - 1,
+        };
+        let alt = &text[2..alt_end];
+        let kept_breaks = "\n".repeat(text[alt_end..].matches('\n').count());
+        // A `|` would split a table cell, so it travels percent-encoded, as any address may.
+        let url = url.replace('|', "%7C");
+        let destination = if url.is_empty() || url.contains([' ', '(', ')', '<', '>', '\n']) {
+            format!("<{}>", url.replace('<', "%3C").replace('>', "%3E").replace('\n', "%0A"))
+        } else {
+            url
+        };
+        edits.push((span, format!("![{alt}{kept_breaks}]({destination})")));
+    }
+    edits
+}
+
 /// Where a link goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -395,7 +507,7 @@ pub fn link_target(folder: &Path, href: &str) -> LinkTarget {
         return LinkTarget::None;
     }
     if let Some(fragment) = href.strip_prefix('#') {
-        return if fragment.is_empty() { LinkTarget::None } else { LinkTarget::Heading(fragment.to_string()) };
+        return if fragment.is_empty() { LinkTarget::None } else { LinkTarget::Heading(percent_decode(fragment)) };
     }
     if let Some(rest) = scheme_rest(href) {
         // `file:` addresses are files like any other; everything else goes outside.
@@ -429,7 +541,7 @@ fn scheme_rest(href: &str) -> Option<&str> {
 
 fn split_fragment(href: &str) -> (String, Option<String>) {
     match href.split_once('#') {
-        Some((path, fragment)) => (path.to_string(), (!fragment.is_empty()).then(|| fragment.to_string())),
+        Some((path, fragment)) => (path.to_string(), (!fragment.is_empty()).then(|| percent_decode(fragment))),
         None => (href.to_string(), None),
     }
 }
@@ -655,6 +767,59 @@ mod tests {
         assert!(shown.contains("![dot too](dot.png)"), "{shown}");
         assert_eq!(shown.lines().count(), plain.lines().count());
         assert_eq!(resolve_image_references("# Plain\n\ntext\n"), "# Plain\n\ntext\n");
+        // A `|` in the address would split a table cell: it travels percent-encoded, and the cell keeps its image.
+        let table = "| ![x] | b |\n| --- | --- |\n\n[x]: a|b.png\n";
+        let shown = resolve_image_references(table);
+        assert_eq!(shown, "| ![x](a%7Cb.png) | b |\n| --- | --- |\n\n[x]: a|b.png\n");
+        assert_eq!(images(&shown), vec!["x|a%7Cb.png"]);
+        assert_eq!(outline(&shown).blocks[0].text, "x | b (0 rows)");
+    }
+
+    #[test]
+    fn code_fences_name_their_grammar() {
+        for (info, grammar) in [
+            ("rust", Some("rust")),
+            ("Rust", Some("rust")),
+            ("rust,ignore", Some("rust")),
+            ("rust {.class}", Some("rust")),
+            ("JSON", Some("json")),
+            ("Python", Some("python")),
+            ("py", Some("python")),
+            ("rs", Some("rust")),
+            ("yml", Some("yaml")),
+            ("shell", Some("bash")),
+            ("zsh", Some("bash")),
+            ("console", Some("bash")),
+            ("sh", Some("bash")),
+            ("c++", Some("cpp")),
+            ("c#", Some("csharp")),
+            ("xml", Some("html")),
+            ("js", Some("javascript")),
+            ("", None),
+            ("   ", None),
+            ("zzz", None),
+            ("text", None),
+        ] {
+            assert_eq!(grammar_for_info(info), grammar, "{info:?}");
+        }
+        // The fence line names the grammar as the kit knows it (the space after the fence kept as
+        // written); an unknown word and an indented block stay as they are; no line moves; the outline
+        // says the grammar.
+        let source = "# Code\n\n```rust,ignore\nfn x() {}\n```\n\n~~~ Python {.x}\ncode\n~~~\n\n- item\n\n  ```Shell\n  ls\n  ```\n\n```zzz\nq\n```\n\n    indented\n";
+        let prepared = prepare(source);
+        assert_eq!(
+            prepared.text,
+            "# Code\n\n```rust\nfn x() {}\n```\n\n~~~ python\ncode\n~~~\n\n- item\n\n  ```bash\n  ls\n  ```\n\n```zzz\nq\n```\n\n    indented\n"
+        );
+        assert_eq!(prepared.text.lines().count(), source.lines().count());
+        let codes: Vec<(u32, String)> =
+            prepared.outline.blocks.iter().filter(|b| b.kind == Kind::Code).map(|b| (b.depth, b.text.clone())).collect();
+        assert_eq!(codes, vec![(0, "rust".into()), (0, "python".into()), (2, "bash".into()), (0, "zzz".into()), (0, String::new())]);
+        assert_eq!(prepared.outline.headings[0].line, 1);
+        // Nothing to rewrite: the text comes back as it is.
+        let plain = "# A\n\n```rust\nx\n```\n";
+        assert_eq!(prepare(plain).text, plain);
+        assert_eq!(prepare(plain).outline, outline(plain));
     }
 
     #[test]
@@ -665,6 +830,13 @@ mod tests {
         assert_eq!(link_target(folder, "mailto:someone@example.com"), LinkTarget::Outside("mailto:someone@example.com".into()));
         assert_eq!(link_target(folder, "#install"), LinkTarget::Heading("install".into()));
         assert_eq!(link_target(folder, "#"), LinkTarget::None);
+        // A percent-encoded fragment is decoded, in a file link too; inline HTML is no part of a heading's slug.
+        assert_eq!(link_target(folder, "#%C3%BCber-uns"), LinkTarget::Heading("über-uns".into()));
+        assert_eq!(link_target(folder, "a.md#%C3%BC").clone(), link_target(folder, "a.md#ü"));
+        let anchored = super::outline("## <a name=\"install\"></a> Install\n\n# <img src=\"l.png\" width=32> Project\n\nSee <b>bold</b> text.\n");
+        assert_eq!(anchored.headings.iter().map(|h| (h.slug.as_str(), h.text.as_str())).collect::<Vec<_>>(), vec![("install", "Install"), ("project", "Project")]);
+        assert_eq!(anchored.heading_for_fragment("%C3%BCber").is_none(), true);
+        assert_eq!(anchored.blocks[2].text, "See bold text.");
         assert_eq!(link_target(folder, ""), LinkTarget::None);
         if cfg!(windows) {
             assert_eq!(link_target(folder, "README.md"), file(r"C:\docs\book\README.md", None));

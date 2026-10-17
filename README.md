@@ -50,7 +50,7 @@ A JSON, JSON Lines, XML, YAML, TOML or INI file opens as a tree with key, type a
 
 ## Markdown
 
-A Markdown file opens rendered: headings, emphasis, lists (ordered, unordered and task lists), block quotes, tables, fenced code painted by its grammar, footnotes, links and images, the relative ones read from the file's own folder. A click on a web or mail link opens it outside Sfoglia, a link to a file opens that file in Sfoglia, and a `#fragment` link scrolls to its heading. Ctrl+Shift+D switches to the raw text and back, keeping the place: the text opens with the cursor on the block that was at the top, and the rendered view scrolls to the block holding the cursor. The raw text is edited and saved as any text; the Reload / Keep mine bar shows on the rendered side too.
+A Markdown file opens rendered: headings, emphasis, lists (ordered, unordered and task lists), block quotes, tables, fenced code painted by its grammar, footnotes, links and images, the relative ones read from the file's own folder. A click on a web or mail link opens it outside Sfoglia, a link to a file opens that file in Sfoglia, and a `#fragment` link scrolls to its heading. Ctrl+Shift+D switches to the raw text and back, keeping the place: the text opens with the cursor on the block that was at the top, and the rendered view scrolls to the block holding the cursor. The raw text is edited and saved as any text; the Reload / Keep mine bar shows on the rendered side too. Code fences name their grammar in any spelling (`Rust`, `rust,ignore`, `shell`), and a file past 2 MB opens as text.
 
 ## Hex view
 

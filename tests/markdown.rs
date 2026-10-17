@@ -384,3 +384,35 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
     .unwrap();
     std::fs::remove_dir_all(&folder).ok();
 }
+
+#[gpui_kit::test]
+fn a_large_markdown_file_opens_on_its_text(cx: &mut TestAppContext) {
+    // Past 2 MB the outline and the renderer's parse would take seconds on the window thread: the file
+    // opens on its raw text with the status row saying so, and Ctrl+Shift+D keeps it there.
+    let big = scratch("big.md");
+    let mut text = String::from("# Big\n\n");
+    let mut n = 0;
+    while text.len() < 2_600_000 {
+        text.push_str(&format!("A paragraph of text in the big file, number {n}, long enough.\n\n"));
+        n += 1;
+    }
+    std::fs::write(&big, &text).unwrap();
+    let (handle, panel, view) = open_markdown(cx, big.clone());
+    let message = format!("{:.1} MB of Markdown opens as text: the rendered view is kept for files under 2 MB", text.len() as f64 / (1024.0 * 1024.0));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "the raw text shows");
+        assert!(window.try_find("markdown-rendered").is_none());
+        assert_eq!(label(window, "markdown-summary"), format!("Markdown, {:.1} MB", text.len() as f64 / (1024.0 * 1024.0)));
+        assert_eq!(label(window, "markdown-message"), message);
+        assert_eq!(view.read(cx).text_view().read(cx).text(cx).len(), text.len(), "the whole text is there");
+        assert!(!panel.read(cx).is_dirty(cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "the toggle keeps the text");
+        assert_eq!(label(window, "markdown-message"), message);
+        assert_eq!(view.read(cx).outline().blocks.len(), 0, "no outline is built for it");
+    })
+    .unwrap();
+    std::fs::remove_file(&big).ok();
+}

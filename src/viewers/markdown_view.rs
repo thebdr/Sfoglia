@@ -17,7 +17,7 @@ use gpui_kit::{
     IntoElement, Render, Resource, Role, SharedString, SharedUri, Subscription, TestSupportExt, Window, actions, div,
 };
 
-use crate::markdown::{self, ImageSrc, LinkTarget, Outline};
+use crate::markdown::{self, ImageSrc, LinkTarget, Outline, Prepared};
 use crate::viewers::rules_panel::RulesStore;
 use crate::viewers::text_view::TextView;
 
@@ -33,6 +33,10 @@ pub struct OpenLinkedFile {
 
 /// The key context of the whole view: the chord works from the raw text too.
 pub const KEY_CONTEXT: &str = "MarkdownView";
+
+/// The largest file that opens rendered: past this the outline and the renderer's parse would take seconds
+/// on the window thread, so the file opens on its raw text and stays there.
+pub const MAX_RENDERED_BYTES: usize = 2 * 1024 * 1024;
 
 /// A 1×1 transparent PNG, shown for an image whose address cannot be read; encoded once.
 fn blank_png() -> &'static [u8] {
@@ -54,6 +58,10 @@ pub struct MarkdownView {
     /// The raw text (C-005, C-008), built at open: it watches the disk and holds the edits.
     text: Entity<TextView>,
     raw_shown: bool,
+    /// Past `MAX_RENDERED_BYTES`: the raw text alone, the toggle refused.
+    too_big: bool,
+    /// The file's size, for the status row of a file too big to render.
+    size: usize,
     /// The blocks of the source last rendered, which the status row, the toggle and links use.
     outline: Outline,
     /// The source the rich text was last given, to tell when its parse has landed.
@@ -73,8 +81,12 @@ impl MarkdownView {
     /// Open `bytes`, the file at `path`, rendered.
     pub fn new(path: &Path, bytes: &[u8], rules: &Entity<RulesStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let text = cx.new(|cx| TextView::new(path, bytes, rules, window, cx));
-        let source = markdown::resolve_image_references(&Self::source_of(&text, cx));
-        let outline = markdown::outline(&source);
+        let too_big = bytes.len() > MAX_RENDERED_BYTES;
+        let Prepared { text: source, outline } = if too_big {
+            Prepared { text: String::new(), outline: Outline::default() }
+        } else {
+            markdown::prepare(&Self::source_of(&text, cx))
+        };
         let rich = cx.new(|cx| TextViewState::markdown(&source, cx).scrollable(true).selectable(true));
         let follow = cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(window, cx));
         let parsed = cx.observe(&rich, |this, _, cx| this.on_parsed(cx));
@@ -85,11 +97,13 @@ impl MarkdownView {
             folder,
             rich,
             text,
-            raw_shown: false,
+            raw_shown: too_big,
+            too_big,
+            size: bytes.len(),
             outline,
             source,
             pending_reveal: None,
-            status: String::new(),
+            status: if too_big { too_big_message(bytes.len()) } else { String::new() },
             seen_operations: 0,
             seen_reloads: 0,
             requested: Arc::default(),
@@ -103,13 +117,13 @@ impl MarkdownView {
         crate::data::with_line_feeds(shown.as_ref()).into_owned()
     }
 
-    /// Render `source` (reference images written inline for the renderer), remembering it so a reveal
-    /// waits for its parse.
+    /// Render `source` (reference images inline and code fences named for the renderer), remembering it
+    /// so a reveal waits for its parse.
     fn render_source(&mut self, source: String, cx: &mut Context<Self>) {
-        let source = markdown::resolve_image_references(&source);
-        self.outline = markdown::outline(&source);
-        self.rich.update(cx, |rich, cx| rich.set_text(&source, cx));
-        self.source = source;
+        let Prepared { text, outline } = markdown::prepare(&source);
+        self.outline = outline;
+        self.rich.update(cx, |rich, cx| rich.set_text(&text, cx));
+        self.source = text;
     }
 
     /// The rich text changed (a parse landed, a scroll, a selection): carry out a waiting reveal once
@@ -166,6 +180,11 @@ impl MarkdownView {
     }
 
     fn on_toggle_raw(&mut self, _: &ToggleRaw, window: &mut Window, cx: &mut Context<Self>) {
+        if self.too_big {
+            self.status = too_big_message(self.size);
+            cx.notify();
+            return;
+        }
         if self.raw_shown {
             self.show_rendered(window, cx);
         } else {
@@ -193,6 +212,14 @@ impl MarkdownView {
         if reloads != self.seen_reloads {
             self.seen_reloads = reloads;
             let source = Self::source_of(&self.text, cx);
+            self.size = source.len();
+            self.too_big = self.size > MAX_RENDERED_BYTES;
+            if self.too_big {
+                self.raw_shown = true;
+                self.status = too_big_message(self.size);
+                cx.notify();
+                return;
+            }
             self.render_source(source, cx);
             if self.text.read(cx).message().is_none() {
                 self.status = "reloaded".to_string();
@@ -298,6 +325,19 @@ impl MarkdownView {
     }
 }
 
+/// `3.1 MB`, as the status row sizes a file.
+fn size_label(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 { format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)) } else { format!("{} KB", bytes.div_ceil(1024)) }
+}
+
+fn too_big_message(bytes: usize) -> String {
+    format!(
+        "{} of Markdown opens as text: the rendered view is kept for files under {} MB",
+        size_label(bytes),
+        MAX_RENDERED_BYTES / (1024 * 1024)
+    )
+}
+
 /// An image's bytes for the kit, from where C-011 says they come.
 fn to_image_source(src: ImageSrc) -> ImageSource {
     let blank = || ImageSource::Image(Arc::new(Image::from_bytes(ImageFormat::Png, blank_png().to_vec())));
@@ -340,7 +380,7 @@ impl Render for MarkdownView {
         let muted = theme.muted_foreground;
         let border = theme.border;
         let warning = theme.warning.opacity(0.15);
-        let summary = self.outline.summary();
+        let summary = if self.too_big { format!("Markdown, {}", size_label(self.size)) } else { self.outline.summary() };
         let status = if self.status.is_empty() {
             if self.raw_shown {
                 "Ctrl+Shift+D shows the rendered view".to_string()
