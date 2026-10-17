@@ -512,10 +512,16 @@ pub fn heading_for_fragment<'a>(headings: &'a [Heading], fragment: &str) -> Opti
     let wanted = fragment.trim_start_matches('#');
     let slug = slugify(wanted);
     let bare = |slug: &str| slug.trim_matches('-').to_string();
-    headings.iter().find(|heading| heading.slug == wanted || heading.slug == slug).or_else(|| {
+    // A fragment that slugifies to nothing names no heading, not even one whose own slug is empty (an
+    // image alone): only a non-empty form is ever compared.
+    let same = |heading: &str, form: &str| !form.is_empty() && heading == form;
+    headings.iter().find(|heading| same(&heading.slug, wanted) || same(&heading.slug, &slug)).or_else(|| {
         let wanted = bare(wanted);
         let slug = bare(&slug);
-        headings.iter().find(|heading| bare(&heading.slug) == wanted || bare(&heading.slug) == slug)
+        headings.iter().find(|heading| {
+            let heading = bare(&heading.slug);
+            same(&heading, &wanted) || same(&heading, &slug)
+        })
     })
 }
 
@@ -898,6 +904,13 @@ mod tests {
         assert_eq!(pictured.heading_for_fragment("-project").map(|h| h.line), Some(1));
         assert_eq!(pictured.heading_for_fragment("#install").map(|h| h.line), Some(3));
         assert_eq!(pictured.blocks[0].text, "Project");
+        // A fragment that slugifies to nothing names no heading, not even the image-only one whose slug is empty.
+        let bare = super::outline("# ![x](a.png)\n\n# Real\n");
+        assert_eq!(bare.headings.iter().map(|h| h.slug.as_str()).collect::<Vec<_>>(), vec!["", "real"]);
+        for fragment in ["!!!", "?", "-", "--", ""] {
+            assert!(bare.heading_for_fragment(fragment).is_none(), "{fragment:?}");
+        }
+        assert_eq!(bare.heading_for_fragment("real").map(|h| h.line), Some(3));
         assert_eq!(link_target(folder, ""), LinkTarget::None);
         if cfg!(windows) {
             assert_eq!(link_target(folder, "README.md"), file(r"C:\docs\book\README.md", None));

@@ -177,10 +177,14 @@ impl MarkdownView {
         self.on_parsed(cx);
     }
 
-    /// The raw text, with the cursor on the first line of the block at the top of the rendered view.
+    /// The raw text, with the cursor on the first line of the block at the top of the rendered view. While
+    /// the rendered side is still being prepared the list and the outline are the old ones, so the cursor
+    /// stays where the user left it.
     fn show_raw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let top = self.rich.read(cx).list_state().logical_scroll_top().item_ix;
-        if let Some(block) = self.outline.top_block(top) {
+        if self.preparing.is_none()
+            && let Some(block) = self.outline.top_block(top)
+        {
             let position = Position::new(block.line.saturating_sub(1) as u32, 0);
             let editor = self.text.read(cx).editor().clone();
             editor.update(cx, |editor, cx| editor.set_cursor_position(position, window, cx));
@@ -206,6 +210,8 @@ impl MarkdownView {
         let line = self.text.read(cx).editor().read(cx).cursor_position().line as usize + 1;
         self.render_source(source, Some(line), cx);
         self.raw_shown = false;
+        // A heading search still running was for the raw side: its answer would land on the wrong side.
+        self.finding = None;
         // Back to the rendered side: the hint again, whatever the raw side said last (the budget message included).
         self.status = String::new();
         window.focus(&self.focus_handle, cx);
@@ -300,9 +306,20 @@ impl MarkdownView {
         if self.raw_shown {
             let source = Self::source_of(&self.text, cx);
             let fragment = fragment.to_string();
+            let searched = source.clone();
             self.finding = Some(cx.spawn_in(window, async move |this, cx| {
                 let headings = cx.background_spawn(async move { markdown::outline(&source).headings }).await;
                 this.update_in(cx, |this, window, cx| {
+                    this.finding = None;
+                    if !this.raw_shown {
+                        // The user went back to the rendered side meanwhile: nothing to place.
+                        return;
+                    }
+                    if Self::source_of(&this.text, cx) != searched {
+                        // The text changed meanwhile (an edit, a reload): search the text as it stands now.
+                        this.reveal_heading(&fragment, window, cx);
+                        return;
+                    }
                     match markdown::heading_for_fragment(&headings, &fragment) {
                         Some(heading) => {
                             this.status = format!("at {}", heading.text);
@@ -312,7 +329,6 @@ impl MarkdownView {
                         }
                         None => this.status = format!("no heading named #{}", fragment.trim_start_matches('#')),
                     }
-                    this.finding = None;
                     cx.notify();
                 })
                 .ok();

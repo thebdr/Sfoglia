@@ -217,6 +217,17 @@ fn the_toggle_carries_the_place_between_the_views(cx: &mut TestAppContext) {
         window.press("ctrl-shift-d", cx);
         window.render_frame(cx);
         assert!(!view.read(cx).raw_shown());
+        // Before the preparation lands, the summary says so and a toggle back to the raw text leaves the
+        // cursor where it was; the next toggle prepares again and still reveals the cursor's block.
+        assert_eq!(label(window, "markdown-summary"), "Markdown, preparing");
+        assert!(view.read(cx).is_preparing());
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(182, 0), "the place is kept while the rendered side is still preparing");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
     })
     .unwrap();
     cx.run_until_parked();
@@ -396,6 +407,21 @@ fn a_link_to_another_file_opens_it_at_its_heading(cx: &mut TestAppContext) {
         assert_eq!(label(window, "markdown-message"), "at Section 20");
         let editor = other.read(cx).text_view().read(cx).editor().clone();
         assert_eq!(editor.read(cx).cursor_position(), Position::new(82, 0));
+    })
+    .unwrap();
+    // A heading search started on the raw side and overtaken by a toggle to the rendered side places nothing
+    // and claims nothing: the hint stays.
+    cx.update_window(handle, |_, window, cx| {
+        other.update(cx, |view, cx| view.reveal_heading("section-50", window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!other.read(cx).raw_shown());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the text, a click follows a link");
     })
     .unwrap();
     std::fs::remove_dir_all(&folder).ok();
