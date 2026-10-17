@@ -895,7 +895,9 @@ impl Workspace {
     fn closing_facts(&self, cx: &App) -> Option<(String, String, usize, Option<String>)> {
         let closing = self.closing.as_ref()?;
         let first = closing.queue.first()?.read(cx);
-        let folder = plain_absolute(&first.info.path).parent().map(|p| p.display().to_string()).unwrap_or_default();
+        // Where the file as opened sits: its folder resolved, the file itself (a link, say) not followed.
+        let absolute = std::path::absolute(&first.info.path).unwrap_or_else(|_| first.info.path.clone());
+        let folder = absolute.parent().map(|p| plain_absolute(p).display().to_string()).unwrap_or_default();
         Some((first.info.name.clone(), folder, closing.queue.len().saturating_sub(1), closing.message.clone()))
     }
 

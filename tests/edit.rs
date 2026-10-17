@@ -1262,3 +1262,49 @@ fn a_link_in_the_path_resolves_as_the_system_does(cx: &mut TestAppContext) {
     assert_eq!(std::fs::read(&hello).unwrap(), fixture_bytes("hello.txt"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file that is itself a link counts where the link sits: its folder line names the link's folder, with
+/// the target present and after it is gone alike (C-012).
+#[cfg(unix)]
+#[gpui_kit::test]
+fn a_file_that_is_a_link_counts_where_the_link_sits(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-file-link");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let target = copy_fixture("hello.txt", &b);
+    let link = a.join("hello.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[link.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &link, &panels[0], "Q");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, folder, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(folder, canonical_folder(&a), "where the link sits, the target present");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    std::fs::remove_file(&target).unwrap();
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (_, folder, _, _) = closing_dialog(window, cx);
+        assert_eq!(folder, canonical_folder(&a), "and the same with the target gone");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let _ = std::fs::remove_dir_all(&dir);
+}
