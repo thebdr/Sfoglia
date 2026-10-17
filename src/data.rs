@@ -250,7 +250,7 @@ impl Tree {
         if text.is_empty() {
             return Vec::new();
         }
-        let needle = text.to_lowercase();
+        let needle = fold_case(text);
         self.nodes
             .iter()
             .enumerate()
@@ -265,7 +265,15 @@ impl Tree {
     }
 }
 
-/// Whether `text` contains the already lower-cased `needle`; ASCII text is compared in place.
+/// Lower case letter by letter, with no regard to position: `String::to_lowercase` would turn a
+/// Greek sigma into its final form at the end of a word, so the same letters would differ
+/// between a key and the text sought in it; a final sigma typed in the text sought folds to the
+/// ordinary one for the same reason.
+fn fold_case(text: &str) -> String {
+    text.chars().flat_map(char::to_lowercase).map(|c| if c == 'ς' { 'σ' } else { c }).collect()
+}
+
+/// Whether `text` contains the already folded `needle`; ASCII text is compared in place.
 fn contains_ignoring_case(text: &str, needle: &str) -> bool {
     if text.is_ascii() && needle.is_ascii() {
         let text = text.as_bytes();
@@ -273,7 +281,7 @@ fn contains_ignoring_case(text: &str, needle: &str) -> bool {
         needle.len() <= text.len()
             && text.windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
     } else {
-        text.to_lowercase().contains(needle)
+        fold_case(text).contains(needle)
     }
 }
 
@@ -308,7 +316,7 @@ fn float_text(value: f64) -> String {
 
 /// `text` with every line ending as a line feed, as the text viewer shows it (C-005): the parsers
 /// count lines by line feeds, so a lone carriage return would put an error on the wrong line.
-fn with_line_feeds(text: &str) -> std::borrow::Cow<'_, str> {
+pub fn with_line_feeds(text: &str) -> std::borrow::Cow<'_, str> {
     if text.contains('\r') {
         std::borrow::Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
     } else {
@@ -2169,6 +2177,12 @@ mod tests {
         let accented = Tree::parse(Format::Json, r#"{"Città": "ÉCOLE"}"#).unwrap();
         assert_eq!(accented.search("città"), vec![1]);
         assert_eq!(accented.search("école"), vec![1]);
+        // A Greek sigma folds the same wherever it sits, so a needle ending in one is found inside a word.
+        let greek = Tree::parse(Format::Json, r#"{"ΟΔΟΣΟ": "ΣΟΦΙΑΣ"}"#).unwrap();
+        assert_eq!(greek.search("ΟΔΟΣ"), vec![1]);
+        assert_eq!(greek.search("οδος"), vec![1]);
+        assert_eq!(greek.search("ΣΟΦΙΑΣ"), vec![1]);
+        assert_eq!(greek.search("φιας"), vec![1]);
     }
 
     #[test]

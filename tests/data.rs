@@ -542,4 +542,20 @@ fn the_raw_text_takes_a_space_and_a_read_only_text_stays_as_it_is(cx: &mut TestA
     })
     .unwrap();
     std::fs::remove_file(&readonly).ok();
+
+    // A CRLF file already in its pretty form says so and stays unmodified: the editor holds the file's
+    // returns, the pretty form is written with line feeds, and the two are compared with the same endings.
+    let crlf = scratch("crlf.json");
+    std::fs::write(&crlf, "{\r\n  \"a\": 1\r\n}\r\n").unwrap();
+    let (handle, panel, view) = open_data(cx, crlf.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2);
+        window.press("ctrl-shift-p", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "already in its pretty form");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&crlf).ok();
 }

@@ -330,8 +330,10 @@ impl DataView {
             return;
         }
         let text = self.current_text(cx);
+        // The editor may hold the file's carriage returns; the pretty form is written with line feeds and
+        // saved back with the file's endings (C-008), so the two are compared with the same endings.
         match data::pretty(self.format, &text) {
-            Ok(pretty) if pretty == text => {
+            Ok(pretty) if pretty == data::with_line_feeds(&text) => {
                 self.status = "already in its pretty form".to_string();
             }
             Ok(pretty) => {
