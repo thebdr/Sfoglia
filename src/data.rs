@@ -132,9 +132,11 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Parse `text` as `format`.
+    /// Parse `text` as `format`. Lines end as the text viewer shows them: a lone carriage return
+    /// is a line break there, so it is one here, and positions agree.
     pub fn parse(format: Format, text: &str) -> Result<Tree, ParseError> {
-        on_deep_stack(|| Ok(Tree { format, nodes: parse_nodes(format, text)? }))
+        let text = with_line_feeds(text);
+        on_deep_stack(|| Ok(Tree { format, nodes: parse_nodes(format, &text)? }))
     }
 
     pub fn len(&self) -> usize {
@@ -302,6 +304,16 @@ fn close(nodes: &mut [Node], ix: usize, count: usize) {
 /// How a float prints: always with a fraction or an exponent, so `1.0` stays `1.0`.
 fn float_text(value: f64) -> String {
     format!("{value:?}")
+}
+
+/// `text` with every line ending as a line feed, as the text viewer shows it (C-005): the parsers
+/// count lines by line feeds, so a lone carriage return would put an error on the wrong line.
+fn with_line_feeds(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// The arena of `text` in `format`, on the current stack.
@@ -849,7 +861,10 @@ fn json_message(error: &serde_json::Error) -> String {
 fn json_error(error: serde_json::Error, text: &str, line_offset: usize) -> ParseError {
     let line_text = text.lines().nth(error.line().saturating_sub(1)).unwrap_or("");
     let byte_column = error.column().max(1);
-    let column = line_text.get(..byte_column - 1).map_or(byte_column, |before| before.chars().count() + 1);
+    // An end-of-input error points at the last byte, which may sit inside a character: the column
+    // counts the characters before the nearest boundary at or below it.
+    let boundary = (0..byte_column).rev().find(|&b| line_text.is_char_boundary(b)).unwrap_or(0);
+    let column = line_text[..boundary.min(line_text.len())].chars().count() + 1;
     ParseError { line: error.line() + line_offset, column, message: json_message(&error) }
 }
 
@@ -1487,6 +1502,8 @@ fn parse_ini(text: &str, nodes: &mut Vec<Node>) -> Result<(), ParseError> {
 /// parser's 1024 characters, complex keys told apart by their tags alone) is refused instead,
 /// so the text is never replaced by something that reads differently.
 pub fn pretty(format: Format, text: &str) -> Result<String, ParseError> {
+    let text = with_line_feeds(text);
+    let text = text.as_ref();
     on_deep_stack(|| {
         let out = pretty_on_this_stack(format, text)?;
         let same = parse_nodes(format, &out).is_ok_and(|after| parse_nodes(format, text).is_ok_and(|before| before == after));
@@ -2337,6 +2354,18 @@ mod tests {
             assert!(error.starts_with("line "), "{text:?}: {error}");
         }
         assert_eq!(Tree::parse(Format::Yaml, "a: 1\n%").unwrap_err().to_string(), "line 2, column 2: while scanning a directive, could not find expected directive name");
+        // An end-of-input error after a non-ASCII character still counts characters, and a lone carriage
+        // return is a line break, as the text viewer shows it, in every format.
+        let unterminated = Tree::parse(Format::Json, "\"ééééé").unwrap_err();
+        assert_eq!((unterminated.line, unterminated.column), (1, 6), "{unterminated}");
+        let cr_json = Tree::parse(Format::Json, "{\r\"a\": 1,\r\"b\": \r}").unwrap_err();
+        assert_eq!((cr_json.line, cr_json.column), (4, 1), "{cr_json}");
+        let cr_xml = Tree::parse(Format::Xml, "<a>\r<b>\r</a>").unwrap_err();
+        assert_eq!((cr_xml.line, cr_xml.column), (3, 1), "{cr_xml}");
+        let cr_ini = Tree::parse(Format::Ini, "[s]\rk=v\r[t]\rm=1\r").unwrap();
+        assert_eq!(rows(&cr_ini), vec![(0, "s", "section", "1 entry"), (1, "k", "key", "v"), (0, "t", "section", "1 entry"), (1, "m", "key", "1")]);
+        let cr_lines = Tree::parse(Format::JsonLines, "{\"a\":1}\r{\"b\":2}\r").unwrap();
+        assert_eq!(cr_lines.len(), 5);
         // CRLF endings count lines the same way.
         let crlf = Tree::parse(Format::Json, "{\r\n  \"a\": 1,\r\n  \"b\": [1, 2,\r\n}\r\n").unwrap_err();
         assert_eq!((crlf.line, crlf.column), (4, 1));
