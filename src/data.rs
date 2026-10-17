@@ -1119,7 +1119,8 @@ fn pretty_toml(text: &str) -> Result<String, ParseError> {
 fn fmt_toml_table(table: &mut toml_edit::Table) {
     table.fmt();
     table.decor_mut().clear();
-    for (_, item) in table.iter_mut() {
+    for (mut key, item) in table.iter_mut() {
+        key.fmt();
         fmt_toml_item(item);
     }
 }
@@ -1140,8 +1141,16 @@ fn fmt_toml_item(item: &mut toml_edit::Item) {
 fn fmt_toml_value(value: &mut toml_edit::Value) {
     match value {
         toml_edit::Value::InlineTable(table) => {
+            // Rebuilt from its entries: a multi-line inline table keeps comments and line breaks
+            // in a preamble that `fmt` leaves alone.
+            let mut fresh = toml_edit::InlineTable::new();
+            for (key, value) in table.iter() {
+                fresh.insert(key, value.clone());
+            }
+            *table = fresh;
             table.fmt();
-            for (_, value) in table.iter_mut() {
+            for (mut key, value) in table.iter_mut() {
+                key.fmt();
                 fmt_toml_value(value);
             }
         }
@@ -1602,6 +1611,11 @@ mod tests {
         let pretty_order = pretty(Format::Toml, toml_order).unwrap();
         assert_eq!(pretty_order, "a.b.c = 1\nf = 1e3\npoint = { x = 1 }\nz = 2\n");
         assert_eq!(Tree::parse(Format::Toml, &pretty_order).unwrap().nodes, Tree::parse(Format::Toml, toml_order).unwrap().nodes);
+        // A multi-line inline table loses its comment and line break too, and dotted keys lose their spaces.
+        let toml_inline = "[[arr]]\nz = { a = 1, # no\n}\nq . r = 2\n";
+        let pretty_inline = pretty(Format::Toml, toml_inline).unwrap();
+        assert_eq!(pretty_inline, "[[arr]]\nz = { a = 1 }\nq.r = 2\n");
+        assert_eq!(Tree::parse(Format::Toml, &pretty_inline).unwrap().nodes, Tree::parse(Format::Toml, toml_inline).unwrap().nodes);
         // XML: a processing instruction at the start is not the declaration, a DOCTYPE inside a comment is
         // not a DOCTYPE, an internal subset may end in `] >`, two prefixes for one URI keep their names, and
         // whitespace in attribute values is written as character references.

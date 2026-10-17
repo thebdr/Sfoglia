@@ -321,14 +321,20 @@ impl DataView {
     }
 
     /// Replace the raw text with its pretty form as one undoable edit, and rebuild the tree.
+    /// A read-only text (units that did not decode, C-008) stays as it is.
     fn on_pretty_print(&mut self, _: &PrettyPrint, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self.ensure_text(window, cx);
+        if !view.read(cx).is_editable() {
+            self.status = "the text is read-only (it has units that did not decode), so it stays as it is".to_string();
+            cx.notify();
+            return;
+        }
         let text = self.current_text(cx);
         match data::pretty(self.format, &text) {
             Ok(pretty) if pretty == text => {
                 self.status = "already in its pretty form".to_string();
             }
             Ok(pretty) => {
-                let view = self.ensure_text(window, cx);
                 let editor = view.read(cx).editor().clone();
                 editor.update(cx, |editor, cx| editor.replace_all(pretty, window, cx));
                 view.update(cx, |view, cx| view.note_edit(cx));
@@ -482,7 +488,8 @@ impl Render for DataView {
             .child(div().id("data-path").test_support().aria_label(path.clone()).child(path))
             .child(div().id("data-message").test_support().aria_label(status.clone()).flex_1().overflow_hidden().child(status));
 
-        let body = if self.raw_shown
+        let raw_shown = self.raw_shown;
+        let body = if raw_shown
             && let Some(text) = &self.text
         {
             div().id("data-raw").size_full().min_h_0().child(text.clone()).into_any_element()
@@ -606,22 +613,30 @@ impl Render for DataView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .when(!self.raw_shown, |view| view.child(toolbar))
-            .child(
-                div()
-                    .id("data-tree")
-                    .test_support()
-                    .key_context(TREE_CONTEXT)
-                    .track_focus(&self.rows_focus)
-                    .on_action(cx.listener(Self::on_select_up))
-                    .on_action(cx.listener(Self::on_select_down))
-                    .on_action(cx.listener(Self::on_collapse))
-                    .on_action(cx.listener(Self::on_expand))
-                    .on_action(cx.listener(Self::on_toggle_node))
-                    .flex_1()
-                    .min_h_0()
-                    .size_full()
-                    .child(body),
-            )
+            .map(|view| {
+                if raw_shown {
+                    // The raw text lives outside the rows' key context: Space and the arrows are
+                    // the editor's there.
+                    view.child(div().id("data-raw-area").flex_1().min_h_0().size_full().child(body))
+                } else {
+                    view.child(
+                        div()
+                            .id("data-tree")
+                            .test_support()
+                            .key_context(TREE_CONTEXT)
+                            .track_focus(&self.rows_focus)
+                            .on_action(cx.listener(Self::on_select_up))
+                            .on_action(cx.listener(Self::on_select_down))
+                            .on_action(cx.listener(Self::on_collapse))
+                            .on_action(cx.listener(Self::on_expand))
+                            .on_action(cx.listener(Self::on_toggle_node))
+                            .flex_1()
+                            .min_h_0()
+                            .size_full()
+                            .child(body),
+                    )
+                }
+            })
             .child(status_row)
     }
 }

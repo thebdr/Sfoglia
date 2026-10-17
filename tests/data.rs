@@ -456,3 +456,71 @@ fn a_50_mb_json_file_opens_searches_and_scrolls_to_the_match(cx: &mut TestAppCon
     .unwrap();
     std::fs::remove_file(&path).ok();
 }
+
+#[gpui_kit::test]
+fn the_raw_text_takes_a_space_and_a_read_only_text_stays_as_it_is(cx: &mut TestAppContext) {
+    // Space typed into the raw text is the editor's, not the tree's open-or-close key.
+    let spaced = scratch("spaced.json");
+    std::fs::write(&spaced, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, spaced.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).is_expanded(0));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        let text = view.read(cx).text_view().unwrap().clone();
+        window.press("end", cx);
+        window.press("space", cx);
+        window.input("x", cx);
+        window.render_frame(cx);
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":1} x");
+        assert!(view.read(cx).is_expanded(0), "the space did not reach the tree");
+        assert_eq!(view.read(cx).visible_nodes(), &[0, 1]);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(panel.read(cx).is_dirty(cx));
+        // The tab stays open while it is modified; a save brings the text to disk.
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert!(!panel.read(cx).is_dirty(cx));
+        assert_eq!(std::fs::read_to_string(&spaced).unwrap(), "{\"a\":1} x");
+    })
+    .unwrap();
+    std::fs::remove_file(&spaced).ok();
+
+    // A UTF-16 file with a lone surrogate is read-only in the text viewer (C-008): the tree
+    // still shows it, and a pretty-print leaves the text alone and says why.
+    let readonly = scratch("readonly.json");
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in "{\"a\":\"".encode_utf16().chain([0xd800u16]).chain("\"}".encode_utf16()) {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    std::fs::write(&readonly, &bytes).unwrap();
+    let (handle, panel, view) = open_data(cx, readonly.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2);
+        assert_eq!(label(window, ("data-row", 1usize)), "1|a|string|\u{FFFD}");
+        window.press("ctrl-shift-p", cx);
+        window.render_frame(cx);
+        let text = view.read(cx).text_view().expect("the text viewer exists after the attempt").clone();
+        assert!(!text.read(cx).is_editable());
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":\"\u{FFFD}\"}");
+        assert!(!text.read(cx).is_dirty());
+        assert!(!panel.read(cx).is_dirty(cx));
+        assert_eq!(label(window, "data-message"), "the text is read-only (it has units that did not decode), so it stays as it is");
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2);
+        // The same from the raw side.
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("ctrl-shift-p", cx);
+        window.render_frame(cx);
+        assert_eq!(text.read(cx).text(cx).as_ref(), "{\"a\":\"\u{FFFD}\"}");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&readonly).ok();
+}
