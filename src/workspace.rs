@@ -780,40 +780,36 @@ impl Render for Workspace {
     }
 }
 
-/// The path as it stands on disk: absolute with `.` and `..` resolved, its nearest ancestor still on disk
-/// canonical (Windows' `\\?\` prefix taken off) and the rest joined as spelled, so a file or a folder gone
-/// meanwhile still names its place.
+/// The path as it stands on disk: resolved by the system when it is there (a link's `..` climbs from its
+/// target, Windows' `\\?\` prefix taken off); when a file or a folder is gone meanwhile, the nearest ancestor
+/// still on disk resolved the same way and the gone tail joined with its `.` and `..` resolved by spelling;
+/// with nothing of it on disk, the absolute spelling with `.` and `..` resolved.
 fn plain_absolute(path: &Path) -> PathBuf {
     use std::path::Component;
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return strip_verbatim(canonical);
+    }
+    let join_tail = |mut base: PathBuf, tail: &[Component]| {
+        for component in tail {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    base.pop();
+                }
+                other => base.push(other.as_os_str()),
             }
-            other => normalized.push(other.as_os_str()),
+        }
+        base
+    };
+    let components: Vec<Component> = absolute.components().collect();
+    for kept in (1..components.len()).rev() {
+        let ancestor: PathBuf = components[..kept].iter().map(|c| c.as_os_str()).collect();
+        if let Ok(canonical) = std::fs::canonicalize(&ancestor) {
+            return join_tail(strip_verbatim(canonical), &components[kept..]);
         }
     }
-    let mut ancestor = normalized.as_path();
-    let mut rest: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
-            let mut result = strip_verbatim(canonical);
-            for name in rest.iter().rev() {
-                result.push(name);
-            }
-            return result;
-        }
-        match (ancestor.parent(), ancestor.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_os_string());
-                ancestor = parent;
-            }
-            _ => return normalized,
-        }
-    }
+    join_tail(PathBuf::new(), &components)
 }
 
 /// A canonical path without the `\\?\` (or `\\?\UNC\`) prefix Windows gives it.

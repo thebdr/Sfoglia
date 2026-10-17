@@ -1226,3 +1226,39 @@ fn a_file_whose_folder_is_gone_still_names_its_folder_as_it_stood(cx: &mut TestA
     assert_eq!(cx.windows().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `..` after a symbolic link climbs from the link's target, as the system reads and writes the file:
+/// the folder line names that target's folder (C-012; links need no privilege on Unix alone).
+#[cfg(unix)]
+#[gpui_kit::test]
+fn a_link_in_the_path_resolves_as_the_system_does(cx: &mut TestAppContext) {
+    let (handle, workspace) = open_workspace(cx);
+    let dir = scratch_dir("close-link");
+    let real = dir.join("real");
+    std::fs::create_dir_all(real.join("sub")).unwrap();
+    let hello = copy_fixture("hello.txt", &real);
+    std::os::unix::fs::symlink(real.join("sub"), dir.join("link")).unwrap();
+    let spelled = dir.join("link").join("..").join("hello.txt");
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    let panels = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[spelled.clone()], window, cx));
+            window.render_frame(cx);
+            workspace.read(cx).panels(cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    type_into(cx, handle, &workspace, &spelled, &panels[0], "Q");
+    assert!(!vcx.simulate_close());
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        let (title, folder, _, _) = closing_dialog(window, cx);
+        assert_eq!(title, "Save changes to “hello.txt”?");
+        assert_eq!(folder, canonical_folder(&real), "the link's target's folder, as the system resolves it");
+        window.click("close-cancel", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read(&hello).unwrap(), fixture_bytes("hello.txt"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
