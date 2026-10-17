@@ -26,7 +26,8 @@ use crate::shell::{APP_NAME, title};
 use crate::viewers::data_view::{self, Collapse, CopyPath, Expand, PrettyPrint, SelectDown, SelectUp, ToggleNode, ToggleRaw};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
-use crate::viewers::{DataView, HexView, ImageView, RulesPanel, RulesStore, TextView};
+use crate::viewers::markdown_view::{self, OpenLinkedFile};
+use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, TextView};
 
 actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs]);
 
@@ -57,6 +58,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-c", CopyPath, Some(data_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-p", PrettyPrint, Some(data_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", ToggleRaw, Some(data_view::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-d", markdown_view::ToggleRaw, Some(markdown_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -119,6 +121,8 @@ enum PanelView {
     Image(Entity<ImageView>),
     /// The structured data viewer (C-010).
     Data(Entity<DataView>),
+    /// The Markdown viewer (C-011).
+    Markdown(Entity<MarkdownView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -153,6 +157,11 @@ impl FilePanel {
                 Ok(bytes) => PanelView::Data(cx.new(|cx| DataView::new(&info.path, &bytes, rules, window, cx))),
                 Err(_) => PanelView::Info,
             }
+        } else if info.error.is_none() && info.route() == Route::Family(Family::Markdown) {
+            match std::fs::read(&info.path) {
+                Ok(bytes) => PanelView::Markdown(cx.new(|cx| MarkdownView::new(&info.path, &bytes, rules, window, cx))),
+                Err(_) => PanelView::Info,
+            }
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -170,6 +179,10 @@ impl FilePanel {
                 cx.notify();
             })),
             PanelView::Data(data) => Some(cx.observe(data, |_, _, cx| {
+                cx.emit(PanelEvent::LayoutChanged);
+                cx.notify();
+            })),
+            PanelView::Markdown(view) => Some(cx.observe(view, |_, _, cx| {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
@@ -196,6 +209,10 @@ impl FilePanel {
                 window.focus(&focus, cx);
             }
             PanelView::Data(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Markdown(view) => {
                 let focus = view.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
@@ -240,11 +257,20 @@ impl FilePanel {
         }
     }
 
+    /// The Markdown viewer, when this tab shows one.
+    pub fn markdown_view(&self) -> Option<&Entity<MarkdownView>> {
+        match &self.view {
+            PanelView::Markdown(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
     /// The text that Ctrl+S saves: the text viewer, or the data viewer's raw text once it exists.
     pub fn editable_text(&self, cx: &App) -> Option<Entity<TextView>> {
         match &self.view {
             PanelView::Text(view) => Some(view.clone()),
             PanelView::Data(view) => view.read(cx).text_view().cloned(),
+            PanelView::Markdown(view) => Some(view.read(cx).text_view().clone()),
             PanelView::Image(_) | PanelView::Info => None,
         }
     }
@@ -298,6 +324,7 @@ impl FilePanel {
         match &self.view {
             PanelView::Text(text) => text.read(cx).is_dirty(),
             PanelView::Data(data) => data.read(cx).is_dirty(cx),
+            PanelView::Markdown(view) => view.read(cx).is_dirty(cx),
             PanelView::Image(_) | PanelView::Info => false,
         }
     }
@@ -342,6 +369,7 @@ impl Focusable for FilePanel {
         match &self.view {
             PanelView::Image(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Data(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            PanelView::Markdown(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -390,6 +418,14 @@ impl Render for FilePanel {
                 .into_any_element();
         }
         if let PanelView::Data(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
+        if let PanelView::Markdown(view) = &self.view {
             return div()
                 .id("file-panel")
                 .track_focus(&self.focus_handle)
@@ -613,6 +649,19 @@ impl Workspace {
 
     /// Save the active tab's image as another raster format (C-009): a Save dialog picks
     /// the new name, whose extension chooses the format; the outcome shows in the facts.
+    /// A Markdown link to a file: open it, and scroll to the heading its fragment names (C-011).
+    fn on_open_linked_file(&mut self, action: &OpenLinkedFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_paths(std::slice::from_ref(&action.path), window, cx);
+        let Some(fragment) = action.fragment.clone() else { return };
+        let target = self.panels(cx).iter().find_map(|panel| {
+            let view = panel.read(cx).markdown_view()?.clone();
+            (view.read(cx).path() == action.path).then_some(view)
+        });
+        if let Some(view) = target {
+            view.update(cx, |view, cx| view.reveal_heading(&fragment, cx));
+        }
+    }
+
     fn on_save_image_as(&mut self, _: &SaveImageAs, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).image_view().cloned()) else {
             return;
@@ -659,6 +708,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_hex))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_image_as))
+            .on_action(cx.listener(Self::on_open_linked_file))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();

@@ -11,6 +11,8 @@ pub enum Family {
     Images,
     /// Structured data trees (C-010).
     DataTrees,
+    /// Markdown rendering (C-011).
+    Markdown,
     /// Word-processing documents (P-007).
     WordProcessing,
     /// PDF and XPS viewing (P-008).
@@ -37,8 +39,6 @@ pub enum Family {
     Video,
     /// Archives, with 7z read and write, as the seed of an archive manager (P-021).
     Archives,
-    /// Markdown rendering (P-022).
-    Markdown,
 }
 
 impl Family {
@@ -47,6 +47,7 @@ impl Family {
         Family::Text,
         Family::Images,
         Family::DataTrees,
+        Family::Markdown,
         Family::WordProcessing,
         Family::PdfXps,
         Family::Spreadsheets,
@@ -60,7 +61,6 @@ impl Family {
         Family::Audio,
         Family::Video,
         Family::Archives,
-        Family::Markdown,
     ];
 
     /// The slug the contract names the family by.
@@ -69,6 +69,7 @@ impl Family {
             Family::Text => "text",
             Family::Images => "images",
             Family::DataTrees => "data-trees",
+            Family::Markdown => "markdown",
             Family::WordProcessing => "word-processing",
             Family::PdfXps => "pdf-xps",
             Family::Spreadsheets => "spreadsheets",
@@ -82,7 +83,6 @@ impl Family {
             Family::Audio => "audio",
             Family::Video => "video",
             Family::Archives => "archives",
-            Family::Markdown => "markdown",
         }
     }
 
@@ -92,6 +92,7 @@ impl Family {
             Family::Text => "Source and text viewing with syntax highlighting",
             Family::Images => "Images",
             Family::DataTrees => "Structured data trees",
+            Family::Markdown => "Markdown rendering",
             Family::WordProcessing => "Word-processing documents",
             Family::PdfXps => "PDF and XPS viewing",
             Family::Spreadsheets => "Spreadsheets and delimited tables",
@@ -105,7 +106,6 @@ impl Family {
             Family::Audio => "Audio playback",
             Family::Video => "Video playback through VLC",
             Family::Archives => "Archives, with 7z read and write, as the seed of an archive manager",
-            Family::Markdown => "Markdown rendering",
         }
     }
 
@@ -115,6 +115,7 @@ impl Family {
             Family::Text => "C-005",
             Family::Images => "C-009",
             Family::DataTrees => "C-010",
+            Family::Markdown => "C-011",
             Family::WordProcessing => "P-007",
             Family::PdfXps => "P-008",
             Family::Spreadsheets => "P-010",
@@ -128,7 +129,6 @@ impl Family {
             Family::Audio => "P-019",
             Family::Video => "P-020",
             Family::Archives => "P-021",
-            Family::Markdown => "P-022",
         }
     }
 }

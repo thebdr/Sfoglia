@@ -6325,6 +6325,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "kamadak-exif",
+ "markdown",
  "memchr",
  "memmap2",
  "png 0.18.1",

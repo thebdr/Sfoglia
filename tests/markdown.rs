@@ -1,0 +1,311 @@
+//! Headless tests of the Markdown viewer (C-011): a real gpui-kit window opens a Markdown file
+//! rendered, toggles to the raw text and back keeping the place, edits and saves it, and shows the
+//! text viewer's messages and the Reload / Keep mine bar on the rendered side.
+//!
+//! The kit parses Markdown on a background task and an editor's change lands after the window
+//! update ends: the tests leave `update_window`, run until parked, and assert in the next block.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use gpui_kit::component::input::Position;
+use gpui_kit::test::TestWindowExt;
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, ListOffset, TestAppContext, px};
+use sfoglia::viewers::MarkdownView;
+use sfoglia::workspace::FilePanel;
+use sfoglia::{Family, Workspace, window_options};
+
+fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let rules_path = std::env::temp_dir().join(format!("sfoglia-markdown-rules-{}-{n}.toml", std::process::id()));
+    cx.update(gpui_kit::init);
+    cx.update(sfoglia::init);
+    cx.update(|cx| {
+        gpui_kit::open_window(window_options(), cx, |window, cx| {
+            cx.new(|cx| Workspace::with_rules_path(Some(rules_path.clone()), window, cx))
+        })
+        .expect("open the main window headlessly")
+    })
+}
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name)
+}
+
+fn scratch(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("sfoglia-markdown-{}-{name}", std::process::id()))
+}
+
+fn label(window: &gpui_kit::Window, id: impl Into<gpui_kit::ElementId>) -> String {
+    window.find(id).label().unwrap_or_default().to_string()
+}
+
+/// Open `path` in a fresh workspace, let the parse land, and hand back its panel and view.
+fn open_markdown(cx: &mut TestAppContext, path: PathBuf) -> (AnyWindowHandle, Entity<FilePanel>, Entity<MarkdownView>) {
+    let (handle, workspace) = open_workspace(cx);
+    let (panel, view) = cx
+        .update_window(handle, |_, window, cx| {
+            workspace.update(cx, |w, cx| w.open_paths(&[path], window, cx));
+            window.render_frame(cx);
+            let panel = workspace.read(cx).panels(cx)[0].clone();
+            let view = panel.read(cx).markdown_view().expect("the file opens in the Markdown viewer").clone();
+            (panel, view)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    (handle, panel, view)
+}
+
+/// The rendered side's plain text, as the kit's rendered text reads once the parse has landed.
+fn rendered(view: &Entity<MarkdownView>, cx: &gpui_kit::App) -> String {
+    view.read(cx).rich_text().read(cx).rendered_text().as_str().to_string()
+}
+
+#[gpui_kit::test]
+fn the_markdown_extensions_map_to_their_family(_: &mut TestAppContext) {
+    let markdown: Vec<&str> = sfoglia::generated::families::EXTENSIONS
+        .iter()
+        .filter(|(_, families)| families.contains(&Family::Markdown))
+        .map(|(ext, _)| *ext)
+        .collect();
+    assert_eq!(markdown, vec!["markdown", "md"]);
+    for (ext, families) in sfoglia::generated::families::EXTENSIONS {
+        if families.contains(&Family::Markdown) {
+            assert_eq!(*families, &[Family::Markdown], "{ext} belongs to Markdown alone");
+        }
+    }
+    assert_eq!(sfoglia::text::language_for("notes.md"), Some("markdown"));
+    assert_eq!(sfoglia::text::language_for("notes.markdown"), Some("markdown"));
+}
+
+#[gpui_kit::test]
+fn a_markdown_file_opens_rendered_with_its_summary_and_text(cx: &mut TestAppContext) {
+    let (handle, panel, view) = open_markdown(cx, fixture("guide.md"));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown(), "it opens rendered");
+        assert!(window.try_find("markdown-rendered").is_some());
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 18 blocks, 6 headings");
+        assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the text, a click follows a link");
+        assert!(!panel.read(cx).is_dirty(cx));
+        // Every heading, item, cell and code line, in order, is in the rendered text.
+        let text = rendered(&view, cx);
+        let expected = [
+            "Sfoglia guide",
+            "Sfoglia opens anything. This guide shows the rendered Markdown with emphasis, strong, strike and code.",
+            "Install",
+            "Install Rust",
+            "Clone the repository",
+            "with git",
+            "or as a zip",
+            "Run cargo run",
+            "Features",
+            "text and hex",
+            "office documents",
+            "Nothing is true until reality shows it.",
+            "Formats",
+            "Format",
+            "Read",
+            "Write",
+            "text",
+            "yes",
+            "yes",
+            "hex",
+            "yes",
+            "no",
+            "images",
+            "yes",
+            "save-as",
+            "Code",
+            "fn main() {",
+            "    println!(\"hello\");",
+            "}",
+            "plain text",
+            "Links and images",
+            "The site, the readme, the install section, a note",
+            "and the dot.",
+            "A footnote.",
+        ];
+        let mut rest: &str = &text;
+        for part in expected {
+            match rest.find(part) {
+                Some(at) => rest = &rest[at + part.len()..],
+                None => panic!("{part:?} not found in order in the rendered text:\n{text}"),
+            }
+        }
+        assert!(view.read(cx).focus_handle(cx).is_focused(window), "the rendered side has the focus");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_raw_text_toggles_edits_saves_and_re_renders(cx: &mut TestAppContext) {
+    let notes = scratch("notes.md");
+    std::fs::write(&notes, "# Title\n\nSome text.\n").unwrap();
+    let (handle, panel, view) = open_markdown(cx, notes.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 1 heading");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "the raw text shows");
+        assert!(window.try_find("markdown-rendered").is_none());
+        assert_eq!(label(window, "markdown-message"), "Ctrl+Shift+D shows the rendered view");
+        let text = view.read(cx).text_view().clone();
+        assert_eq!(text.read(cx).text(cx).as_ref(), "# Title\n\nSome text.\n");
+        let editor = text.read(cx).editor().clone();
+        assert!(editor.read(cx).focus_handle(cx).is_focused(window), "the editor has the focus");
+        window.press("ctrl-end", cx);
+        window.input("## More", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(panel.read(cx).is_dirty(cx), "the edit marks the tab modified");
+        assert_eq!(view.read(cx).text_view().read(cx).text(cx).as_ref(), "# Title\n\nSome text.\n## More");
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "# Title\n\nSome text.\n## More");
+        assert!(!panel.read(cx).is_dirty(cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 3 blocks, 2 headings");
+        assert!(rendered(&view, cx).contains("More"), "{}", rendered(&view, cx));
+        assert_eq!(view.read(cx).outline().headings[1].text, "More");
+        assert!(view.read(cx).focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+    std::fs::remove_file(&notes).ok();
+}
+
+#[gpui_kit::test]
+fn the_toggle_carries_the_place_between_the_views(cx: &mut TestAppContext) {
+    // Sixty sections of a heading and a paragraph: 120 blocks, four lines each section.
+    let long = scratch("long.md");
+    let mut text = String::new();
+    for n in 0..60 {
+        text.push_str(&format!("## Section {n}\n\nparagraph {n}\n\n"));
+    }
+    std::fs::write(&long, &text).unwrap();
+    let (handle, _panel, view) = open_markdown(cx, long.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 120 blocks, 60 headings");
+        // Scroll the rendered view so block 40 (the heading of section 20, line 81) is at the top.
+        view.read(cx).rich_text().read(cx).list_state().scroll_to(ListOffset { item_ix: 40, offset_in_item: px(0.) });
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix, 40);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+        let editor = view.read(cx).text_view().read(cx).editor().clone();
+        assert_eq!(editor.read(cx).cursor_position(), Position::new(80, 0), "the cursor sits on the block that was at the top");
+        // Put the cursor on "paragraph 45" (section 45, line 183) and go back: the rendered view
+        // scrolls to that block (index 91).
+        editor.update(cx, |editor, cx| editor.set_cursor_position(Position::new(182, 0), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let top = view.read(cx).rich_text().read(cx).list_state().logical_scroll_top().item_ix;
+        // The block lands at the bottom edge of the view (row 76 at the top here); a tolerant range
+        // covers the other font metrics of the Linux runner.
+        assert!((60..=91).contains(&top), "block 91 is on screen: the top row is {top}");
+    })
+    .unwrap();
+    std::fs::remove_file(&long).ok();
+}
+
+#[gpui_kit::test]
+fn the_rendered_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mut TestAppContext) {
+    // A save refused by the encoding (C-008) is reported on the rendered side.
+    let latin = scratch("latin.md");
+    std::fs::write(&latin, b"# Caf\xe9\n").unwrap();
+    let (handle, panel, view) = open_markdown(cx, latin.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("ctrl-end", cx);
+        window.input("€", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-message"), "Latin-1 cannot hold '€' (U+20AC) on line 2; choose another encoding");
+        assert!(panel.read(cx).is_dirty(cx));
+        assert_eq!(std::fs::read(&latin).unwrap(), b"# Caf\xe9\n");
+        assert!(view.read(cx).rich_text().read(cx).rendered_text().as_str().contains("Café"));
+    })
+    .unwrap();
+    std::fs::remove_file(&latin).ok();
+
+    // A change on disk raises the bar on the rendered side; Reload re-renders the newer file.
+    let watched = scratch("watched.md");
+    std::fs::write(&watched, "# One\n").unwrap();
+    let (handle, panel, view) = open_markdown(cx, watched.clone());
+    std::fs::write(&watched, "# One\n\n## Two\n").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).changed_on_disk(cx));
+        assert_eq!(label(window, "markdown-changed-on-disk"), "The file changed on disk.");
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 1 block, 1 heading", "still the file as read");
+        window.click("markdown-reload", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("markdown-changed-on-disk").is_none());
+        assert_eq!(label(window, "markdown-message"), "reloaded");
+        assert_eq!(label(window, "markdown-summary"), "Markdown, 2 blocks, 2 headings");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(rendered(&view, cx).contains("Two"), "{}", rendered(&view, cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&watched).ok();
+
+    // Keep mine marks the tab modified and the next save overwrites the file (C-008).
+    let kept = scratch("kept.md");
+    std::fs::write(&kept, "# Mine\n").unwrap();
+    let (handle, panel, _view) = open_markdown(cx, kept.clone());
+    std::fs::write(&kept, "# Theirs\n").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "markdown-changed-on-disk"), "The file changed on disk.");
+        window.click("markdown-keep-mine", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("markdown-changed-on-disk").is_none());
+        assert_eq!(label(window, "markdown-message"), "kept yours; the next save overwrites the file");
+        assert!(panel.read(cx).is_dirty(cx), "kept text counts as modified");
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "# Mine\n");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&kept).ok();
+}
