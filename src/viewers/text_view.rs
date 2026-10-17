@@ -80,6 +80,9 @@ pub struct TextView {
     dirty: bool,
     /// What the last save or failed save said.
     message: Option<String>,
+    /// Goes up with every save, reload and keep-mine, so a viewer that mirrors the message sees a
+    /// repeated one as new.
+    operations: u64,
     on_disk: Option<DiskStamp>,
     changed_on_disk: bool,
     rules: Entity<RulesStore>,
@@ -155,6 +158,7 @@ impl TextView {
             editable: replaced == 0,
             dirty: false,
             message: None,
+            operations: 0,
             on_disk: read_at,
             changed_on_disk: false,
             rules: rules.clone(),
@@ -243,6 +247,11 @@ impl TextView {
     }
 
     /// What the last save, or failed save, said.
+    /// How many saves, reloads and keep-mines have run: a repeated message counts as new when this changed.
+    pub fn operations(&self) -> u64 {
+        self.operations
+    }
+
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
     }
@@ -326,6 +335,7 @@ impl TextView {
     /// alone. A character the encoding cannot hold, or a write error, is reported and
     /// the file is not touched.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        self.operations += 1;
         if !self.editable {
             let error = "this file has undecodable units and is read-only".to_string();
             self.message = Some(error.clone());
@@ -374,6 +384,7 @@ impl TextView {
     /// be read (deleted, locked), the text on screen stays, says why, and counts as
     /// modified, so nothing is lost and the next save writes it back.
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.operations += 1;
         match std::fs::read(&self.path) {
             Ok(bytes) => {
                 let Decoded { text, encoding, line_endings, lines, replaced } = decode(&bytes);
@@ -402,6 +413,7 @@ impl TextView {
     /// Keep the text on screen although the file changed on disk: it now differs from the
     /// file, so it counts as modified, and the next save overwrites the file.
     pub fn keep_mine(&mut self, cx: &mut Context<Self>) {
+        self.operations += 1;
         self.changed_on_disk = false;
         self.on_disk = DiskStamp::of(&self.path);
         self.dirty = true;

@@ -620,6 +620,13 @@ fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mu
         assert_eq!(label(window, "data-message"), "Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding");
         assert!(panel.read(cx).is_dirty(cx));
         assert_eq!(std::fs::read(&latin).unwrap(), b"{\"a\":\"caf\xe9\"}");
+        // A second refusal, after another status, shows again.
+        window.press("ctrl-shift-c", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "copied $");
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-message"), "Latin-1 cannot hold '€' (U+20AC) on line 1; choose another encoding");
     })
     .unwrap();
     std::fs::remove_file(&latin).ok();
@@ -687,4 +694,52 @@ fn the_tree_side_shows_the_text_viewers_messages_and_the_disk_change_bar(cx: &mu
     })
     .unwrap();
     std::fs::remove_file(&watched).ok();
+
+    // Keep mine before the text viewer exists counts as modified, and the next save writes the kept text (C-008).
+    let kept = scratch("kept.json");
+    std::fs::write(&kept, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, kept.clone());
+    std::fs::write(&kept, "{\"a\":1,\"other\":\"program\"}").unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-changed-on-disk"), "The file changed on disk.");
+        window.click("data-keep-mine", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("data-changed-on-disk").is_none());
+        assert!(panel.read(cx).is_dirty(cx), "kept text counts as modified");
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2);
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{\"a\":1}");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&kept).ok();
+
+    // A Reload that cannot read the file (deleted meanwhile) keeps the text, marks the tab modified and
+    // says why; the next save recreates the file (C-008), from the tree side.
+    let gone = scratch("gone.json");
+    std::fs::write(&gone, "{\"a\":1}").unwrap();
+    let (handle, panel, view) = open_data(cx, gone.clone());
+    std::fs::remove_file(&gone).unwrap();
+    cx.background_executor.advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "data-changed-on-disk"), "The file changed on disk.");
+        window.click("data-reload", cx);
+        window.render_frame(cx);
+        assert!(label(window, "data-message").starts_with("cannot read "), "{}", label(window, "data-message"));
+        assert!(window.try_find("data-changed-on-disk").is_none());
+        assert!(panel.read(cx).is_dirty(cx), "the only copy counts as modified");
+        assert_eq!(view.read(cx).tree().unwrap().len(), 2);
+        window.press("ctrl-s", cx);
+        window.render_frame(cx);
+        assert_eq!(std::fs::read_to_string(&gone).unwrap(), "{\"a\":1}");
+        assert!(!panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    std::fs::remove_file(&gone).ok();
 }

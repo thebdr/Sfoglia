@@ -60,8 +60,8 @@ pub struct DataView {
     /// Another writer noticed while the text viewer does not exist yet; once it exists, it watches
     /// the disk itself (C-008).
     disk_changed: bool,
-    /// The text viewer's last message shown in the status row, so a new one shows once.
-    seen_text_message: Option<String>,
+    /// The text viewer's operation count when its message was last copied into the status row.
+    seen_operations: u64,
     _subscriptions: Vec<Subscription>,
     _watch: Task<()>,
 }
@@ -108,7 +108,7 @@ impl DataView {
             status: String::new(),
             scroll: UniformListScrollHandle::new(),
             disk_changed: false,
-            seen_text_message: None,
+            seen_operations: 0,
             _subscriptions: vec![on_search],
             _watch: watch,
         };
@@ -253,37 +253,26 @@ impl DataView {
         }
     }
 
-    /// Reload: the text viewer's own reload once it exists, else the file read again; the tree follows.
+    /// Reload through the text viewer, built here when it does not exist yet, so C-008's rules hold:
+    /// edits are dropped, a file that cannot be read keeps the text and marks the tab modified; the
+    /// tree follows the editor's text.
     fn on_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.text.clone() {
-            Some(text) => {
-                text.update(cx, |text, cx| text.reload(window, cx));
-                self.reparse(cx);
-                self.status = text.read(cx).message().map_or_else(|| "reloaded".to_string(), str::to_string);
-            }
-            None => match std::fs::read(&self.path) {
-                Ok(bytes) => {
-                    self.bytes = bytes;
-                    self.read_at = DiskStamp::of(&self.path);
-                    self.disk_changed = false;
-                    self.reparse(cx);
-                    self.status = "reloaded".to_string();
-                }
-                Err(error) => self.status = format!("cannot read {}: {error}", self.path.display()),
-            },
-        }
+        let text = self.ensure_text(window, cx);
+        text.update(cx, |text, cx| text.reload(window, cx));
+        self.disk_changed = false;
+        self.reparse(cx);
+        self.seen_operations = text.read(cx).operations();
+        self.status = text.read(cx).message().map_or_else(|| "reloaded".to_string(), str::to_string);
         cx.notify();
     }
 
-    /// Keep mine: the next save overwrites the file (C-008).
-    fn on_keep_mine(&mut self, cx: &mut Context<Self>) {
-        match self.text.clone() {
-            Some(text) => text.update(cx, |text, cx| text.keep_mine(cx)),
-            None => {
-                self.read_at = DiskStamp::of(&self.path);
-                self.disk_changed = false;
-            }
-        }
+    /// Keep mine through the text viewer, built here when it does not exist yet: the tab counts as
+    /// modified and the next save overwrites the file (C-008).
+    fn on_keep_mine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.ensure_text(window, cx);
+        text.update(cx, |text, cx| text.keep_mine(cx));
+        self.disk_changed = false;
+        self.seen_operations = text.read(cx).operations();
         self.status = "kept yours; the next save overwrites the file".to_string();
         cx.notify();
     }
@@ -526,13 +515,14 @@ impl Focusable for DataView {
 
 impl Render for DataView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The text viewer's messages (a save, a refused save, a failed reload) show on the tree side too.
+        // The text viewer's messages (a save, a refused save, a failed reload) show on the tree side too,
+        // once per operation, so a repeated refusal shows again.
         if let Some(text) = &self.text {
-            let message = text.read(cx).message().map(str::to_string);
-            if message != self.seen_text_message {
-                self.seen_text_message = message.clone();
-                if let Some(message) = message {
-                    self.status = message;
+            let operations = text.read(cx).operations();
+            if operations != self.seen_operations {
+                self.seen_operations = operations;
+                if let Some(message) = text.read(cx).message() {
+                    self.status = message.to_string();
                 }
             }
         }
@@ -737,7 +727,7 @@ impl Render for DataView {
                                 .text_sm()
                                 .child("The file changed on disk.")
                                 .child(Button::new("data-reload").label("Reload").xsmall().on_click(cx.listener(|this, _, window, cx| this.on_reload(window, cx))))
-                                .child(Button::new("data-keep-mine").label("Keep mine").xsmall().on_click(cx.listener(|this, _, _, cx| this.on_keep_mine(cx)))),
+                                .child(Button::new("data-keep-mine").label("Keep mine").xsmall().on_click(cx.listener(|this, _, window, cx| this.on_keep_mine(window, cx)))),
                         )
                     })
                     .child(
