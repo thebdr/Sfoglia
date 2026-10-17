@@ -332,19 +332,96 @@ fn on_deep_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     })
 }
 
-/// How deep XML may nest. roxmltree recurses per element with no limit of its own (saphyr stops
-/// flow collections at 256 levels and toml at about 80, both with their own message), so the
-/// text is scanned for its tag nesting before it is parsed.
+/// How deep YAML and XML may nest. roxmltree recurses per element with no limit of its own, and
+/// saphyr's loader limits flow collections only (compact block sequences put a level in two
+/// bytes), so the text is checked before it is built; toml stops at about 80 with its own message.
 const MAX_DEPTH: usize = 200;
+
+/// Refuse YAML nested past `MAX_DEPTH` by counting the parser's events, which it produces
+/// without recursion. A scan error here is left to the loader, which reports it.
+fn check_yaml_depth(text: &str) -> Result<(), ParseError> {
+    use saphyr_parser::Event;
+    let mut depth = 0usize;
+    for event in saphyr_parser::Parser::new_from_str(text) {
+        let Ok((event, span)) = event else { return Ok(()) };
+        match event {
+            Event::SequenceStart(..) | Event::MappingStart(..) => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(ParseError {
+                        line: span.start.line().max(1),
+                        column: span.start.col() + 1,
+                        message: format!("values nested deeper than {MAX_DEPTH} levels"),
+                    });
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 fn too_deep(text: &str, offset: usize, what: &str) -> ParseError {
     let (line, column) = line_column(text, offset);
     ParseError { line, column, message: format!("{what} nested deeper than {MAX_DEPTH} levels") }
 }
 
-/// Refuse `text` when its elements nest deeper than `MAX_DEPTH`; comments, CDATA, processing
-/// instructions and the DOCTYPE are skipped, quotes inside tags honoured.
+/// Refuse `text` when its elements nest deeper than `MAX_DEPTH`, in the document and inside any
+/// entity value of its DOCTYPE (the markup there is parsed where the entity is referenced).
 fn check_xml_depth(text: &str) -> Result<(), ParseError> {
+    if let Some(offset) = xml_tag_overflow(text) {
+        return Err(too_deep(text, offset, "elements"));
+    }
+    if let Some(doctype) = xml_prolog(text).1 {
+        let base = doctype.as_ptr() as usize - text.as_ptr() as usize;
+        let mut from = 0;
+        while let Some(at) = doctype[from..].find("<!ENTITY") {
+            let start = from + at;
+            let rest = &doctype[start + "<!ENTITY".len()..];
+            let after_name = rest.trim_start().split_once(char::is_whitespace).map(|(_, v)| v.trim_start()).unwrap_or("");
+            if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let value = after_name[1..].split(quote).next().unwrap_or("");
+                if xml_tag_overflow(&decode_lt_references(value)).is_some() {
+                    return Err(too_deep(text, base + start, "elements"));
+                }
+            }
+            from = start + "<!ENTITY".len();
+        }
+    }
+    Ok(())
+}
+
+/// An entity value with `&#60;` or `&#x3c;` holds a `<` that becomes markup where it is referenced.
+fn decode_lt_references(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find("&#") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        let (digits, radix) = match tail.strip_prefix(['x', 'X']) {
+            Some(hex) => (hex, 16),
+            None => (tail, 10),
+        };
+        let len = digits.find(';').unwrap_or(0);
+        match u32::from_str_radix(&digits[..len], radix) {
+            Ok(60) if len > 0 => {
+                out.push('<');
+                rest = &digits[len + 1..];
+            }
+            _ => {
+                out.push_str("&#");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The offset of the start tag that nests deeper than `MAX_DEPTH`, if any; comments, CDATA,
+/// processing instructions and the DOCTYPE are skipped, quotes inside tags honoured.
+fn xml_tag_overflow(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0usize;
     let mut i = 0;
@@ -389,13 +466,13 @@ fn check_xml_depth(text: &str) -> Result<(), ParseError> {
             if !self_closing {
                 depth += 1;
                 if depth > MAX_DEPTH {
-                    return Err(too_deep(text, start, "elements"));
+                    return Some(start);
                 }
             }
             i = j + 1;
         }
     }
-    Ok(())
+    None
 }
 
 /// The 1-based line and column of a byte offset.
@@ -775,6 +852,7 @@ fn walk_yaml(value: &Yaml, nodes: &mut Vec<Node>, key: String, depth: u32) {
 }
 
 fn load_yaml(text: &str) -> Result<Vec<Yaml<'_>>, ParseError> {
+    check_yaml_depth(text)?;
     Yaml::load_from_str(text).map_err(|error| {
         let marker = error.marker();
         ParseError { line: marker.line().max(1), column: marker.col() + 1, message: error.info().to_string() }
@@ -1822,25 +1900,32 @@ mod tests {
     fn deep_nesting_in_every_format_parses_or_is_refused_but_never_crashes() {
         // The window's main thread has a megabyte of stack on Windows; each parser is called from a thread
         // of that size and must come back with the exact tree or the exact refusal, however the input nests.
-        // JSON nests without limit; YAML stops flow collections at saphyr's 256 and takes block nesting as
-        // deep as a file can indent; TOML stops at its parser's limit of about eighty; XML at the scan's 200.
+        // JSON nests without limit; YAML stops at the check's 200 in block form and at the scanner's own 256
+        // in flow form (its tokens run ahead of the events); XML at 200, entity values included; TOML at its
+        // parser's limit of about eighty.
         let flow = |open: &str, close: &str, n: usize| format!("{}1{}\n", open.repeat(n), close.repeat(n));
-        let block_yaml: String = (0..1000).map(|i| format!("{}a:\n", "  ".repeat(i))).collect::<String>() + &"  ".repeat(1000) + "1\n";
-        let recursion = "line 1, column 256: recursion limit exceeded";
+        let block = |n: usize| (0..n).map(|i| format!("{}a:\n", "  ".repeat(i))).collect::<String>() + &"  ".repeat(n) + "1\n";
         let toml_limit = "line 1, column 85: cannot recurse further; max recursion depth met";
         let cases: Vec<(&str, Format, String, Result<(usize, usize), &str>)> = vec![
             ("json 50000", Format::Json, flow("[", "]", 50_000), Ok((50_001, 50_001))),
             ("jsonl 50000", Format::JsonLines, flow("[", "]", 50_000), Ok((50_002, 50_002))),
-            ("yaml flow 5000", Format::Yaml, flow("[", "]", 5_000), Err(recursion)),
+            ("yaml flow 5000", Format::Yaml, flow("[", "]", 5_000), Err("line 1, column 256: recursion limit exceeded")),
+            ("yaml compact block 200000", Format::Yaml, "- ".repeat(200_000) + "x\n", Err("line 1, column 401: values nested deeper than 200 levels")),
+            ("yaml compact block 150", Format::Yaml, "- ".repeat(150) + "x\n", Ok((151, 151))),
             ("yaml flow 150", Format::Yaml, flow("[", "]", 150), Ok((151, 151))),
-            ("yaml block 1000", Format::Yaml, block_yaml, Ok((1001, 1001))),
-            ("yaml apostrophe then 230", Format::Yaml, format!("it's: 1\nb: {}", flow("[", "]", 230)), Ok((233, 232))),
+            ("yaml block 1000", Format::Yaml, block(1000), Err("line 201, column 401: values nested deeper than 200 levels")),
+            ("yaml block 150", Format::Yaml, block(150), Ok((151, 151))),
+            ("yaml apostrophe then 150", Format::Yaml, format!("it's: 1\nb: {}", flow("[", "]", 150)), Ok((153, 152))),
+            ("yaml apostrophe then 230", Format::Yaml, format!("it's: 1\nb: {}", flow("[", "]", 230)), Err("line 2, column 203: values nested deeper than 200 levels")),
             ("yaml block scalar of brackets", Format::Yaml, format!("a: |\n  {}\n", "[".repeat(250)), Ok((2, 2))),
             ("toml 5000", Format::Toml, format!("a = {}", flow("[", "]", 5_000)), Err(toml_limit)),
             ("toml 150", Format::Toml, format!("a = {}", flow("[", "]", 150)), Err(toml_limit)),
             ("toml 79", Format::Toml, format!("a = {}", flow("[", "]", 79)), Ok((81, 81))),
             ("xml 20000", Format::Xml, format!("{}x{}", "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 601: elements nested deeper than 200 levels")),
             ("xml 150", Format::Xml, format!("{}x{}", "<a>".repeat(150), "</a>".repeat(150)), Ok((150, 150))),
+            ("xml entity 20000", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"{}x{}\">]><r>&e;</r>", "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 14: elements nested deeper than 200 levels")),
+            ("xml entity by char refs 20000", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"{}x{}\">]><r>&e;</r>", "&#60;a>".repeat(20_000), "&#x3C;/a>".repeat(20_000)), Err("line 1, column 14: elements nested deeper than 200 levels")),
+            ("xml entity 100 in 50", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"{}x{}\">]>{}&e;{}", "<a>".repeat(100), "</a>".repeat(100), "<r>".repeat(50), "</r>".repeat(50)), Ok((150, 150))),
         ];
         for (name, format, text, expected) in cases {
             let outcome = std::thread::Builder::new()
