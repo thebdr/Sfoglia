@@ -522,44 +522,20 @@ fn xml_expansion_budget(text: &str) -> usize {
     1_000_000usize.max(text.len().saturating_mul(8))
 }
 
-/// The general entities a DOCTYPE declares inline, by name, with their values as written:
-/// comments, processing instructions and the other declarations' quoted values are skipped,
-/// so a `<!ENTITY` written inside them is not taken for a declaration.
-fn xml_entities(doctype: &str) -> Vec<(String, String)> {
-    let mut entities = Vec::new();
-    let mut i = 0;
-    while i < doctype.len() {
-        let rest = &doctype[i..];
-        if rest.starts_with("<!--") {
-            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
-        } else if rest.starts_with("<?") {
-            i += rest.find("?>").map_or(rest.len(), |e| e + 2);
-        } else if rest.starts_with("<!DOCTYPE") {
-            i += xml_doctype_header_end(rest);
-        } else if rest.starts_with("<!ENTITY") {
-            let after = rest["<!ENTITY".len()..].trim_start();
-            let (name, after_name) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
-            let after_name = after_name.trim_start();
-            if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                let value = after_name[1..].split(quote).next().unwrap_or("");
-                if !name.starts_with('%') {
-                    entities.push((name.to_string(), value.to_string()));
-                }
-            }
-            i += xml_declaration_end(rest);
-        } else if rest.starts_with("<!") {
-            i += xml_declaration_end(rest);
-        } else {
-            i += rest.chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    entities
+/// XML's own whitespace: space, tab, carriage return and line feed (Rust's `is_whitespace`
+/// takes in characters XML allows inside names).
+fn xml_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
-/// The length of the `<!...>` declaration that starts `text`: up to its `>` outside quotes.
+/// The length of the `<!...>` declaration that starts `text`, as roxmltree reads it: an
+/// `<!ENTITY` ends at its `>` outside quotes, every other declaration at its first `>`.
 fn xml_declaration_end(text: &str) -> usize {
     let bytes = text.as_bytes();
-    let mut i = 2;
+    if !text.starts_with("<!ENTITY") {
+        return text.find('>').map_or(text.len(), |e| e + 1);
+    }
+    let mut i = "<!ENTITY".len();
     while i < bytes.len() {
         match bytes[i] {
             quote @ (b'"' | b'\'') => {
@@ -574,6 +550,79 @@ fn xml_declaration_end(text: &str) -> usize {
         }
     }
     text.len()
+}
+
+/// Where a `<!DOCTYPE ...>` that starts `text` ends: after its `>`, or after the `>` that
+/// follows its internal subset's `]`. The subset is walked declaration by declaration, as
+/// roxmltree walks it, so a `]`, a quote or a `>` inside a declaration, a comment or a
+/// processing instruction ends nothing.
+fn doctype_end(text: &str) -> Option<usize> {
+    let header = xml_doctype_header_end(text);
+    if !text[..header].ends_with('[') {
+        return Some(header);
+    }
+    let mut i = header;
+    loop {
+        let rest = &text[i..];
+        let rest_trimmed = rest.trim_start_matches(xml_space);
+        i += rest.len() - rest_trimmed.len();
+        if rest_trimmed.is_empty() {
+            return None;
+        }
+        if rest_trimmed.starts_with("<!--") {
+            i += rest_trimmed.find("-->")? + 3;
+        } else if rest_trimmed.starts_with("<?") {
+            i += rest_trimmed.find("?>")? + 2;
+        } else if rest_trimmed.starts_with("<!") {
+            i += xml_declaration_end(rest_trimmed);
+        } else if rest_trimmed.starts_with(']') {
+            let close = rest_trimmed.find('>')?;
+            return Some(i + close + 1);
+        } else {
+            // A parameter entity reference or stray text: step to the next marker.
+            i += rest_trimmed.find(['<', ']']).filter(|&p| p > 0).unwrap_or_else(|| rest_trimmed.chars().next().map_or(1, char::len_utf8));
+        }
+    }
+}
+
+/// The general entities a DOCTYPE declares inline, by name, with their values as written;
+/// the subset is walked as `doctype_end` walks it, so a `<!ENTITY` inside a comment, a
+/// processing instruction or another declaration is not taken for a declaration.
+fn xml_entities(doctype: &str) -> Vec<(String, String)> {
+    let mut entities = Vec::new();
+    let header = xml_doctype_header_end(doctype);
+    if !doctype[..header].ends_with('[') {
+        return entities;
+    }
+    let mut i = header;
+    while i < doctype.len() {
+        let rest = &doctype[i..];
+        let rest_trimmed = rest.trim_start_matches(xml_space);
+        i += rest.len() - rest_trimmed.len();
+        if rest_trimmed.starts_with("<!--") {
+            i += rest_trimmed.find("-->").map_or(rest_trimmed.len(), |e| e + 3);
+        } else if rest_trimmed.starts_with("<?") {
+            i += rest_trimmed.find("?>").map_or(rest_trimmed.len(), |e| e + 2);
+        } else if rest_trimmed.starts_with("<!ENTITY") {
+            let after = rest_trimmed["<!ENTITY".len()..].trim_start_matches(xml_space);
+            let (name, after_name) = after.split_once(xml_space).unwrap_or((after, ""));
+            let after_name = after_name.trim_start_matches(xml_space);
+            if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let value = after_name[1..].split(quote).next().unwrap_or("");
+                if !name.starts_with('%') {
+                    entities.push((name.to_string(), value.to_string()));
+                }
+            }
+            i += xml_declaration_end(rest_trimmed);
+        } else if rest_trimmed.starts_with("<!") {
+            i += xml_declaration_end(rest_trimmed);
+        } else if rest_trimmed.starts_with(']') || rest_trimmed.is_empty() {
+            break;
+        } else {
+            i += rest_trimmed.find(['<', ']']).filter(|&p| p > 0).unwrap_or_else(|| rest_trimmed.chars().next().map_or(1, char::len_utf8));
+        }
+    }
+    entities
 }
 
 /// The end of the `<!DOCTYPE ...` header that starts `text`: just past its `[` outside quotes,
@@ -669,27 +718,37 @@ fn check_xml_expansion(text: &str) -> Result<(), ParseError> {
     let body = &text[doctype_end..];
     let bytes = body.as_bytes();
     let mut total = 0usize;
+    // The text is sliced at `<` and `&` only, so a step over a multi-byte character is safe.
     let mut i = 0;
     while i < bytes.len() {
-        let rest = &body[i..];
-        if rest.starts_with("<!--") {
-            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
-        } else if rest.starts_with("<![CDATA[") {
-            i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
-        } else if rest.starts_with("<?") {
-            i += rest.find("?>").map_or(rest.len(), |e| e + 2);
-        } else if bytes[i] == b'&' && !rest.starts_with("&#") {
-            let Some(end) = rest.find(';') else { break };
-            if let Some(&expanded) = lengths.get(&rest[1..end]) {
-                total = total.saturating_add(expanded);
-                if total > budget {
-                    let (line, column) = line_column(text, doctype_end + i);
-                    return Err(ParseError { line, column, message: format!("entities expand to more than {budget} bytes") });
+        match bytes[i] {
+            b'<' => {
+                let rest = &body[i..];
+                if rest.starts_with("<!--") {
+                    i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+                } else if rest.starts_with("<![CDATA[") {
+                    i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
+                } else if rest.starts_with("<?") {
+                    i += rest.find("?>").map_or(rest.len(), |e| e + 2);
+                } else {
+                    i += 1;
                 }
             }
-            i += end + 1;
-        } else {
-            i += 1;
+            b'&' => {
+                let rest = &body[i..];
+                let Some(end) = rest.find(';') else { break };
+                if !rest.starts_with("&#")
+                    && let Some(&expanded) = lengths.get(&rest[1..end])
+                {
+                    total = total.saturating_add(expanded);
+                    if total > budget {
+                        let (line, column) = line_column(text, doctype_end + i);
+                        return Err(ParseError { line, column, message: format!("entities expand to more than {budget} bytes") });
+                    }
+                }
+                i += end + 1;
+            }
+            _ => i += 1,
         }
     }
     Ok(())
@@ -1470,38 +1529,6 @@ fn xml_prolog(text: &str) -> (Option<&str>, Option<&str>) {
     (declaration, doctype)
 }
 
-/// Where a `<!DOCTYPE ...>` that starts `text` ends: after its `>`, or after the `>` that
-/// follows its internal subset's `]`; quoted strings and comments are skipped.
-fn doctype_end(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut i = "<!DOCTYPE".len();
-    let mut in_subset = false;
-    while i < bytes.len() {
-        match bytes[i] {
-            quote @ (b'"' | b'\'') => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += 1;
-                }
-                i += 1;
-            }
-            b'<' if text[i..].starts_with("<!--") => i = text[i..].find("-->").map(|e| i + e + 3)?,
-            b'<' if text[i..].starts_with("<?") => i = text[i..].find("?>").map(|e| i + e + 2)?,
-            b'[' if !in_subset => {
-                in_subset = true;
-                i += 1;
-            }
-            b']' if in_subset => {
-                in_subset = false;
-                i += 1;
-            }
-            b'>' if !in_subset => return Some(i + 1),
-            _ => i += 1,
-        }
-    }
-    None
-}
-
 fn pretty_xml(text: &str) -> Result<String, ParseError> {
     // The same walk as the tree's, so a file too deep for it is refused here too.
     parse_xml(text, &mut Vec::new())?;
@@ -2250,6 +2277,11 @@ mod tests {
             ("xml decoy entity in the system literal", Format::Xml, format!("<!DOCTYPE r SYSTEM \"[<!ENTITY e1 'a'>\" [<!ENTITY e0 \"{}\"><!ENTITY e1 \"{}\">]><r>{}</r>", "a".repeat(10_000), "&e0;".repeat(255), "&e1;".repeat(40)), Err("line 1, column 11096: entities expand to more than 1000000 bytes")),
             ("xml fifty thousand chained entities", Format::Xml, (0..50_000).map(|i| format!("<!ENTITY e{i} \"&e{};\">", i + 1)).fold("<!DOCTYPE r [".to_string(), |text, d| text + &d) + "<!ENTITY e50000 \"x\">]><r>&e0;</r>", Err("line 1, column 203: a possible entity reference loop is detected")),
             ("xml eight chained entities", Format::Xml, (0..8).map(|i| format!("<!ENTITY e{i} \"&e{};\">", i + 1)).fold("<!DOCTYPE r [".to_string(), |text, d| text + &d) + "<!ENTITY e8 \"x\">]><r>&e0;</r>", Ok((1, 1))),
+            ("xml non-ascii text after an entity declaration", Format::Xml, "<!DOCTYPE r [<!ENTITY e \"x\">]><r>café</r>".to_string(), Ok((1, 1))),
+            ("xml non-ascii attribute after an entity declaration", Format::Xml, "<!DOCTYPE r [<!ENTITY e \"x\">]><r a=\"é\">&e;</r>".to_string(), Ok((2, 2))),
+            ("xml attlist with a quote before the entity", Format::Xml, format!("<!DOCTYPE r [\n<!ATTLIST r a CDATA '>\n<!ENTITY e \"{}\">\n<!-- ' -->\n]>\n<r>{}</r>", "A".repeat(100_000), "&e;".repeat(1000)), Err("line 6, column 34: entities expand to more than 1000000 bytes")),
+            ("xml element declaration holding a subset end", Format::Xml, format!("<!DOCTYPE r [\n<!ELEMENT r ANY]>\n<!ENTITY e \"{}\">\n]>\n<r>{}</r>", "A".repeat(100_000), "&e;".repeat(1000)), Err("line 5, column 34: entities expand to more than 1000000 bytes")),
+            ("xml entity name with an ogham space mark", Format::Xml, format!("<!DOCTYPE r [\n<!ENTITY e{0}x \"{1}\">\n]>\n<r>{2}</r>", '\u{1680}', "A".repeat(100_000), format!("&e{}x;", '\u{1680}').repeat(1000)), Err("line 4, column 54: entities expand to more than 1000000 bytes")),
             ("xml small entity used a thousand times", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"hello\">]><r>{}</r>", "&e;".repeat(1000)), Ok((1, 1))),
             ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
             ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
