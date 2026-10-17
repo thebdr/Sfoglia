@@ -470,20 +470,14 @@ fn check_xml_depth(text: &str) -> Result<(), ParseError> {
     if let Some(offset) = xml_tag_overflow(text) {
         return Err(too_deep(text, offset, "elements"));
     }
+    // Markup inside an entity's value is parsed where the entity is referenced: each value must
+    // stay within the bound on its own (character references for `<` included).
     if let Some(doctype) = xml_prolog(text).1 {
         let base = doctype.as_ptr() as usize - text.as_ptr() as usize;
-        let mut from = 0;
-        while let Some(at) = doctype[from..].find("<!ENTITY") {
-            let start = from + at;
-            let rest = &doctype[start + "<!ENTITY".len()..];
-            let after_name = rest.trim_start().split_once(char::is_whitespace).map(|(_, v)| v.trim_start()).unwrap_or("");
-            if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                let value = after_name[1..].split(quote).next().unwrap_or("");
-                if xml_tag_overflow(&decode_lt_references(value)).is_some() {
-                    return Err(too_deep(text, base + start, "elements"));
-                }
+        for entity in xml_entities(doctype) {
+            if xml_tag_overflow(&decode_lt_references(&entity.value)).is_some() {
+                return Err(too_deep(text, base + entity.offset, "elements"));
             }
-            from = start + "<!ENTITY".len();
         }
     }
     Ok(())
@@ -528,6 +522,20 @@ fn xml_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
+/// Past the `-->` that closes the comment starting `text`, looked for after the opener: a
+/// comment written `<!-->` does not close itself (roxmltree reads it the same way).
+fn xml_comment_end(text: &str) -> Option<usize> {
+    text.get(4..)?.find("-->").map(|e| e + 7)
+}
+
+/// A general entity the DOCTYPE declares inline: its name, its value as written, and where its
+/// declaration starts in the DOCTYPE.
+struct Entity {
+    name: String,
+    value: String,
+    offset: usize,
+}
+
 /// The length of the `<!...>` declaration that starts `text`, as roxmltree reads it: an
 /// `<!ENTITY` ends at its `>` outside quotes, every other declaration at its first `>`.
 fn xml_declaration_end(text: &str) -> usize {
@@ -570,7 +578,7 @@ fn doctype_end(text: &str) -> Option<usize> {
             return None;
         }
         if rest_trimmed.starts_with("<!--") {
-            i += rest_trimmed.find("-->")? + 3;
+            i += xml_comment_end(rest_trimmed)?;
         } else if rest_trimmed.starts_with("<?") {
             i += rest_trimmed.find("?>")? + 2;
         } else if rest_trimmed.starts_with("<!") {
@@ -588,7 +596,7 @@ fn doctype_end(text: &str) -> Option<usize> {
 /// The general entities a DOCTYPE declares inline, by name, with their values as written;
 /// the subset is walked as `doctype_end` walks it, so a `<!ENTITY` inside a comment, a
 /// processing instruction or another declaration is not taken for a declaration.
-fn xml_entities(doctype: &str) -> Vec<(String, String)> {
+fn xml_entities(doctype: &str) -> Vec<Entity> {
     let mut entities = Vec::new();
     let header = xml_doctype_header_end(doctype);
     if !doctype[..header].ends_with('[') {
@@ -600,7 +608,7 @@ fn xml_entities(doctype: &str) -> Vec<(String, String)> {
         let rest_trimmed = rest.trim_start_matches(xml_space);
         i += rest.len() - rest_trimmed.len();
         if rest_trimmed.starts_with("<!--") {
-            i += rest_trimmed.find("-->").map_or(rest_trimmed.len(), |e| e + 3);
+            i += xml_comment_end(rest_trimmed).unwrap_or(rest_trimmed.len());
         } else if rest_trimmed.starts_with("<?") {
             i += rest_trimmed.find("?>").map_or(rest_trimmed.len(), |e| e + 2);
         } else if rest_trimmed.starts_with("<!ENTITY") {
@@ -610,7 +618,7 @@ fn xml_entities(doctype: &str) -> Vec<(String, String)> {
             if let Some(quote) = after_name.chars().next().filter(|c| *c == '"' || *c == '\'') {
                 let value = after_name[1..].split(quote).next().unwrap_or("");
                 if !name.starts_with('%') {
-                    entities.push((name.to_string(), value.to_string()));
+                    entities.push(Entity { name: name.to_string(), value: value.to_string(), offset: i });
                 }
             }
             i += xml_declaration_end(rest_trimmed);
@@ -650,11 +658,11 @@ fn xml_doctype_header_end(text: &str) -> usize {
 /// computed once per entity with an index by name (the first declaration wins, as in
 /// roxmltree) and an explicit stack, so many declarations or a long chain cost no more than
 /// their text. A chain back to itself counts its text once; roxmltree refuses such a file.
-fn xml_expanded_lengths(entities: &[(String, String)]) -> std::collections::HashMap<String, usize> {
+fn xml_expanded_lengths(entities: &[Entity]) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
     let mut index: HashMap<&str, &str> = HashMap::new();
-    for (name, value) in entities {
-        index.entry(name.as_str()).or_insert(value.as_str());
+    for entity in entities {
+        index.entry(entity.name.as_str()).or_insert(entity.value.as_str());
     }
     let references = |value: &str| -> Vec<String> {
         let mut refs = Vec::new();
@@ -672,7 +680,7 @@ fn xml_expanded_lengths(entities: &[(String, String)]) -> std::collections::Hash
         refs
     };
     let mut memo: HashMap<String, usize> = HashMap::new();
-    for (name, _) in entities {
+    for Entity { name, .. } in entities {
         if memo.contains_key(name.as_str()) {
             continue;
         }
@@ -725,7 +733,7 @@ fn check_xml_expansion(text: &str) -> Result<(), ParseError> {
             b'<' => {
                 let rest = &body[i..];
                 if rest.starts_with("<!--") {
-                    i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+                    i += xml_comment_end(rest).unwrap_or(rest.len());
                 } else if rest.starts_with("<![CDATA[") {
                     i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
                 } else if rest.starts_with("<?") {
@@ -767,7 +775,7 @@ fn xml_tag_overflow(text: &str) -> Option<usize> {
         }
         let rest = &text[i..];
         if rest.starts_with("<!--") {
-            i += rest.find("-->").map_or(rest.len(), |e| e + 3);
+            i += xml_comment_end(rest).unwrap_or(rest.len());
         } else if rest.starts_with("<![CDATA[") {
             i += rest.find("]]>").map_or(rest.len(), |e| e + 3);
         } else if rest.starts_with("<?") {
@@ -1314,19 +1322,19 @@ fn xml_element_name(node: roxmltree::Node) -> String {
     let input = node.document().input_text();
     let range = node.range();
     let after = &input[(range.start + 1).min(input.len())..range.end.min(input.len())];
-    after.split(|c: char| c.is_whitespace() || c == '/' || c == '>').next().unwrap_or_default().to_string()
+    after.split(|c: char| xml_space(c) || c == '/' || c == '>').next().unwrap_or_default().to_string()
 }
 
 /// An attribute's name as written in the file, prefix included.
 fn xml_attribute_name(input: &str, attribute: &roxmltree::Attribute) -> String {
     let range = attribute.range();
     let text = &input[range.start.min(input.len())..range.end.min(input.len())];
-    text.split('=').next().unwrap_or_default().trim().to_string()
+    text.split('=').next().unwrap_or_default().trim_matches(xml_space).to_string()
 }
 
 fn xml_children<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Vec<roxmltree::Node<'a, 'input>> {
     node.children()
-        .filter(|child| !(child.is_text() && child.text().is_some_and(|t| t.trim().is_empty())))
+        .filter(|child| !(child.is_text() && child.text().is_some_and(|t| t.trim_matches(xml_space).is_empty())))
         .collect()
 }
 
@@ -1348,7 +1356,7 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<
             }
             let children = xml_children(node);
             if children.len() == 1 && children[0].is_text() {
-                let text = children[0].text().unwrap_or_default().trim().to_string();
+                let text = children[0].text().unwrap_or_default().trim_matches(xml_space).to_string();
                 let end = nodes.len();
                 nodes[ix].end = end;
                 nodes[ix].value = text;
@@ -1361,17 +1369,17 @@ fn walk_xml(node: roxmltree::Node, nodes: &mut Vec<Node>, depth: u32) -> Result<
             close(nodes, ix, count);
         }
         NodeType::Text => {
-            let text = node.text().unwrap_or_default().trim().to_string();
+            let text = node.text().unwrap_or_default().trim_matches(xml_space).to_string();
             if !text.is_empty() {
                 push(nodes, depth, "text()".to_string(), Kind::Text, text);
             }
         }
         NodeType::Comment => {
-            push(nodes, depth, "comment()".to_string(), Kind::Comment, node.text().unwrap_or_default().trim().to_string());
+            push(nodes, depth, "comment()".to_string(), Kind::Comment, node.text().unwrap_or_default().trim_matches(xml_space).to_string());
         }
         NodeType::PI => {
             let pi = node.pi().map(|pi| match pi.value {
-                Some(value) => format!("{} {}", pi.target, value.trim()),
+                Some(value) => format!("{} {}", pi.target, value.trim_matches(xml_space)),
                 None => pi.target.to_string(),
             });
             push(nodes, depth, "processing-instruction()".to_string(), Kind::Instruction, pi.unwrap_or_default());
@@ -1516,8 +1524,8 @@ fn xml_prolog(text: &str) -> (Option<&str>, Option<&str>) {
             let Some(end) = trimmed.find("?>") else { break };
             rest = &trimmed[end + 2..];
         } else if trimmed.starts_with("<!--") {
-            let Some(end) = trimmed.find("-->") else { break };
-            rest = &trimmed[end + 3..];
+            let Some(end) = xml_comment_end(trimmed) else { break };
+            rest = &trimmed[end..];
         } else if trimmed.starts_with("<!DOCTYPE") {
             let Some(end) = doctype_end(trimmed) else { break };
             doctype = Some(&trimmed[..end]);
@@ -1609,7 +1617,7 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
                 out.push_str("/>\n");
             } else if children.len() == 1 && children[0].is_text() {
                 out.push('>');
-                out.push_str(&escape_xml(children[0].text().unwrap_or_default().trim(), false));
+                out.push_str(&escape_xml(children[0].text().unwrap_or_default().trim_matches(xml_space), false));
                 out.push_str(&format!("</{name}>\n"));
             } else {
                 out.push_str(">\n");
@@ -1620,18 +1628,18 @@ fn write_xml(node: roxmltree::Node, depth: usize, out: &mut String) {
             }
         }
         NodeType::Text => {
-            let text = node.text().unwrap_or_default().trim();
+            let text = node.text().unwrap_or_default().trim_matches(xml_space);
             if !text.is_empty() {
                 out.push_str(&format!("{indent}{}\n", escape_xml(text, false)));
             }
         }
         NodeType::Comment => {
-            out.push_str(&format!("{indent}<!-- {} -->\n", node.text().unwrap_or_default().trim()));
+            out.push_str(&format!("{indent}<!-- {} -->\n", node.text().unwrap_or_default().trim_matches(xml_space)));
         }
         NodeType::PI => {
             if let Some(pi) = node.pi() {
                 match pi.value {
-                    Some(value) => out.push_str(&format!("{indent}<?{} {}?>\n", pi.target, value.trim())),
+                    Some(value) => out.push_str(&format!("{indent}<?{} {}?>\n", pi.target, value.trim_matches(xml_space))),
                     None => out.push_str(&format!("{indent}<?{}?>\n", pi.target)),
                 }
             }
@@ -2141,6 +2149,17 @@ mod tests {
         assert_eq!(rows(&Tree::parse(Format::Xml, subset).unwrap()), vec![(0, "r", "element", "0 entries")]);
         assert_eq!(pretty(Format::Xml, subset).unwrap(), "<!DOCTYPE r [<!-- c --><?pi x?>]>\n<r/>\n");
         assert_eq!(Tree::parse(Format::Xml, &pretty(Format::Xml, subset).unwrap()).unwrap().nodes, Tree::parse(Format::Xml, subset).unwrap().nodes);
+        // A comment that opens with a dash does not close itself, and XML's whitespace is the only whitespace:
+        // an ogham space mark stays inside names and values.
+        let dashed = "<!-->--><!DOCTYPE r [<!-- inside --><?pi inside?>]><r/>";
+        assert_eq!(rows(&Tree::parse(Format::Xml, dashed).unwrap()), vec![(0, "comment()", "comment", ">"), (0, "r", "element", "0 entries")]);
+        assert_eq!(pretty(Format::Xml, dashed).unwrap(), "<!DOCTYPE r [<!-- inside --><?pi inside?>]>\n<!-- > -->\n<r/>\n");
+        let ogham = format!("<a{0}b c{0}d=\"1\"><?p {0}?></a{0}b>", '\u{1680}');
+        let tree = Tree::parse(Format::Xml, &ogham).unwrap();
+        assert_eq!(rows(&tree), vec![(0, "a\u{1680}b", "element", "2 entries"), (1, "@c\u{1680}d", "attribute", "1"), (1, "processing-instruction()", "instruction", "p \u{1680}")]);
+        let pretty_ogham = pretty(Format::Xml, &ogham).unwrap();
+        assert_eq!(pretty_ogham, format!("<a{0}b c{0}d=\"1\">\n  <?p {0}?>\n</a{0}b>\n", '\u{1680}'));
+        assert_eq!(Tree::parse(Format::Xml, &pretty_ogham).unwrap().nodes, tree.nodes);
         // A DOCTYPE and namespace declarations are written out, so the pretty form is still well-formed.
         let typed = "<?xml version=\"1.0\"?><!DOCTYPE note [<!ENTITY e \"x\">]><note>&e;</note>";
         assert_eq!(pretty(Format::Xml, typed).unwrap(), "<?xml version=\"1.0\"?>\n<!DOCTYPE note [<!ENTITY e \"x\">]>\n<note>x</note>\n");
@@ -2282,6 +2301,9 @@ mod tests {
             ("xml attlist with a quote before the entity", Format::Xml, format!("<!DOCTYPE r [\n<!ATTLIST r a CDATA '>\n<!ENTITY e \"{}\">\n<!-- ' -->\n]>\n<r>{}</r>", "A".repeat(100_000), "&e;".repeat(1000)), Err("line 6, column 34: entities expand to more than 1000000 bytes")),
             ("xml element declaration holding a subset end", Format::Xml, format!("<!DOCTYPE r [\n<!ELEMENT r ANY]>\n<!ENTITY e \"{}\">\n]>\n<r>{}</r>", "A".repeat(100_000), "&e;".repeat(1000)), Err("line 5, column 34: entities expand to more than 1000000 bytes")),
             ("xml entity name with an ogham space mark", Format::Xml, format!("<!DOCTYPE r [\n<!ENTITY e{0}x \"{1}\">\n]>\n<r>{2}</r>", '\u{1680}', "A".repeat(100_000), format!("&e{}x;", '\u{1680}').repeat(1000)), Err("line 4, column 54: entities expand to more than 1000000 bytes")),
+            ("xml comment that opens with a dash", Format::Xml, format!("<!-->--> <!DOCTYPE r [<!ENTITY a \"{}\"><!ENTITY b \"{}\">]><r>{}</r>", "x".repeat(4000), "&a;".repeat(250), "&b;".repeat(40)), Err("line 1, column 4809: entities expand to more than 1000000 bytes")),
+            ("xml comment that opens with a dash inside the subset", Format::Xml, format!("<!DOCTYPE r [<!-->]>--> <!ENTITY d \"{}x{}\">]><r>&d;</r>", "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 25: elements nested deeper than 200 levels")),
+            ("xml entity name with an ogham space mark and a deep value", Format::Xml, format!("<!DOCTYPE r [<!ENTITY d{0}x \"{1}x{2}\">]><r>&d{0}x;</r>", '\u{1680}', "<a>".repeat(20_000), "</a>".repeat(20_000)), Err("line 1, column 14: elements nested deeper than 200 levels")),
             ("xml small entity used a thousand times", Format::Xml, format!("<!DOCTYPE r [<!ENTITY e \"hello\">]><r>{}</r>", "&e;".repeat(1000)), Ok((1, 1))),
             ("xml big and plain", Format::Xml, format!("<r>\n{}</r>\n", "  <i>v</i>\n".repeat(340_000)), Ok((340_001, 2))),
             ("xml 1.2 million empty elements", Format::Xml, format!("<r>{}</r>", "<i/>".repeat(1_200_000)), Ok((1_200_001, 2))),
