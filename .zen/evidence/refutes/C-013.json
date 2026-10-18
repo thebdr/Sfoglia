@@ -1,0 +1,153 @@
+{
+  "clause": "C-013",
+  "verdict": "holds",
+  "ranAt": "2026-10-18T00:54:30.603Z",
+  "headCommit": "c17f4c139b8c83f3332696d598dcedbe8edb756e",
+  "tests": [
+    {
+      "name": "a_delimited_text_parses_with_quotes_breaks_and_spans",
+      "file": "src/sheet.rs",
+      "symbolSha": "7d1f4944bf3bfd554643c87250af6a76694f4021c8fb829b125ce3a960349ca1"
+    },
+    {
+      "name": "the_delimiter_is_detected_from_the_first_lines",
+      "file": "src/sheet.rs",
+      "symbolSha": "7d1f4944bf3bfd554643c87250af6a76694f4021c8fb829b125ce3a960349ca1"
+    },
+    {
+      "name": "serial_dates_and_numbers_format_as_excel_shows_them",
+      "file": "src/sheet.rs",
+      "symbolSha": "7d1f4944bf3bfd554643c87250af6a76694f4021c8fb829b125ce3a960349ca1"
+    },
+    {
+      "name": "the_delimited_fixtures_parse_to_the_same_fields",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "the_workbook_fixtures_read_their_typed_cells",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "the_spreadsheet_extensions_map_to_their_family",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_csv_opens_as_a_grid_with_its_summary_and_header_toggle",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_header_click_sorts_the_rows_and_a_third_restores_the_order",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "the_search_field_finds_cells_and_counts_them",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "an_edit_in_the_grid_rewrites_its_record_alone_and_saves",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "the_raw_text_toggles_and_the_grid_follows_the_edit",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_workbook_opens_on_its_sheets_with_merges_and_dates",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_large_delimited_text_opens_on_its_text",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "an_edit_in_a_crlf_file_keeps_its_endings",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "an_unchanged_value_writes_nothing_whatever_the_quoting",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_reload_follows_the_file_its_encoding_and_its_budget",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_workbook_that_does_not_open_says_why",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_save_in_another_encoding_renames_it_in_the_summary",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_workbook_reload_that_fails_keeps_the_sheets_and_says_why",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_mixed_column_sorts_numbers_before_text_case_insensitively",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_tsv_opens_by_tabs_and_says_so",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_utf16_file_keeps_its_label_and_its_bytes",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_tab_delimited_csv_is_labelled_by_its_delimiter",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_typed_break_glyph_goes_back_as_a_break",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_match_far_down_scrolls_the_grid_to_it",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_semicolon_and_a_pipe_file_name_their_delimiter",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_cell_selected_under_a_sort_is_its_own_record",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "a_legacy_xls_opens_as_a_workbook",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    },
+    {
+      "name": "the_workbook_names_are_the_excel_family_in_any_case",
+      "file": "tests/sheet.rs",
+      "symbolSha": "cbc7452c4472b36d0d089e018563134758bd2593dd409677e209de97f5ee2ea3"
+    }
+  ]
+}
