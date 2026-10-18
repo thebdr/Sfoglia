@@ -607,7 +607,7 @@ fn archives(root: &Path) -> Result<(), String> {
     }
     println!("wrote {} and the codec variants", fixtures.join("bundle.tar").display());
     // A rar by signature alone, for the path through an installed 7-Zip (a stand-in in the tests).
-    std::fs::write(fixtures.join("fake.rar"), [b"Rar! ".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("fake.rar"), [b"Rar!\x1a\x07\x01\x00".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;
 
     // 7z: LZMA2, one folder; the encrypted one kept once written (AES salts itself).
     {
@@ -643,6 +643,80 @@ fn archives(root: &Path) -> Result<(), String> {
         }
         println!("wrote {}", fixtures.join("bundle.7z").display());
     }
+
+    // The other kinds of entry (C-015): structured data, a PDF, a nested zip, bytes, and a file in a folder the
+    // archive records no entry for; one method and one minute each, so every column sorts differently.
+    {
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, DateTime};
+        let at = |minute: u8, method: CompressionMethod| -> Result<SimpleFileOptions, String> {
+            let stamp = DateTime::from_date_and_time(2026, 10, 18, 12, minute, 0).map_err(|e| err(&e))?;
+            Ok(SimpleFileOptions::default().compression_method(method).last_modified_time(stamp).unix_permissions(0o644))
+        };
+        let inner = {
+            let mut inner = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            inner.start_file("note.txt", at(2, CompressionMethod::Stored)?).map_err(|e| err(&e))?;
+            inner.write_all(note).map_err(|e| err(&e))?;
+            inner.finish().map_err(|e| err(&e))?.into_inner()
+        };
+        let sample = std::fs::read(fixtures.join("sample.json")).map_err(|e| err(&e))?;
+        let pdf = std::fs::read(fixtures.join("three.pdf")).map_err(|e| err(&e))?;
+        let noise = std::fs::read(fixtures.join("noise.bin")).map_err(|e| err(&e))?;
+        let mut more = zip::ZipWriter::new(std::fs::File::create(fixtures.join("more.zip")).map_err(|e| err(&e))?);
+        more.start_file("data.json", at(0, CompressionMethod::Deflated)?).map_err(|e| err(&e))?;
+        more.write_all(&sample).map_err(|e| err(&e))?;
+        more.start_file("three.pdf", at(1, CompressionMethod::Bzip2)?).map_err(|e| err(&e))?;
+        more.write_all(&pdf).map_err(|e| err(&e))?;
+        more.start_file("inner.zip", at(2, CompressionMethod::Stored)?).map_err(|e| err(&e))?;
+        more.write_all(&inner).map_err(|e| err(&e))?;
+        more.start_file("noise.bin", at(3, CompressionMethod::Zstd)?).map_err(|e| err(&e))?;
+        more.write_all(&noise).map_err(|e| err(&e))?;
+        more.start_file("d/n.txt", at(4, CompressionMethod::Deflated)?).map_err(|e| err(&e))?;
+        more.write_all(b"nested\n").map_err(|e| err(&e))?;
+        more.finish().map_err(|e| err(&e))?;
+        println!("wrote {}", fixtures.join("more.zip").display());
+        // Encrypted zips, written once and kept (AES salts and ZipCrypto headers are random).
+        let secret = fixtures.join("secret.zip");
+        if !secret.exists() {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&secret).map_err(|e| err(&e))?);
+            let options = at(0, CompressionMethod::Deflated)?.with_aes_encryption(zip::AesMode::Aes256, "sfoglia");
+            zip.start_file("secret.txt", options).map_err(|e| err(&e))?;
+            zip.write_all(b"The password is sfoglia.\n").map_err(|e| err(&e))?;
+            zip.finish().map_err(|e| err(&e))?;
+            println!("wrote {}", secret.display());
+        }
+        let legacy = fixtures.join("legacy.zip");
+        if !legacy.exists() {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&legacy).map_err(|e| err(&e))?);
+            use zip::unstable::write::FileOptionsExt as _;
+            let options = at(0, CompressionMethod::Deflated)?.with_deprecated_encryption(b"sfoglia").map_err(|e| err(&e))?;
+            zip.start_file("legacy.txt", options).map_err(|e| err(&e))?;
+            zip.write_all(b"ZipCrypto keeps this.\n").map_err(|e| err(&e))?;
+            zip.finish().map_err(|e| err(&e))?;
+            println!("wrote {}", legacy.display());
+        }
+    }
+    // A 7z with its entries encrypted but its headers in the clear (7-Zip's own default), written once and kept.
+    {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter, EncoderConfiguration, EncoderMethod, NtTime, Password, encoder_options::AesEncoderOptions};
+        let entries = fixtures.join("entries.7z");
+        if !entries.exists() {
+            let mut writer = ArchiveWriter::create(&entries).map_err(|e| err(&e))?;
+            writer.set_encrypt_header(false);
+            writer.set_content_methods(vec![
+                EncoderConfiguration::from(AesEncoderOptions::new(Password::new("sfoglia"))),
+                EncoderConfiguration::new(EncoderMethod::LZMA2),
+            ]);
+            let mut entry = ArchiveEntry::new_file("secret.txt");
+            entry.has_last_modified_date = true;
+            entry.last_modified_date = NtTime::new((UNIX + 11_644_473_600) * 10_000_000);
+            writer.push_archive_entry(entry, Some(&b"The password is sfoglia.\n"[..])).map_err(|e| err(&e))?;
+            writer.finish().map_err(|e| err(&e))?;
+            println!("wrote {}", entries.display());
+        }
+    }
+    // A rar by signature whose name asks the 7-Zip stand-in for a password.
+    std::fs::write(fixtures.join("fake-secret.rar"), [b"Rar!\x1a\x07\x01\x00".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;
     Ok(())
 }
 

@@ -79,8 +79,8 @@ SumatraPDF's, and a click anywhere in Sfoglia's window brings the keyboard back)
 ## Archives
 
 An archive opens on the list of its entries: the name with its folder path, the size, the packed size, the date, the
-method and the CRC, with the folders as entries of their own. A click on the arrow in a column header sorts (descending
-first, then ascending, then the archive's order), Ctrl+Shift+F focuses the search field and what is typed there keeps
+method and the CRC, with the folders as entries of their own (recorded by the archive or not). A click on the arrow in a
+column header sorts (descending first, then ascending, then the archive's order), Ctrl+Shift+F focuses the search field and what is typed there keeps
 the entries whose name contains it, any case; the arrows, Home and End move the selection. Enter or a double click on an
 entry opens it inside Sfoglia, read-only (a save says so), in the viewer its name and bytes call for, as a tab named
 `archive › path/inside`; the entry is kept in a folder of its own under the temporary folder, which goes when the tab
@@ -89,8 +89,9 @@ outside it (an entry whose path climbs out is skipped and named in the status ro
 (stored, deflate, bzip2, zstd and lzma entries), 7z (LZMA, LZMA2, BCJ, AES with a password), tar plain or through gzip,
 bzip2, xz, lzma or zstd (`tgz`, `tbz2`, `txz`, `tzst` and the rest of the spellings too), and a lone compressed file as a
 one-entry archive named after the file without its suffix; the container is told by the bytes first, so a `.zip` that
-holds a 7z opens as a 7z. An encrypted archive asks for the password in the tools row and says so after a wrong one,
-counting the tries. rar, cab, iso, rpm, deb, cpio, lha, arj, chm, xar, wim, dmg, vhd and the other containers no library
+holds a 7z opens as a 7z. An encrypted archive (a zip with AES or ZipCrypto entries, a 7z with encrypted entries or
+headers) asks for the password in the tools row, checks it on `Unlock` and says so after a wrong one, counting the
+tries. rar, cab, iso, rpm, deb, cpio, lha, arj, chm, xar, wim, dmg, vhd and the other containers no library
 here reads list and extract through an installed 7-Zip, found like the PDF tools (`SFOGLIA_7ZIP`, the install folder,
 the search path); with none installed the status row says what to install, with a `Look again` button, and the bytes
 show meanwhile. The status row names the container, the entry count and the packed and unpacked totals

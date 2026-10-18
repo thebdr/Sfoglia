@@ -26,3 +26,12 @@ Attributes = A
 CRC = 00000000
 Method = RAR5:LZSS
 
+Path = ..\climb.txt
+Folder = -
+Size = 4
+Packed Size = 4
+Modified = 2026-10-18 12:00:00
+Attributes = A
+CRC = 5E8D2F51
+Method = RAR5:LZSS
+

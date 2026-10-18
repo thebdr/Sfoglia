@@ -388,7 +388,7 @@ impl SheetView {
         };
         let view = self.ensure_text(window, cx);
         if !view.read(cx).is_editable() {
-            self.status = "the text is read-only (it has units that did not decode), so it stays as it is".to_string();
+            self.status = self.read_only.clone().unwrap_or_else(|| "the text is read-only (it has units that did not decode), so it stays as it is".to_string());
             cx.notify();
             return;
         }
@@ -575,6 +575,16 @@ impl SheetView {
             text.update(cx, |text, cx| text.set_read_only(reason.clone(), cx));
         }
         self.read_only = Some(reason);
+        cx.notify();
+    }
+
+    /// Ctrl+S on a read-only file: the status row says why nothing is saved (the text view says it too, when built).
+    pub fn refuse_save(&mut self, cx: &mut Context<Self>) {
+        let Some(reason) = self.read_only.clone() else { return };
+        if let Some(text) = &self.text {
+            let _ = text.update(cx, |text, cx| text.save(cx));
+        }
+        self.status = reason;
         cx.notify();
     }
 

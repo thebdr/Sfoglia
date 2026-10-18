@@ -405,28 +405,33 @@ impl ArchiveView {
             .unwrap_or_default();
         self.container = archive::container_of(&self.name, &head);
         self.tool = (self.container == Some(Container::External)).then(|| self.tools.find(Tool::SevenZip)).flatten();
-        let result = match self.container {
+        let list_with = |password: Option<&str>| match self.container {
             None => Err(ArchiveError::Bad(format!("{} is no archive", self.name))),
             Some(Container::External) if self.tool.is_none() => Err(ArchiveError::NoTool),
-            Some(_) => archive::list(&self.path, self.password.as_deref(), self.seven_zip().as_ref()),
+            Some(_) => archive::list(&self.path, password, self.seven_zip().as_ref()),
         };
+        let mut result = list_with(self.password.as_deref());
+        // A wrong password: said, and the archive listed without one where its headers allow it.
+        let wrong = matches!(result, Err(ArchiveError::WrongPassword));
+        if wrong {
+            result = list_with(None);
+        }
         match result {
             Ok(listing) => {
                 self.set_entries(listing.entries.clone(), cx);
                 self.state = State::Listed(listing);
                 self.hex = None;
-                self.message = None;
+                self.message = wrong.then(|| self.wrong_message());
             }
             Err(ArchiveError::NeedsPassword) => {
                 self.set_entries(Vec::new(), cx);
                 self.state = State::Locked;
-                self.message = Some(ArchiveError::NeedsPassword.to_string());
+                self.message = Some(if wrong { self.wrong_message() } else { ArchiveError::NeedsPassword.to_string() });
             }
             Err(ArchiveError::WrongPassword) => {
                 self.set_entries(Vec::new(), cx);
                 self.state = State::Locked;
-                self.wrong += 1;
-                self.message = Some(format!("wrong password (try {})", self.wrong));
+                self.message = Some(self.wrong_message());
             }
             Err(ArchiveError::NoTool) => {
                 self.set_entries(Vec::new(), cx);
@@ -541,12 +546,15 @@ impl ArchiveView {
     /// An error as the status row says it: a wrong password counted, the rest as it reads.
     fn explain(&mut self, error: ArchiveError) -> String {
         match error {
-            ArchiveError::WrongPassword => {
-                self.wrong += 1;
-                format!("wrong password (try {})", self.wrong)
-            }
+            ArchiveError::WrongPassword => self.wrong_message(),
             other => other.to_string(),
         }
+    }
+
+    /// `wrong password (try 2)`: one more wrong password, so each refusal reads as new.
+    fn wrong_message(&mut self) -> String {
+        self.wrong += 1;
+        format!("wrong password (try {})", self.wrong)
     }
 
     /// `Extract all`: every entry into a folder the user picks.

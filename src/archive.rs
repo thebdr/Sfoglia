@@ -163,6 +163,9 @@ pub struct Entry {
     pub method: String,
     pub crc: Option<u32>,
     pub is_dir: bool,
+    /// The entry's index inside the container, for the containers read by index; none for a folder the listing
+    /// fills in because the archive records no entry for it.
+    pub raw: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -301,12 +304,94 @@ pub fn list(path: &Path, password: Option<&str>, tool: Option<&SevenZipTool>) ->
             list_external(path, password, tool)?
         }
     };
+    let entries = fill_in_folders(entries);
     let encrypted = match container {
         Container::Zip => zip_has_encrypted(path)?,
-        Container::SevenZ => password.is_some() || seven_z_wants_password(path),
+        Container::SevenZ => seven_z_wants_password(path),
         _ => false,
     };
+    // A password given is checked now, on the smallest encrypted entry, so a wrong one is said at once.
+    if let Some(password) = password
+        && encrypted
+    {
+        verify_password(path, container, &entries, password)?;
+    }
     Ok(Listing { container, entries, encrypted })
+}
+
+/// A folder the archive records no entry for (7-Zip and others store the files alone) gets a row of its own,
+/// before its first child; a folder recorded after its children (as 7-Zip lists them) stays where it is.
+fn fill_in_folders(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut known: std::collections::HashSet<String> = entries.iter().filter(|e| e.is_dir).map(|e| e.name.clone()).collect();
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let path = entry.name.trim_end_matches('/');
+        let mut start = 0;
+        for (at, ch) in path.char_indices() {
+            if ch == '/' {
+                let component = &path[start..at];
+                start = at + 1;
+                // A `.` or `..` is no folder of the archive's (such an entry is skipped on extraction anyway).
+                if component.is_empty() || component == "." || component == ".." {
+                    continue;
+                }
+                let folder = format!("{}/", &path[..at]);
+                if known.insert(folder.clone()) {
+                    out.push(Entry { name: folder, size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, raw: None });
+                }
+            }
+        }
+        out.push(entry);
+    }
+    out
+}
+
+/// Whether entry `raw` of a 7z sits in a block with an AES coder.
+fn seven_z_entry_encrypted(archive: &sevenz_rust2::Archive, raw: usize) -> bool {
+    let Some(Some(block)) = archive.stream_map.file_block_index.get(raw) else { return false };
+    archive.blocks.get(*block).is_some_and(|block| {
+        block.coders.iter().any(|coder| coder.encoder_method_id() == sevenz_rust2::EncoderMethod::AES256_SHA256.id())
+    })
+}
+
+/// Check `password` on the smallest encrypted entry: a zip through `by_index_decrypt` (ZipCrypto's check byte
+/// or AES's verifier refuse a wrong one, a checksum catches the rest), a 7z through its reader. Nothing
+/// encrypted to try it on passes.
+fn verify_password(path: &Path, container: Container, entries: &[Entry], password: &str) -> Result<(), ArchiveError> {
+    match container {
+        Container::Zip => {
+            let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+            let mut smallest: Option<(u64, usize)> = None;
+            for i in 0..archive.len() {
+                let file = archive.by_index_raw(i)?;
+                if file.encrypted() && !file.is_dir() && smallest.is_none_or(|(size, _)| file.size() < size) {
+                    smallest = Some((file.size(), i));
+                }
+            }
+            if let Some((_, i)) = smallest {
+                let mut sink = Vec::new();
+                let read = archive.by_index_decrypt(i, password.as_bytes()).and_then(|mut file| file.read_to_end(&mut sink).map_err(Into::into));
+                if read.is_err() {
+                    return Err(ArchiveError::WrongPassword);
+                }
+            }
+            Ok(())
+        }
+        Container::SevenZ => {
+            let mut reader = seven_z_reader(path, Some(password))?;
+            let smallest = entries
+                .iter()
+                .filter(|e| !e.is_dir)
+                .filter(|e| e.raw.is_some_and(|raw| seven_z_entry_encrypted(reader.archive(), raw)))
+                .min_by_key(|e| e.size)
+                .map(|e| e.name.trim_end_matches('/').to_string());
+            if let Some(name) = smallest && reader.read_file(&name).is_err() {
+                return Err(ArchiveError::WrongPassword);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The bytes of entry `index` of the listing.
@@ -315,21 +400,23 @@ pub fn read_entry(path: &Path, listing: &Listing, index: usize, password: Option
     if entry.is_dir {
         return Err(ArchiveError::Bad(format!("{} is a folder", entry.name)));
     }
+    let raw = || entry.raw.ok_or_else(|| ArchiveError::Bad(format!("{} has no entry of its own", entry.name)));
     match listing.container {
         Container::Zip => {
             let mut archive = zip::ZipArchive::new(File::open(path)?)?;
             let mut out = Vec::new();
             match password {
-                Some(password) => archive.by_index_decrypt(index, password.as_bytes())?.read_to_end(&mut out)?,
-                None => archive.by_index(index)?.read_to_end(&mut out)?,
+                Some(password) => archive.by_index_decrypt(raw()?, password.as_bytes())?.read_to_end(&mut out)?,
+                None => archive.by_index(raw()?)?.read_to_end(&mut out)?,
             };
             Ok(out)
         }
         Container::Tar(codec) => {
+            let wanted = raw()?;
             let mut archive = tar::Archive::new(tar_stream(path, codec)?);
             for (i, member) in archive.entries()?.enumerate() {
                 let mut member = member?;
-                if i == index {
+                if i == wanted {
                     let mut out = Vec::new();
                     member.read_to_end(&mut out)?;
                     return Ok(out);
@@ -339,7 +426,16 @@ pub fn read_entry(path: &Path, listing: &Listing, index: usize, password: Option
         }
         Container::SevenZ => {
             let mut reader = seven_z_reader(path, password)?;
-            Ok(reader.read_file(&entry.name)?)
+            let encrypted = seven_z_entry_encrypted(reader.archive(), raw()?);
+            if encrypted && password.is_none() {
+                return Err(ArchiveError::NeedsPassword);
+            }
+            match reader.read_file(&entry.name) {
+                Ok(bytes) => Ok(bytes),
+                // A wrong password makes the stream garbage: whatever the decoder then says, that is the reason.
+                Err(_) if encrypted => Err(ArchiveError::WrongPassword),
+                Err(error) => Err(error.into()),
+            }
         }
         Container::Lone(codec) => {
             let mut out = Vec::new();
@@ -380,6 +476,7 @@ pub fn extract(
     std::fs::create_dir_all(into)?;
     let wanted = |i: usize| indices.is_none_or(|chosen| chosen.contains(&i));
     let mut done = Extracted::default();
+    // Where an entry goes, or its name on the skipped list when its path climbs out.
     let place = |done: &mut Extracted, entry: &Entry| -> Option<PathBuf> {
         match safe_join(into, &entry.name) {
             Some(target) => Some(target),
@@ -389,19 +486,26 @@ pub fn extract(
             }
         }
     };
+    let make_folder = |done: &mut Extracted, target: PathBuf| -> Result<(), ArchiveError> {
+        std::fs::create_dir_all(&target)?;
+        done.written.push(target);
+        Ok(())
+    };
     match listing.container {
         Container::External => {
             let tool = tool.ok_or(ArchiveError::NoTool)?;
             let mut command = Command::new(&tool.0);
             command.arg("x").arg(format!("-o{}", into.display())).arg("-y").arg("-sccUTF-8").arg(password_flag(password)).arg(path);
             command.stdin(Stdio::null());
+            // A selection is passed by name (a folder without its slash); everything otherwise, 7-Zip's own way.
             for (i, entry) in listing.entries.iter().enumerate() {
-                if wanted(i) {
-                    if safe_join(into, &entry.name).is_none() {
-                        done.skipped.push(entry.name.clone());
-                        continue;
-                    }
-                    command.arg(&entry.name);
+                if indices.is_some() && wanted(i) && place(&mut done, entry).is_some() {
+                    command.arg(entry.name.trim_end_matches('/'));
+                }
+            }
+            if indices.is_none() {
+                for entry in &listing.entries {
+                    place(&mut done, entry);
                 }
             }
             let output = command.output()?;
@@ -415,24 +519,40 @@ pub fn extract(
             }
         }
         Container::Tar(codec) => {
+            // The folders the listing filled in first, then the stream, each member matched to its row.
+            let mut by_raw = std::collections::HashMap::new();
+            for (i, entry) in listing.entries.iter().enumerate() {
+                match entry.raw {
+                    Some(raw) => {
+                        by_raw.insert(raw, i);
+                    }
+                    None if wanted(i) => {
+                        if let Some(target) = place(&mut done, entry) {
+                            make_folder(&mut done, target)?;
+                        }
+                    }
+                    None => {}
+                }
+            }
             let mut archive = tar::Archive::new(tar_stream(path, codec)?);
-            for (i, member) in archive.entries()?.enumerate() {
+            for (raw, member) in archive.entries()?.enumerate() {
                 let mut member = member?;
-                if !wanted(i) || i >= listing.entries.len() {
+                let Some(&i) = by_raw.get(&raw) else { continue };
+                if !wanted(i) {
                     continue;
                 }
                 let entry = &listing.entries[i];
                 let Some(target) = place(&mut done, entry) else { continue };
                 if entry.is_dir {
-                    std::fs::create_dir_all(&target)?;
+                    make_folder(&mut done, target)?;
                 } else {
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
                     let mut file = File::create(&target)?;
                     io::copy(&mut member, &mut file)?;
+                    done.written.push(target);
                 }
-                done.written.push(target);
             }
         }
         _ => {
@@ -442,15 +562,15 @@ pub fn extract(
                 }
                 let Some(target) = place(&mut done, entry) else { continue };
                 if entry.is_dir {
-                    std::fs::create_dir_all(&target)?;
+                    make_folder(&mut done, target)?;
                 } else {
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
                     let bytes = read_entry(path, listing, i, password, tool)?;
                     std::fs::write(&target, bytes)?;
+                    done.written.push(target);
                 }
-                done.written.push(target);
             }
         }
     }
@@ -554,6 +674,7 @@ fn list_zip(path: &Path) -> Result<Vec<Entry>, ArchiveError> {
             method: if is_dir { String::new() } else { method_label(file.compression()) },
             crc: (!is_dir).then_some(file.crc32()),
             is_dir,
+            raw: Some(i),
         });
     }
     Ok(entries)
@@ -581,7 +702,7 @@ fn list_tar(path: &Path, codec: Option<Codec>) -> Result<Vec<Entry>, ArchiveErro
     let mut archive = tar::Archive::new(tar_stream(path, codec)?);
     let method = codec.map_or("stored".to_string(), |c| c.label().to_string());
     let mut entries = Vec::new();
-    for member in archive.entries()? {
+    for (i, member) in archive.entries()?.enumerate() {
         let member = member?;
         let header = member.header();
         let is_dir = header.entry_type().is_dir();
@@ -597,6 +718,7 @@ fn list_tar(path: &Path, codec: Option<Codec>) -> Result<Vec<Entry>, ArchiveErro
             method: if is_dir { String::new() } else { method.clone() },
             crc: None,
             is_dir,
+            raw: Some(i),
         });
     }
     Ok(entries)
@@ -636,6 +758,9 @@ fn seven_z_method(archive: &sevenz_rust2::Archive, index: usize) -> String {
             _ => "?",
         })
         .collect();
+    // The coders are stored from the outside in; 7-Zip prints them the other way (`BCJ LZMA`, `LZMA2 7zAES`).
+    let mut names = names;
+    names.reverse();
     names.join("+")
 }
 
@@ -661,6 +786,7 @@ fn list_seven_z(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Archi
             method: if is_dir { String::new() } else { seven_z_method(archive, i) },
             crc: (entry.has_crc && !is_dir).then_some(entry.crc as u32),
             is_dir,
+            raw: Some(i),
         });
     }
     Ok(entries)
@@ -684,6 +810,7 @@ fn lone_entry(path: &Path, name: &str, codec: Codec) -> Result<Entry, ArchiveErr
         method: codec.label().to_string(),
         crc: None,
         is_dir: false,
+        raw: Some(0),
     })
 }
 
@@ -757,6 +884,7 @@ pub fn parse_seven_zip_listing(text: &str) -> Result<Vec<Entry>, String> {
                     method: String::new(),
                     crc: None,
                     is_dir: false,
+                    raw: None,
                 });
             }
             "Size" => {
@@ -924,6 +1052,7 @@ mod tests {
                 method: "RAR5:LZSS".to_string(),
                 crc: Some(0x1A2B3C4D),
                 is_dir: false,
+                raw: None,
             }
         );
         assert_eq!(entries[1].name, "docs/");
@@ -978,26 +1107,28 @@ mod tests {
         assert_eq!(readme.method, "deflate");
         assert_eq!(readme.modified.as_deref(), Some("2026-10-18 12:00"));
         assert_eq!(readme.crc, Some(crc32(b"# Bundle\n\nThree files and a folder.\n")));
-        assert!(readme.packed.is_some_and(|p| p > 0 && p < 60));
+        assert_eq!(readme.packed, Some(38));
         let folder = &listing.entries[1];
         assert!(folder.is_dir);
         assert_eq!((folder.size, folder.method.as_str(), folder.crc), (0, "", None));
         let table = &listing.entries[2];
         assert_eq!(table.size, std::fs::metadata(fixture("table.csv")).unwrap().len());
         assert_eq!(table.method, "bzip2");
+        assert_eq!(table.packed, Some(160));
         let dot = &listing.entries[3];
         assert_eq!(dot.method, "stored");
         assert_eq!(dot.size, 67);
         assert_eq!(dot.packed, Some(67), "stored: packed as large as the entry");
         assert_eq!(listing.entries[4].method, "zstd");
         assert_eq!(listing.entries[4].size, 13);
+        assert_eq!(listing.entries[4].packed, Some(22));
         assert_eq!(read_entry(&path, &listing, 0, None, None).unwrap(), b"# Bundle\n\nThree files and a folder.\n");
         assert_eq!(read_entry(&path, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
         assert_eq!(read_entry(&path, &listing, 4, None, None).unwrap(), "Unicode name\n".as_bytes());
         assert!(matches!(read_entry(&path, &listing, 1, None, None), Err(ArchiveError::Bad(_))), "a folder has no bytes");
         let summary = listing.describe("bundle.zip", std::fs::metadata(&path).ok().map(|m| m.len()));
-        assert!(summary.starts_with("ZIP, 5 entries, "), "{summary}");
-        assert!(summary.ends_with(&format!(" packed from {}", human(listing.unpacked_total()))), "{summary}");
+        assert_eq!(summary, "ZIP, 5 entries, 287 B packed from 258 B");
+        assert_eq!(listing.packed_total(), Some(287));
         // Extract all into a folder: the paths kept, the folder entry made.
         let into = std::env::temp_dir().join(format!("sfoglia-archive-zip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&into);
@@ -1076,6 +1207,8 @@ mod tests {
         assert_eq!(listing.entries[0].size, 36);
         assert_eq!(listing.entries[0].crc, Some(crc32(b"# Bundle\n\nThree files and a folder.\n")));
         assert!(listing.entries[1].is_dir);
+        assert_eq!(listing.entries.iter().map(|e| e.packed).collect::<Vec<_>>(), [Some(40), None, Some(139), Some(71), Some(17)]);
+        assert_eq!(listing.describe("bundle.7z", Some(500)), "7Z, 5 entries, 267 B packed from 258 B");
         assert_eq!(read_entry(&path, &listing, 0, None, None).unwrap(), b"# Bundle\n\nThree files and a folder.\n");
         assert_eq!(read_entry(&path, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
         // Encrypted headers: no listing without the password, a wrong one says so, the right one lists and reads.
@@ -1085,7 +1218,9 @@ mod tests {
         let listing = list(&secret, Some("sfoglia"), None).unwrap();
         assert!(listing.encrypted);
         assert_eq!(listing.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["secret.txt"]);
-        assert_eq!(listing.entries[0].method, "AES+LZMA2");
+        assert_eq!(listing.entries[0].method, "LZMA2+AES", "as 7-Zip prints it: the cipher after the compressor");
+        assert_eq!(listing.entries[0].packed, Some(32));
+        assert_eq!(listing.describe("secret.7z", Some(276)), "7Z, 1 entry, 32 B packed from 25 B");
         assert_eq!(read_entry(&secret, &listing, 0, Some("sfoglia"), None).unwrap(), b"The password is sfoglia.\n");
         assert_eq!(ArchiveError::NeedsPassword.to_string(), "the archive is encrypted: it needs its password");
         assert_eq!(ArchiveError::WrongPassword.to_string(), "wrong password");
@@ -1117,6 +1252,114 @@ mod tests {
         let gz = list(&fixture("note.txt.gz"), None, None).unwrap();
         assert_eq!(gz.entries[0].modified.as_deref(), Some("2026-10-18 12:00"), "gzip keeps a time in its header");
         assert_eq!(list(&fixture("note.txt.bz2"), None, None).unwrap().entries[0].modified, None, "bzip2 keeps none");
+    }
+
+    #[test]
+    fn encrypted_entries_check_the_password_in_zips_and_clear_header_seven_zips() {
+        // AES-256 (`secret.zip`), ZipCrypto (`legacy.zip`) and a 7z whose headers are in the clear (`entries.7z`,
+        // 7-Zip's own default) all list without a password and say what they need when an entry is read.
+        for (file, container, name, size, packed, method, bytes) in [
+            ("secret.zip", Container::Zip, "secret.txt", 25, 55, "deflate", &b"The password is sfoglia.\n"[..]),
+            ("legacy.zip", Container::Zip, "legacy.txt", 22, 36, "deflate", &b"ZipCrypto keeps this.\n"[..]),
+            ("entries.7z", Container::SevenZ, "secret.txt", 25, 32, "LZMA2+AES", &b"The password is sfoglia.\n"[..]),
+        ] {
+            let path = fixture(file);
+            let listing = list(&path, None, None).unwrap();
+            assert_eq!(listing.container, container, "{file}");
+            assert!(listing.encrypted, "{file} says it is encrypted");
+            assert_eq!(listing.entries.len(), 1, "{file}");
+            let entry = &listing.entries[0];
+            assert_eq!((entry.name.as_str(), entry.size, entry.packed, entry.method.as_str()), (name, size, Some(packed), method), "{file}");
+            assert_eq!(entry.modified.as_deref(), Some("2026-10-18 12:00"), "{file}");
+            assert_eq!(entry.crc, Some(crc32(bytes)), "{file}");
+            assert!(matches!(read_entry(&path, &listing, 0, None, None), Err(ArchiveError::NeedsPassword)), "{file}: no password");
+            assert!(matches!(read_entry(&path, &listing, 0, Some("nope"), None), Err(ArchiveError::WrongPassword)), "{file}: a wrong one");
+            assert_eq!(read_entry(&path, &listing, 0, Some("sfoglia"), None).unwrap(), bytes, "{file}");
+            // A password given at listing time is checked then, so Unlock can say it is wrong.
+            assert!(matches!(list(&path, Some("nope"), None), Err(ArchiveError::WrongPassword)), "{file}: listed with a wrong one");
+            let unlocked = list(&path, Some("sfoglia"), None).unwrap();
+            assert_eq!(unlocked.entries, listing.entries, "{file}: the same listing with the right one");
+            assert!(unlocked.encrypted);
+            // Extraction with the right password writes the bytes; with none it refuses before writing anything.
+            let into = std::env::temp_dir().join(format!("sfoglia-archive-secret-{}-{}", std::process::id(), file.replace('.', "-")));
+            let _ = std::fs::remove_dir_all(&into);
+            assert!(matches!(extract(&path, &listing, None, &into, None, None), Err(ArchiveError::NeedsPassword)), "{file}");
+            assert!(!into.join(name).exists());
+            let done = extract(&path, &listing, None, &into, Some("sfoglia"), None).unwrap();
+            assert_eq!(done.written, [into.join(name)]);
+            assert_eq!(std::fs::read(into.join(name)).unwrap(), bytes);
+            let _ = std::fs::remove_dir_all(&into);
+        }
+        // A password given for an archive with nothing encrypted is simply unused.
+        assert_eq!(list(&fixture("bundle.zip"), Some("nope"), None).unwrap().entries.len(), 5);
+        assert_eq!(list(&fixture("bundle.7z"), Some("nope"), None).unwrap().entries.len(), 5);
+        assert_eq!(read_entry(&fixture("bundle.zip"), &list(&fixture("bundle.zip"), None, None).unwrap(), 0, Some("nope"), None).unwrap().len(), 36);
+    }
+
+    #[test]
+    fn lzma_and_bcj_entries_read_through_the_library() {
+        // `lzma.zip` and `bcj.7z` were made once with the real 7-Zip (`-mm=LZMA`; `-m0=BCJ -m1=LZMA`).
+        let lzma = fixture("lzma.zip");
+        let listing = list(&lzma, None, None).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!((listing.entries[0].name.as_str(), listing.entries[0].size, listing.entries[0].method.as_str()), ("lines.txt", 1400, "lzma"));
+        let bytes = read_entry(&lzma, &listing, 0, None, None).unwrap();
+        assert_eq!(bytes.len(), 1400);
+        assert!(bytes.starts_with(b"Line 01: a note, compressed alone.\nLine 02: a note"), "{}", String::from_utf8_lossy(&bytes[..60]));
+        assert_eq!(listing.entries[0].crc, Some(crc32(&bytes)));
+        let bcj = fixture("bcj.7z");
+        let listing = list(&bcj, None, None).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        let entry = &listing.entries[0];
+        assert_eq!((entry.name.as_str(), entry.size, entry.packed, entry.method.as_str()), ("readme.md", 36, Some(40), "BCJ+LZMA"));
+        assert_eq!(read_entry(&bcj, &listing, 0, None, None).unwrap(), b"# Bundle\n\nThree files and a folder.\n");
+        assert_eq!(listing.describe("bcj.7z", Some(162)), "7Z, 1 entry, 40 B packed from 36 B");
+    }
+
+    #[test]
+    fn folders_the_archive_does_not_record_get_rows_of_their_own() {
+        // `more.zip` holds `d/n.txt` with no entry for `d/`: the listing adds the row before its first child.
+        let path = fixture("more.zip");
+        let listing = list(&path, None, None).unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["data.json", "three.pdf", "inner.zip", "noise.bin", "d/", "d/n.txt"]);
+        let folder = &listing.entries[4];
+        assert_eq!(
+            folder,
+            &Entry { name: "d/".to_string(), size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, raw: None }
+        );
+        assert_eq!(listing.entries[5].raw, Some(4), "the file keeps its own index inside the zip");
+        assert_eq!(listing.entries.iter().map(|e| e.packed).collect::<Vec<_>>(), [Some(106), Some(531), Some(140), Some(25), None, Some(9)]);
+        assert_eq!(listing.entries.iter().map(|e| e.modified.as_deref()).collect::<Vec<_>>(), [Some("2026-10-18 12:00"), Some("2026-10-18 12:01"), Some("2026-10-18 12:02"), Some("2026-10-18 12:03"), None, Some("2026-10-18 12:04")]);
+        assert_eq!(listing.entries.iter().map(|e| e.method.as_str()).collect::<Vec<_>>(), ["deflate", "bzip2", "stored", "zstd", "", "deflate"]);
+        assert_eq!(listing.describe("more.zip", std::fs::metadata(&path).ok().map(|m| m.len())), "ZIP, 6 entries, 811 B packed from 1.6 KB");
+        assert!(matches!(read_entry(&path, &listing, 4, None, None), Err(ArchiveError::Bad(reason)) if reason == "d/ is a folder"));
+        assert_eq!(read_entry(&path, &listing, 5, None, None).unwrap(), b"nested\n");
+        assert_eq!(read_entry(&path, &listing, 2, None, None).unwrap().len(), 140, "the nested zip's bytes");
+        let into = std::env::temp_dir().join(format!("sfoglia-archive-more-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&into);
+        let done = extract(&path, &listing, None, &into, None, None).unwrap();
+        assert_eq!(done.skipped, Vec::<String>::new());
+        assert_eq!(done.written.len(), 6);
+        assert!(into.join("d").is_dir(), "the filled-in folder is made");
+        assert_eq!(std::fs::read(into.join("d").join("n.txt")).unwrap(), b"nested\n");
+        let _ = std::fs::remove_dir_all(&into);
+        // Extracting the folder row alone makes the folder, nothing inside it.
+        let _ = std::fs::remove_dir_all(&into);
+        let done = extract(&path, &listing, Some(&[4]), &into, None, None).unwrap();
+        assert_eq!(done.written, [into.join("d")]);
+        assert!(!into.join("d").join("n.txt").exists());
+        let _ = std::fs::remove_dir_all(&into);
+        // The fill-in itself: every missing parent, once, before the first child; `.` and `..` never.
+        let file = |name: &str| Entry { name: name.to_string(), size: 1, packed: None, modified: None, method: String::new(), crc: None, is_dir: false, raw: Some(0) };
+        let filled = fill_in_folders(vec![file("a/b/c.txt"), file("a/d.txt"), file("../x.txt"), file("./y.txt"), file("a/b/e.txt")]);
+        assert_eq!(filled.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["a/", "a/b/", "a/b/c.txt", "a/d.txt", "../x.txt", "./y.txt", "a/b/e.txt"]);
+        assert!(filled[0].is_dir && filled[1].is_dir && filled[0].raw.is_none());
+        // A folder recorded after its children (7-Zip's order for a rar) stays where it is, with no double.
+        let mut dir = file("data/");
+        dir.is_dir = true;
+        let filled = fill_in_folders(vec![file("data/a.txt"), dir]);
+        assert_eq!(filled.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["data/a.txt", "data/"]);
     }
 
     /// The CRC-32 the zip and 7z formats record (IEEE), for the expected values.

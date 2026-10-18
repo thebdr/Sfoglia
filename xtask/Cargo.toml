@@ -12,5 +12,5 @@ lzma-rs = "0.3"
 rust_xlsxwriter = "0.100.0"
 sevenz-rust2 = { version = "0.24", features = ["aes256", "compress"] }
 tar = "0.4"
-zip = { version = "9", default-features = false, features = ["deflate", "bzip2", "zstd", "time"] }
+zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate", "bzip2", "zstd", "time"] }
 zstd = "0.14"

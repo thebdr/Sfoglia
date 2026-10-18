@@ -38,7 +38,7 @@ futures = "0.3"
 anyhow = "1"
 calamine = "0.36.1"
 csv = "1.4.0"
-zip = { version = "9", default-features = false, features = ["deflate", "bzip2", "zstd", "lzma", "time"] }
+zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate", "bzip2", "zstd", "lzma", "time"] }
 tar = "0.4"
 bzip2 = "0.6"
 lzma-rs = "0.3"

@@ -378,6 +378,22 @@ impl FilePanel {
         }
     }
 
+    /// Ctrl+S on an entry of an archive (C-015): the viewer says why nothing is saved.
+    pub fn refuse_save(&mut self, cx: &mut Context<Self>) {
+        match &self.view {
+            PanelView::Text(view) => {
+                let _ = view.update(cx, |view, cx| view.save(cx));
+            }
+            PanelView::Markdown(view) => {
+                let text = view.read(cx).text_view().clone();
+                let _ = text.update(cx, |text, cx| text.save(cx));
+            }
+            PanelView::Data(view) => view.update(cx, |view, cx| view.refuse_save(cx)),
+            PanelView::Sheet(view) => view.update(cx, |view, cx| view.refuse_save(cx)),
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Archive(_) | PanelView::Info => {}
+        }
+    }
+
     /// The archive viewer, while it shows (C-015).
     pub fn archive_view(&self) -> Option<&Entity<ArchiveView>> {
         match &self.view {
@@ -915,7 +931,13 @@ impl Workspace {
 
     /// Save the active tab's text (C-008). The outcome is shown in the view's status row.
     fn on_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.active_panel(cx).and_then(|panel| panel.read(cx).editable_text(cx)) {
+        let Some(panel) = self.active_panel(cx) else { return };
+        // An entry of an archive is read-only (C-015): the viewer says so instead, text view or not.
+        if panel.read(cx).info.origin.is_some() {
+            panel.update(cx, |panel, cx| panel.refuse_save(cx));
+            return;
+        }
+        if let Some(view) = panel.read(cx).editable_text(cx) {
             let _ = view.update(cx, |view, cx| view.save(cx));
         }
     }

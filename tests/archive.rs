@@ -332,6 +332,38 @@ fn an_entry_opens_inside_sfoglia_read_only_in_its_own_viewer(cx: &mut TestAppCon
         let sheet_view = sheet.read(cx).sheet_view().expect("a .csv entry opens in the spreadsheet viewer").clone();
         assert_eq!(sheet_view.read(cx).table().read(cx).dump(cx).1.len(), 3, "the fixture's three records");
         assert!(sheet.read(cx).info().path.file_name().is_some_and(|n| n == "table.csv"));
+        // Read-only: Ctrl+S says why with no raw text built, and a cell edit is refused with the same reason.
+        let focus = sheet.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("ctrl-s", cx);
+        assert_eq!(label(window, "sheet-message"), "read-only: an entry of bundle.zip; extract it to edit a copy");
+        window.click(("cell", 1usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // The selection reaches the edit field after the update; then the edit itself.
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let sheet_view = workspace.read(cx).panels(cx)[2].read(cx).sheet_view().unwrap().clone();
+        let edit = sheet_view.read(cx).edit_input().clone();
+        assert_eq!(edit.read(cx).value().as_ref(), "Rossi, Mario", "the clicked cell's text is in the edit field");
+        edit.update(cx, |state, cx| state.set_value("X", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        let sheet = panels[2].clone();
+        assert_eq!(label(window, "sheet-message"), "read-only: an entry of bundle.zip; extract it to edit a copy");
+        assert!(!sheet.read(cx).is_dirty(cx), "the cell edit was refused");
+        assert_eq!(std::fs::read(&sheet.read(cx).info().path).unwrap(), std::fs::read(fixture("table.csv")).unwrap(), "the entry's file is untouched");
         let archive_panel = panels[0].clone();
         let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
         workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
@@ -489,7 +521,7 @@ fn an_encrypted_seven_zip_asks_for_its_password(cx: &mut TestAppContext) {
         assert_eq!(names(&view, cx), strings(&["secret.txt"]));
         let cells = rows(&view, cx);
         assert_eq!(cells[0][0..2], strings(&["secret.txt", "25"]));
-        assert_eq!(cells[0][3..5], strings(&["2026-10-18 12:00", "AES+LZMA2"]));
+        assert_eq!(cells[0][3..5], strings(&["2026-10-18 12:00", "LZMA2+AES"]));
         let summary = label(window, "archive-summary");
         assert!(summary.starts_with("7Z, 1 entry, ") && summary.ends_with(" packed from 25 B"), "{summary}");
         assert!(window.try_find("archive-password").is_some(), "the field stays: the entries are encrypted");
@@ -535,7 +567,7 @@ fn an_exotic_container_goes_through_seven_zip_or_says_what_to_install(cx: &mut T
         assert!(window.try_find("archive-hex").is_some());
         let row = window.find(("hex-row", 0usize)).label().unwrap_or_default().to_string();
         assert!(row.starts_with("00000000  52 61 72 21 1a 07 01 00"), "Rar!: {row}");
-        // 7-Zip appears: Look again lists the archive through it.
+        // 7-Zip appears: Look again lists the archive through it (the stand-in refuses a call without -sccUTF-8).
         install_wrapper(&later, &stub("sevenzip"));
         window.click("archive-look-again-button", cx);
         window.render_frame(cx);
@@ -545,17 +577,19 @@ fn an_exotic_container_goes_through_seven_zip_or_says_what_to_install(cx: &mut T
         assert_eq!(label(window, "archive-tool"), "7-Zip 24.08");
         assert!(window.try_find("archive-look-again").is_none());
         assert!(window.try_find("archive-hex").is_none(), "the listing replaces the bytes");
-        assert_eq!(names(&view, cx), strings(&["docs/readme.md", "docs/", "big.bin"]));
+        assert_eq!(names(&view, cx), strings(&["docs/readme.md", "docs/", "big.bin", "../climb.txt"]));
         let cells = rows(&view, cx);
         assert_eq!(cells[0], strings(&["docs/readme.md", "20", "18", "2026-10-18 12:00", "RAR5:LZSS", "1A2B3C4D"]));
         assert_eq!(cells[1], strings(&["docs/", "", "", "2026-10-18 12:00", "", ""]));
         assert_eq!(cells[2], strings(&["big.bin", "1048576", "1000", "2026-10-18 12:00", "RAR5:LZSS", "00000000"]));
-        assert_eq!(label(window, "archive-summary"), "RAR, 3 entries, 1018 B packed from 1.0 MB");
+        assert_eq!(cells[3], strings(&["../climb.txt", "4", "4", "2026-10-18 12:00", "RAR5:LZSS", "5E8D2F51"]));
+        assert_eq!(label(window, "archive-summary"), "RAR, 4 entries, 1022 B packed from 1.0 MB");
         press_enter_on(&view, 0, window, cx);
     })
     .unwrap();
     cx.run_until_parked();
     let out = scratch_dir("archive-seven-zip-out");
+    let one = scratch_dir("archive-seven-zip-one");
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         let panels = workspace.read(cx).panels(cx);
@@ -577,11 +611,224 @@ fn an_exotic_container_goes_through_seven_zip_or_says_what_to_install(cx: &mut T
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(label(window, "archive-message"), format!("3 entries extracted into {}", out.display()));
+        // Extract all names nothing to 7-Zip (it writes everything); the climbing entry is still skipped and named.
+        assert_eq!(
+            label(window, "archive-message"),
+            format!("3 entries extracted into {}; skipped as outside it: ../climb.txt", out.display())
+        );
         assert!(std::fs::read(out.join("docs").join("readme.md")).unwrap().starts_with(b"# Readme from a rar"));
         assert!(out.join("big.bin").is_file());
+        assert!(!out.parent().unwrap().join("climb.txt").exists(), "nothing climbed out");
+        // Extract selected names the one entry: the stand-in writes that alone.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_row(2, cx));
+        window.render_frame(cx);
+        window.click("archive-extract-selected", cx);
+    })
+    .unwrap();
+    let chosen = one.clone();
+    cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "archive-message"), format!("1 entry extracted into {}", one.display()));
+        assert!(one.join("big.bin").is_file());
+        assert!(!one.join("docs").exists(), "only the selected entry was asked for");
+        // An encrypted archive through 7-Zip: the stand-in refuses every password but the right one.
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("fake-secret.rar")], window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let secret = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let panels = workspace.read(cx).panels(cx);
+            assert_eq!(panels.len(), 3);
+            let secret = panels[2].read(cx).archive_view().expect("a rar opens in the archive viewer").clone();
+            let v = secret.read(cx);
+            assert_eq!(v.state_name(), "locked");
+            assert_eq!(label(window, "archive-summary"), "RAR, encrypted");
+            assert_eq!(label(window, "archive-tool"), "7-Zip 24.08");
+            assert_eq!(label(window, "archive-message"), "the archive is encrypted: it needs its password");
+            assert!(window.try_find("archive-password").is_some());
+            let password = v.password_input().clone();
+            assert_eq!(window.focused(cx), Some(password.read(cx).focus_handle(cx)));
+            window.input("nope", cx);
+            window.press("enter", cx);
+            secret
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(secret.read(cx).state_name(), "locked");
+        assert_eq!(label(window, "archive-message"), "wrong password (try 1)");
+        let password = secret.read(cx).password_input().clone();
+        password.update(cx, |state, cx| state.set_value("sfoglia", window, cx));
+        window.click("archive-unlock", cx);
+        window.render_frame(cx);
+        assert_eq!(secret.read(cx).state_name(), "listed");
+        assert_eq!(names(&secret, cx), strings(&["docs/readme.md", "docs/", "big.bin", "../climb.txt"]));
+        assert_eq!(label(window, "archive-summary"), "RAR, 4 entries, 1022 B packed from 1.0 MB");
+        assert!(window.try_find("archive-password").is_none(), "the entries list in the clear once the password is right");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&one);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn other_entry_kinds_open_in_their_viewers_and_every_column_sorts(cx: &mut TestAppContext) {
+    // No tool of the machine's: the PDF entry shows its hint, the zip is read by the library.
+    let tools = ToolSet::stubbed([
+        (Tool::SevenZip, None),
+        (Tool::SumatraPdf, None),
+        (Tool::MuTool, None),
+        (Tool::PdfToPpm, None),
+        (Tool::PdfInfo, None),
+    ]);
+    let path = fixture("more.zip");
+    let (handle, workspace, _panel, view) = open_archive(cx, tools, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["data.json", "three.pdf", "inner.zip", "noise.bin", "d/", "d/n.txt"]));
+        let cells = rows(&view, cx);
+        assert_eq!(cells[0], strings(&["data.json", "130", "106", "2026-10-18 12:00", "deflate", &format!("{:08X}", 359138865u32)]));
+        assert_eq!(cells[4], strings(&["d/", "", "", "", "", ""]), "a folder the zip never recorded, filled in");
+        assert_eq!(cells[5], strings(&["d/n.txt", "7", "9", "2026-10-18 12:04", "deflate", &format!("{:08X}", 3953890701u32)]));
+        assert_eq!(label(window, "archive-summary"), "ZIP, 6 entries, 811 B packed from 1.6 KB");
+        // Every column sorts, descending first; the folder with no size, date, method or CRC sorts last.
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["three.pdf", "inner.zip", "data.json", "noise.bin", "d/n.txt", "d/"]), "by size");
+        window.click(("icon-sort", 2usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["three.pdf", "inner.zip", "data.json", "noise.bin", "d/n.txt", "d/"]), "by packed size");
+        window.click(("icon-sort", 3usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["d/n.txt", "noise.bin", "inner.zip", "three.pdf", "data.json", "d/"]), "by date");
+        window.click(("icon-sort", 3usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["d/", "data.json", "three.pdf", "inner.zip", "noise.bin", "d/n.txt"]), "by date, ascending");
+        window.click(("icon-sort", 4usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["noise.bin", "inner.zip", "data.json", "d/n.txt", "three.pdf", "d/"]), "by method, a tie by name");
+        window.click(("icon-sort", 5usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["d/n.txt", "noise.bin", "three.pdf", "inner.zip", "data.json", "d/"]), "by CRC");
+        window.click(("icon-sort", 5usize), cx);
+        window.click(("icon-sort", 5usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["data.json", "three.pdf", "inner.zip", "noise.bin", "d/", "d/n.txt"]), "the archive's order again");
+        // A structured-data entry opens in the data viewer, read-only: Ctrl+S says why with no text built.
+        press_enter_on(&view, 0, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let reason = "read-only: an entry of more.zip; extract it to edit a copy";
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 2);
+        let data = panels[1].clone();
+        assert_eq!(data.read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › data.json".to_string()));
+        let data_view = data.read(cx).data_view().expect("a .json entry opens in the data viewer").clone();
+        assert!(data_view.read(cx).text_view().is_none(), "no raw text built yet");
+        let focus = data.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("ctrl-s", cx);
+        assert_eq!(label(window, "data-message"), reason);
+        assert!(!data.read(cx).is_dirty(cx));
+        // The PDF entry opens in the PDF viewer (its hint, with no tool pinned), the nested zip in the archive viewer.
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        press_enter_on(&view, 1, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 3);
+        assert_eq!(panels[2].read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › three.pdf".to_string()));
+        assert!(panels[2].read(cx).pdf_view().is_some(), "a .pdf entry opens in the PDF viewer");
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        press_enter_on(&view, 2, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let inner = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let panels = workspace.read(cx).panels(cx);
+            assert_eq!(panels.len(), 4);
+            assert_eq!(panels[3].read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › inner.zip".to_string()));
+            let inner = panels[3].read(cx).archive_view().expect("a .zip entry opens in the archive viewer").clone();
+            assert_eq!(names(&inner, cx), strings(&["note.txt"]));
+            assert_eq!(label(window, "archive-summary"), "ZIP, 1 entry, 26 B packed from 26 B");
+            // Its own entry opens from it, named after the nested archive.
+            press_enter_on(&inner, 0, window, cx);
+            inner
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 5);
+        assert_eq!(panels[4].read(cx).tab_name(cx).map(|s| s.to_string()), Some("inner.zip › note.txt".to_string()));
+        let text = panels[4].read(cx).text_view().expect("a .txt entry opens in the text viewer").clone();
+        assert_eq!(text.read(cx).editor().read(cx).value().to_string(), "A note, compressed alone.\n");
+        assert!(!text.read(cx).is_editable());
+        assert_eq!(inner.read(cx).message(), Some("opening note.txt"));
+        // Bytes nobody claims open in the hex view.
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        press_enter_on(&view, 3, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 6);
+        assert_eq!(panels[5].read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › noise.bin".to_string()));
+        assert!(panels[5].read(cx).hex_view().is_some(), "a binary entry opens on its bytes");
+        assert!(window.try_find("hex-status").is_some());
+        // The filled-in folder opens nothing; the file inside it opens as text.
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        press_enter_on(&view, 4, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 6);
+        assert_eq!(label(window, "archive-message"), "d/ is a folder");
+        press_enter_on(&view, 5, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 7);
+        assert_eq!(panels[6].read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › d/n.txt".to_string()));
+        let text = panels[6].read(cx).text_view().expect("a .txt entry opens in the text viewer").clone();
+        assert_eq!(text.read(cx).editor().read(cx).value().to_string(), "nested\n");
+    })
+    .unwrap();
 }
