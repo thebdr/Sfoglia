@@ -605,6 +605,18 @@ fn archives(root: &Path) -> Result<(), String> {
         }
         std::fs::write(fixtures.join("climb.tar"), builder.into_inner().map_err(|e| err(&e))?).map_err(|e| err(&e))?;
     }
+    {
+        // A tar with a file in a folder it never records (`d/n.txt` alone): the listing fills the folder in.
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(7);
+        header.set_mtime(UNIX);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder.append_data(&mut header, "d/n.txt", &b"nested
+"[..]).map_err(|e| err(&e))?;
+        std::fs::write(fixtures.join("nodir.tar"), builder.into_inner().map_err(|e| err(&e))?).map_err(|e| err(&e))?;
+    }
     println!("wrote {} and the codec variants", fixtures.join("bundle.tar").display());
     // A rar by signature alone, for the path through an installed 7-Zip (a stand-in in the tests).
     std::fs::write(fixtures.join("fake.rar"), [b"Rar!\x1a\x07\x01\x00".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;

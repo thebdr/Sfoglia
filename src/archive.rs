@@ -445,7 +445,8 @@ pub fn read_entry(path: &Path, listing: &Listing, index: usize, password: Option
         Container::External => {
             let tool = tool.ok_or(ArchiveError::NoTool)?;
             let mut command = Command::new(&tool.0);
-            command.args(["e", "-so", "-y", "-sccUTF-8"]).arg(password_flag(password)).arg(path).arg(&entry.name);
+            // `--` ends the switches, so a name starting with `-` or `@` is a name; `-spd` keeps it from being a pattern.
+            command.args(["e", "-so", "-y", "-sccUTF-8", "-spd"]).arg(password_flag(password)).arg("--").arg(path).arg(&entry.name);
             command.stdin(Stdio::null());
             let output = command.output()?;
             if !output.status.success() {
@@ -494,20 +495,34 @@ pub fn extract(
     match listing.container {
         Container::External => {
             let tool = tool.ok_or(ArchiveError::NoTool)?;
-            let mut command = Command::new(&tool.0);
-            command.arg("x").arg(format!("-o{}", into.display())).arg("-y").arg("-sccUTF-8").arg(password_flag(password)).arg(path);
-            command.stdin(Stdio::null());
-            // A selection is passed by name (a folder without its slash); everything otherwise, 7-Zip's own way.
+            // The entries go to 7-Zip by name through an include list (`-i@`, UTF-8, no wildcards): every wanted
+            // one that stays inside the folder. A name 7-Zip would read as a switch or a list file is harmless
+            // there, and a climbing entry is never asked for (7-Zip itself would write it inside with the `..`
+            // stripped, which is not what the status row would say).
+            let mut names = Vec::new();
             for (i, entry) in listing.entries.iter().enumerate() {
-                if indices.is_some() && wanted(i) && place(&mut done, entry).is_some() {
-                    command.arg(entry.name.trim_end_matches('/'));
+                if wanted(i) && place(&mut done, entry).is_some() {
+                    names.push(entry.name.trim_end_matches('/').to_string());
                 }
             }
-            if indices.is_none() {
-                for entry in &listing.entries {
-                    place(&mut done, entry);
-                }
+            if names.is_empty() {
+                return Ok(done);
             }
+            let scratch = TempFolder::new()?;
+            let list = scratch.path().join("entries.txt");
+            std::fs::write(&list, names.join("
+") + "
+")?;
+            let mut command = Command::new(&tool.0);
+            command
+                .arg("x")
+                .arg(format!("-o{}", into.display()))
+                .args(["-y", "-sccUTF-8", "-scsUTF-8", "-spd"])
+                .arg(format!("-i@{}", list.display()))
+                .arg(password_flag(password))
+                .arg("--")
+                .arg(path);
+            command.stdin(Stdio::null());
             let output = command.output()?;
             if !output.status.success() {
                 return Err(external_error(&output.stderr, &output.stdout, password.is_some()));
@@ -577,10 +592,11 @@ pub fn extract(
     Ok(done)
 }
 
-/// `root/name` when `name` stays inside `root`: no absolute path, no drive, no `..` component.
+/// `root/name` when `name` stays inside `root`: no absolute path, no `..` component, and on Windows no `:` (a drive;
+/// elsewhere a colon is just a character of a name).
 pub fn safe_join(root: &Path, name: &str) -> Option<PathBuf> {
     let unified = name.replace('\\', "/");
-    if unified.starts_with('/') || unified.contains(':') {
+    if unified.starts_with('/') || (cfg!(windows) && unified.contains(':')) {
         return None;
     }
     let mut target = root.to_path_buf();
@@ -834,7 +850,7 @@ fn external_error(stderr: &[u8], stdout: &[u8], had_password: bool) -> ArchiveEr
 
 fn list_external(path: &Path, password: Option<&str>, tool: &SevenZipTool) -> Result<Vec<Entry>, ArchiveError> {
     let mut command = Command::new(&tool.0);
-    command.args(["l", "-slt", "-y", "-sccUTF-8"]).arg(password_flag(password)).arg(path);
+    command.args(["l", "-slt", "-y", "-sccUTF-8"]).arg(password_flag(password)).arg("--").arg(path);
     command.stdin(Stdio::null());
     let output = command.output()?;
     if !output.status.success() {
@@ -1077,8 +1093,12 @@ mod tests {
         assert_eq!(safe_join(root, "../escape.txt"), None);
         assert_eq!(safe_join(root, "a/../../escape.txt"), None);
         assert_eq!(safe_join(root, "/etc/passwd"), None);
-        assert_eq!(safe_join(root, "C:/windows/win.ini"), None);
-        assert_eq!(safe_join(root, "C:\\windows\\win.ini"), None);
+        if cfg!(windows) {
+            assert_eq!(safe_join(root, "C:/windows/win.ini"), None, "a drive");
+            assert_eq!(safe_join(root, &"C:/windows/win.ini".replace('/', "\\")), None);
+        } else {
+            assert_eq!(safe_join(root, "a:b.txt"), Some(root.join("a:b.txt")), "a colon is a character of a name on Unix");
+        }
         assert_eq!(safe_join(root, ""), None);
         assert_eq!(safe_join(root, "."), None);
         // The fixture holds `../escape.txt` beside `ok.txt`: one is written, the other named.
@@ -1360,6 +1380,22 @@ mod tests {
         dir.is_dir = true;
         let filled = fill_in_folders(vec![file("data/a.txt"), dir]);
         assert_eq!(filled.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["data/a.txt", "data/"]);
+        // The same in a tar (`nodir.tar`: `d/n.txt` alone): the folder row, extracted on its own, the file by its raw index.
+        let tar = fixture("nodir.tar");
+        let listing = list(&tar, None, None).unwrap();
+        assert_eq!(listing.entries.iter().map(|e| (e.name.as_str(), e.is_dir, e.raw)).collect::<Vec<_>>(), [("d/", true, None), ("d/n.txt", false, Some(0))]);
+        assert_eq!(read_entry(&tar, &listing, 1, None, None).unwrap(), b"nested
+");
+        let into = std::env::temp_dir().join(format!("sfoglia-archive-nodir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&into);
+        let done = extract(&tar, &listing, Some(&[0]), &into, None, None).unwrap();
+        assert_eq!(done.written, [into.join("d")], "the folder alone");
+        assert!(into.join("d").is_dir() && !into.join("d").join("n.txt").exists());
+        let done = extract(&tar, &listing, None, &into, None, None).unwrap();
+        assert_eq!(done.written, [into.join("d"), into.join("d").join("n.txt")]);
+        assert_eq!(std::fs::read(into.join("d").join("n.txt")).unwrap(), b"nested
+");
+        let _ = std::fs::remove_dir_all(&into);
     }
 
     /// The CRC-32 the zip and 7z formats record (IEEE), for the expected values.

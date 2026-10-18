@@ -141,8 +141,7 @@ fn the_archive_extensions_map_to_their_family() {
 #[gpui_kit::test]
 fn an_archive_opens_on_its_entry_list_sorted_and_searched(cx: &mut TestAppContext) {
     let path = fixture("bundle.zip");
-    let listing = archive::list(&path, None, None).unwrap();
-    let (handle, _workspace, panel, view) = open_archive(cx, no_tools(), path.clone());
+    let (handle, workspace, panel, view) = open_archive(cx, no_tools(), path.clone());
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         let v = view.read(cx);
@@ -153,15 +152,13 @@ fn an_archive_opens_on_its_entry_list_sorted_and_searched(cx: &mut TestAppContex
         let (headers, cells) = v.table().read(cx).dump(cx);
         assert_eq!(headers, strings(&["Name", "Size", "Packed", "Modified", "Method", "CRC"]));
         assert_eq!(cells.len(), 5);
-        let packed = |i: usize| listing.entries[i].packed.unwrap().to_string();
-        assert_eq!(cells[0], vec!["readme.md".to_string(), "36".into(), packed(0), "2026-10-18 12:00".into(), "deflate".into(), "860443A3".into()]);
+        assert_eq!(cells[0], strings(&["readme.md", "36", "38", "2026-10-18 12:00", "deflate", "860443A3"]));
         assert_eq!(cells[1], strings(&["data/", "", "", "2026-10-18 12:00", "", ""]), "a folder: no size, method or CRC");
-        assert_eq!(cells[2], vec!["data/table.csv".to_string(), "142".into(), packed(2), "2026-10-18 12:00".into(), "bzip2".into(), "8BF4FAD8".into()]);
+        assert_eq!(cells[2], strings(&["data/table.csv", "142", "160", "2026-10-18 12:00", "bzip2", "8BF4FAD8"]));
         assert_eq!(cells[3], strings(&["data/dot.png", "67", "67", "2026-10-18 12:00", "stored", "90C4732E"]));
-        assert_eq!(cells[4], vec!["naïve.txt".to_string(), "13".into(), packed(4), "2026-10-18 12:00".into(), "zstd".into(), "DF6A9BBD".into()]);
-        let summary = format!("ZIP, 5 entries, {} packed from 258 B", archive::human(listing.packed_total().unwrap()));
-        assert_eq!(label(window, "archive-summary"), summary);
-        assert_eq!(v.summary(), summary);
+        assert_eq!(cells[4], strings(&["naïve.txt", "13", "22", "2026-10-18 12:00", "zstd", "DF6A9BBD"]));
+        assert_eq!(label(window, "archive-summary"), "ZIP, 5 entries, 287 B packed from 258 B");
+        assert_eq!(v.summary(), "ZIP, 5 entries, 287 B packed from 258 B");
         assert_eq!(label(window, "archive-message"), "Enter opens an entry inside Sfoglia, Ctrl+Shift+F finds one, the arrow in a header sorts");
         assert!(window.try_find("archive-tool").is_none(), "no 7-Zip is involved");
         assert!(window.try_find("archive-look-again").is_none());
@@ -243,9 +240,56 @@ fn an_archive_opens_on_its_entry_list_sorted_and_searched(cx: &mut TestAppContex
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(names(&view, cx).len(), 5, "an empty search shows every entry again");
-        assert_eq!(label(window, "archive-summary"), format!("ZIP, 5 entries, {} packed from 258 B", archive::human(listing.packed_total().unwrap())));
+        assert_eq!(label(window, "archive-summary"), "ZIP, 5 entries, 287 B packed from 258 B");
+        // Under a sort, Enter, a double click and Extract selected take the row as shown, not the archive's index.
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx)[0], "data/table.csv");
+        press_enter_on(&view, 0, window, cx);
     })
     .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 2);
+        assert_eq!(panels[1].read(cx).tab_name(cx).map(|s| s.to_string()), Some("bundle.zip › data/table.csv".to_string()), "the first shown row, sorted");
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        window.double_click(("entry", 0usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let sorted = scratch_dir("archive-sorted-selected");
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 2, "the double-clicked row is the same entry: its tab comes to the front");
+        assert_eq!(workspace.read(cx).active_panel(cx).map(|p| p.entity_id()), Some(panels[1].entity_id()));
+        let archive_panel = panels[0].clone();
+        let id = gpui_kit::component::dock::PanelId::from(archive_panel.entity_id());
+        workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.select_panel(id, window, cx));
+        window.render_frame(cx);
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_row(0, cx));
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).selected_entry(cx), Some(2), "the first shown row is the third entry");
+        window.click("archive-extract-selected", cx);
+    })
+    .unwrap();
+    let chosen = sorted.clone();
+    cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "archive-message"), format!("1 entry extracted into {}", sorted.display()));
+        assert_eq!(std::fs::read(sorted.join("data").join("table.csv")).unwrap(), std::fs::read(fixture("table.csv")).unwrap());
+        assert!(!sorted.join("readme.md").exists(), "not the archive's first entry");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&sorted);
 }
 
 #[gpui_kit::test]
@@ -619,6 +663,7 @@ fn an_exotic_container_goes_through_seven_zip_or_says_what_to_install(cx: &mut T
         assert!(std::fs::read(out.join("docs").join("readme.md")).unwrap().starts_with(b"# Readme from a rar"));
         assert!(out.join("big.bin").is_file());
         assert!(!out.parent().unwrap().join("climb.txt").exists(), "nothing climbed out");
+        assert!(!out.join("climb.txt").exists(), "7-Zip was never asked for the climbing entry (it would write it inside, the `..` stripped)");
         // Extract selected names the one entry: the stand-in writes that alone.
         let table = view.read(cx).table().clone();
         table.update(cx, |table, cx| table.set_selected_row(2, cx));
@@ -829,6 +874,124 @@ fn other_entry_kinds_open_in_their_viewers_and_every_column_sorts(cx: &mut TestA
         assert_eq!(panels[6].read(cx).tab_name(cx).map(|s| s.to_string()), Some("more.zip › d/n.txt".to_string()));
         let text = panels[6].read(cx).text_view().expect("a .txt entry opens in the text viewer").clone();
         assert_eq!(text.read(cx).editor().read(cx).value().to_string(), "nested\n");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_zip_with_encrypted_entries_lists_and_checks_the_password_on_unlock(cx: &mut TestAppContext) {
+    // An AES zip lists in the clear: the password field shows beside the list, a wrong one is said on Unlock and
+    // on opening an entry, each counted, and the search and the sort survive every re-listing.
+    let path = fixture("secret.zip");
+    let (handle, workspace, _panel, view) = open_archive(cx, no_tools(), path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert_eq!(v.state_name(), "listed");
+        assert!(v.listing().is_some_and(|l| l.encrypted));
+        assert_eq!(names(&view, cx), strings(&["secret.txt"]));
+        assert_eq!(rows(&view, cx)[0], strings(&["secret.txt", "25", "55", "2026-10-18 12:00", "deflate", &format!("{:08X}", 2629368947u32)]));
+        assert_eq!(label(window, "archive-summary"), "ZIP, 1 entry, 55 B packed from 25 B");
+        assert!(window.try_find("archive-password").is_some(), "the entries are encrypted: the field shows beside the list");
+        assert!(window.try_find("archive-rows").is_some());
+        assert_eq!(label(window, "archive-message"), "Enter opens an entry inside Sfoglia, Ctrl+Shift+F finds one, the arrow in a header sorts");
+        // Enter with no password: the entry says what it needs.
+        press_enter_on(&view, 0, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 1, "nothing opened");
+        assert_eq!(label(window, "archive-message"), "the archive is encrypted: it needs its password");
+        // A wrong password on Unlock: said and counted, the list still up.
+        let password = view.read(cx).password_input().clone();
+        let focus = password.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.input("nope", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).state_name(), "listed");
+        assert_eq!(names(&view, cx), strings(&["secret.txt"]));
+        assert_eq!(label(window, "archive-message"), "wrong password (try 1)");
+        // Enter with the wrong password kept: counted again, nothing opened.
+        press_enter_on(&view, 0, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 1);
+        assert_eq!(label(window, "archive-message"), "wrong password (try 2)");
+        // A search and a sort, then another wrong password: the re-listing keeps both.
+        window.press("ctrl-shift-f", cx);
+        window.input("sec", cx);
+        window.click(("icon-sort", 1usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).table().read(cx).delegate().filter(), "sec");
+        assert_eq!(view.read(cx).table().read(cx).delegate().sort(), Some((1, ColumnSort::Descending)));
+        let password = view.read(cx).password_input().clone();
+        password.update(cx, |state, cx| state.set_value("still wrong", window, cx));
+        window.click("archive-unlock", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "archive-message"), "wrong password (try 3)");
+        assert_eq!(view.read(cx).state_name(), "listed");
+        assert_eq!(view.read(cx).table().read(cx).delegate().filter(), "sec", "the search survives the re-listing");
+        assert_eq!(view.read(cx).table().read(cx).delegate().sort(), Some((1, ColumnSort::Descending)), "and so does the sort");
+        assert_eq!(names(&view, cx), strings(&["secret.txt"]));
+        // A search that keeps nothing survives too: the right password lists, the filter still hides the entry.
+        let search = view.read(cx).search_input().clone();
+        let focus = search.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.press("ctrl-a", cx);
+        window.input("zzz", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), Vec::<String>::new());
+        let password = view.read(cx).password_input().clone();
+        password.update(cx, |state, cx| state.set_value("sfoglia", window, cx));
+        window.click("archive-unlock", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).state_name(), "listed");
+        assert_eq!(view.read(cx).message(), None, "the right password says nothing");
+        assert_eq!(names(&view, cx), Vec::<String>::new(), "the search still hides the entry");
+        assert_eq!(view.read(cx).table().read(cx).delegate().filter(), "zzz");
+        let search = view.read(cx).search_input().clone();
+        let focus = search.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&view, cx), strings(&["secret.txt"]));
+        assert!(window.try_find("archive-password").is_some(), "the field stays: the entries are still encrypted");
+        press_enter_on(&view, 0, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 2, "the right password opens the entry");
+        assert_eq!(panels[1].read(cx).tab_name(cx).map(|s| s.to_string()), Some("secret.zip › secret.txt".to_string()));
+        let text = panels[1].read(cx).text_view().expect("a .txt entry opens in the text viewer").clone();
+        assert_eq!(text.read(cx).editor().read(cx).value().to_string(), "The password is sfoglia.\n");
+        assert_eq!(view.read(cx).message(), Some("opening secret.txt"));
     })
     .unwrap();
 }

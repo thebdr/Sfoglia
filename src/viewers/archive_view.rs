@@ -766,6 +766,7 @@ impl Render for ArchiveView {
         let body = if listed {
             div()
                 .id("archive-rows")
+                .test_support()
                 .key_context(ROWS_CONTEXT)
                 .track_focus(&self.rows_focus)
                 .on_action(cx.listener(Self::on_open_entry))
