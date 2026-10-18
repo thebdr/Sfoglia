@@ -625,14 +625,16 @@ fn archives(root: &Path) -> Result<(), String> {
         encoder.finish().map_err(|e| err(&e))
     };
     let xz = |bytes: &[u8]| -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        lzma_rs::xz_compress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| err(&e))?;
-        Ok(out)
+        let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(bytes).map_err(|e| err(&e))?;
+        encoder.finish().map_err(|e| err(&e))
     };
     let lzma = |bytes: &[u8]| -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        lzma_rs::lzma_compress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| err(&e))?;
-        Ok(out)
+        let options = liblzma::stream::LzmaOptions::new_preset(6).map_err(|e| err(&e))?;
+        let stream = liblzma::stream::Stream::new_lzma_encoder(&options).map_err(|e| err(&e))?;
+        let mut encoder = liblzma::write::XzEncoder::new_stream(Vec::new(), stream);
+        encoder.write_all(bytes).map_err(|e| err(&e))?;
+        encoder.finish().map_err(|e| err(&e))
     };
     let zst = |bytes: &[u8]| -> Result<Vec<u8>, String> { zstd::stream::encode_all(std::io::Cursor::new(bytes), 3).map_err(|e| err(&e)) };
     std::fs::write(fixtures.join("bundle.tar.gz"), gz(&tar_bytes, UNIX as u32)?).map_err(|e| err(&e))?;

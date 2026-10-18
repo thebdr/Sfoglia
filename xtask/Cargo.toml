@@ -8,7 +8,7 @@ description = "Repository tasks: `cargo run -p xtask -- formats` regenerates FOR
 [dependencies]
 bzip2 = "0.6"
 flate2 = "1"
-lzma-rs = "0.3"
+liblzma = { version = "0.4", default-features = false, features = ["static"] }
 rust_xlsxwriter = "0.100.0"
 sevenz-rust2 = { version = "0.24", features = ["aes256", "compress"] }
 tar = "0.4"

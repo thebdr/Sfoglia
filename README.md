@@ -78,8 +78,9 @@ SumatraPDF's, and a click anywhere in Sfoglia's window brings the keyboard back)
 
 ## Archives
 
-An archive opens on the list of its entries: the name with its folder path, the size, the packed size, the date, the
-method and the CRC, with the folders as entries of their own (recorded by the archive or not). A click on the arrow in a
+An archive opens on the list of its entries: the name with its folder path, the size, the packed size, the date (a
+zip's own clock time as written; the instant a tar, a 7z or a gzip header records, shown in this machine's zone, as
+7-Zip shows it), the method and the CRC, with the folders as entries of their own (recorded by the archive or not). A click on the arrow in a
 column header sorts (descending first, then ascending, then the archive's order), Ctrl+Shift+F focuses the search field and what is typed there keeps
 the entries whose name contains it, any case; the arrows, Home and End move the selection. Enter or a double click on an
 entry opens it inside Sfoglia, read-only (a save says so), in the viewer its name and bytes call for, as a tab named

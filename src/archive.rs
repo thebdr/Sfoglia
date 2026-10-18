@@ -95,6 +95,15 @@ impl Container {
     }
 }
 
+/// What the status row calls the container: `ZIP`, `TAR.GZ`, `7Z`, `GZ`; for a format left to 7-Zip, `RAR` when
+/// the bytes say so (a rar under a `.zip` name is a rar), else the extension upper-cased.
+pub fn label_of(container: Container, name: &str, head: &[u8]) -> String {
+    match container {
+        Container::External if head.starts_with(b"Rar!") => "RAR".to_string(),
+        other => other.label(name),
+    }
+}
+
 /// The lower-cased last extension of a name, or an empty string.
 fn extension(name: &str) -> String {
     Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
@@ -172,6 +181,8 @@ pub struct Listing {
     pub entries: Vec<Entry>,
     /// Some entries need a password to read.
     pub encrypted: bool,
+    /// What the status row calls the container: `ZIP`, `TAR.GZ`, `7Z`, `GZ`, or `RAR` for a rar under any name.
+    pub label: String,
 }
 
 impl Listing {
@@ -186,15 +197,15 @@ impl Listing {
     }
 
     /// `ZIP, 12 entries, 1.2 MB packed from 4.5 MB`.
-    pub fn describe(&self, name: &str, file_size: Option<u64>) -> String {
+    pub fn describe(&self, file_size: Option<u64>) -> String {
         let n = self.entries.len();
         let noun = if n == 1 { "entry" } else { "entries" };
         let packed = self.packed_total().or(file_size);
         match packed {
             Some(packed) => {
-                format!("{}, {n} {noun}, {} packed from {}", self.container.label(name), human(packed), human(self.unpacked_total()))
+                format!("{}, {n} {noun}, {} packed from {}", self.label, human(packed), human(self.unpacked_total()))
             }
-            None => format!("{}, {n} {noun}, {}", self.container.label(name), human(self.unpacked_total())),
+            None => format!("{}, {n} {noun}, {}", self.label, human(self.unpacked_total())),
         }
     }
 }
@@ -256,15 +267,12 @@ pub fn decode(codec: Codec, reader: Box<dyn Read>) -> Result<Box<dyn Read>, Arch
         Codec::Gzip => Box::new(flate2::read::MultiGzDecoder::new(reader)),
         Codec::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(reader)),
         Codec::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
-        Codec::Xz => {
-            let mut out = Vec::new();
-            lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut out).map_err(|e| ArchiveError::Bad(e.to_string()))?;
-            Box::new(Cursor::new(out))
-        }
+        // liblzma, the reference: every check (CRC32, CRC64, SHA-256), the BCJ and delta filters, streams one after
+        // the other; the old `.lzma` format through its own decoder.
+        Codec::Xz => Box::new(liblzma::read::XzDecoder::new_multi_decoder(reader)),
         Codec::Lzma => {
-            let mut out = Vec::new();
-            lzma_rs::lzma_decompress(&mut BufReader::new(reader), &mut out).map_err(|e| ArchiveError::Bad(e.to_string()))?;
-            Box::new(Cursor::new(out))
+            let stream = liblzma::stream::Stream::new_lzma_decoder(u64::MAX).map_err(|e| ArchiveError::Bad(e.to_string()))?;
+            Box::new(liblzma::read::XzDecoder::new_stream(reader, stream))
         }
         Codec::Compress => {
             let mut packed = Vec::new();
@@ -315,7 +323,7 @@ pub fn list(path: &Path, password: Option<&str>, tool: Option<&SevenZipTool>) ->
     {
         verify_password(path, container, &entries, password, tool)?;
     }
-    Ok(Listing { container, entries, encrypted })
+    Ok(Listing { container, entries, encrypted, label: label_of(container, &name, &head) })
 }
 
 /// A folder the archive records no entry for (7-Zip and others store the files alone) gets a row of its own,
@@ -359,7 +367,7 @@ fn seven_z_entry_encrypted(archive: &sevenz_rust2::Archive, raw: usize) -> bool 
 fn verify_password(path: &Path, container: Container, entries: &[Entry], password: &str, tool: Option<&SevenZipTool>) -> Result<(), ArchiveError> {
     match container {
         Container::External => {
-            let listing = Listing { container, entries: entries.to_vec(), encrypted: true };
+            let listing = Listing { container, entries: entries.to_vec(), encrypted: true, label: String::new() };
             let smallest = entries.iter().enumerate().filter(|(_, e)| e.encrypted && !e.is_dir).min_by_key(|(_, e)| e.size).map(|(i, _)| i);
             match smallest {
                 Some(index) => read_entry(path, &listing, index, Some(password), tool).map(|_| ()),
@@ -643,6 +651,16 @@ pub fn format_unix(secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, (rest % 3600) / 60)
 }
 
+/// Unix seconds as `YYYY-MM-DD HH:MM` in this machine's zone: what a tar, a 7z or a gzip header records is an
+/// instant, shown as 7-Zip and the file manager show it (a zip's own time is a wall clock already, shown as is).
+pub fn local_time(secs: u64) -> String {
+    use chrono::TimeZone as _;
+    match chrono::Local.timestamp_opt(secs as i64, 0).single() {
+        Some(at) => at.format("%Y-%m-%d %H:%M").to_string(),
+        None => format_unix(secs),
+    }
+}
+
 /// Howard Hinnant's days-to-civil, for the proleptic Gregorian calendar.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
@@ -829,7 +847,7 @@ fn list_tar(path: &Path, codec: Option<Codec>) -> Result<Vec<Entry>, ArchiveErro
             name,
             size: header.size().unwrap_or(0),
             packed: None,
-            modified: header.mtime().ok().map(format_unix),
+            modified: header.mtime().ok().map(local_time),
             method: if is_dir { String::new() } else { method.clone() },
             crc: None,
             is_dir,
@@ -888,7 +906,7 @@ fn list_seven_z(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Archi
         let is_dir = entry.is_directory;
         let modified = entry.has_last_modified_date.then(|| {
             let system: std::time::SystemTime = entry.last_modified_date.into();
-            format_unix(system.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+            local_time(system.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
         });
         let mut name = entry.name().replace('\\', "/");
         if is_dir && !name.ends_with('/') {
@@ -916,7 +934,7 @@ fn lone_entry(path: &Path, name: &str, codec: Codec) -> Result<Entry, ArchiveErr
     let modified = (codec == Codec::Gzip)
         .then(|| {
             let decoder = flate2::read::GzDecoder::new(BufReader::new(File::open(path).ok()?));
-            decoder.header().map(|h| h.mtime()).filter(|m| *m > 0).map(|m| format_unix(m as u64))
+            decoder.header().map(|h| h.mtime()).filter(|m| *m > 0).map(|m| local_time(m as u64))
         })
         .flatten();
     Ok(Entry {
@@ -1159,6 +1177,16 @@ mod tests {
         assert_eq!(format_unix(1_792_324_800), "2026-10-18 12:00");
         assert_eq!(format_unix(0), "1970-01-01 00:00");
         assert_eq!(format_unix(951_782_400), "2000-02-29 00:00", "the leap day of 2000");
+        // An instant shows in this machine's zone: the UTC rendering shifted by the zone's offset at that instant.
+        use chrono::TimeZone as _;
+        let offset = chrono::Local.timestamp_opt(1_792_324_800, 0).unwrap().offset().local_minus_utc() as i64;
+        assert_eq!(local_time(1_792_324_800), format_unix((1_792_324_800 + offset) as u64));
+        // The label follows the bytes: a rar under a `.zip` name is a rar to the status row.
+        assert_eq!(container_of("a.zip", b"Rar!\x1a\x07\x01\x00"), Some(Container::External));
+        assert_eq!(label_of(Container::External, "a.zip", b"Rar!\x1a\x07\x01\x00"), "RAR");
+        assert_eq!(label_of(Container::External, "disk.iso", b""), "ISO");
+        assert_eq!(label_of(Container::Zip, "a.jar", b"PK\x03\x04"), "ZIP");
+        assert_eq!(list(&fixture("fake.rar"), None, None).err().map(|e| e.to_string()), Some("this format needs 7-Zip".to_string()));
     }
 
     #[test]
@@ -1188,8 +1216,8 @@ mod tests {
         assert_eq!(entries[2].size, 1_048_576);
         assert_eq!(entries[2].crc, Some(0));
         assert_eq!(parse_seven_zip_listing("7-Zip\nno archive here\n"), Err("7-Zip listed no entries".to_string()));
-        let listing = Listing { container: Container::External, entries, encrypted: false };
-        assert_eq!(listing.describe("x.rar", Some(1234)), "RAR, 3 entries, 1.0 KB packed from 1.0 MB");
+        let listing = Listing { container: Container::External, entries, encrypted: false, label: "RAR".to_string() };
+        assert_eq!(listing.describe(Some(1234)), "RAR, 3 entries, 1.0 KB packed from 1.0 MB");
         assert_eq!(listing.packed_total(), Some(1040));
         assert_eq!(listing.unpacked_total(), 1_048_618);
     }
@@ -1256,7 +1284,7 @@ mod tests {
         assert_eq!(read_entry(&path, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
         assert_eq!(read_entry(&path, &listing, 4, None, None).unwrap(), "Unicode name\n".as_bytes());
         assert!(matches!(read_entry(&path, &listing, 1, None, None), Err(ArchiveError::Bad(_))), "a folder has no bytes");
-        let summary = listing.describe("bundle.zip", std::fs::metadata(&path).ok().map(|m| m.len()));
+        let summary = listing.describe(std::fs::metadata(&path).ok().map(|m| m.len()));
         assert_eq!(summary, "ZIP, 5 entries, 287 B packed from 258 B");
         assert_eq!(listing.packed_total(), Some(287));
         // Extract all into a folder: the paths kept, the folder entry made.
@@ -1284,12 +1312,12 @@ mod tests {
         let names: Vec<&str> = plain.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["readme.md", "data/", "data/table.csv", "data/dot.png", "naïve.txt"]);
         assert_eq!(plain.entries[0].method, "stored");
-        assert_eq!(plain.entries[0].modified.as_deref(), Some("2026-10-18 12:00"));
+        assert_eq!(plain.entries[0].modified, Some(local_time(1_792_324_800)), "an instant, in this machine's zone");
         assert_eq!(plain.entries[0].packed, None, "a tar packs nothing");
         assert_eq!(plain.entries[0].crc, None);
         assert!(plain.entries[1].is_dir);
         assert_eq!(plain.packed_total(), None);
-        assert_eq!(plain.describe("bundle.tar", Some(10_240)), format!("TAR, 5 entries, 10.0 KB packed from {}", human(plain.unpacked_total())));
+        assert_eq!(plain.describe(Some(10_240)), format!("TAR, 5 entries, 10.0 KB packed from {}", human(plain.unpacked_total())));
         for (file, codec) in [
             ("bundle.tar.gz", Codec::Gzip),
             ("bundle.tar.bz2", Codec::Bzip2),
@@ -1333,12 +1361,12 @@ mod tests {
         let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["readme.md", "data/", "data/table.csv", "data/dot.png", "naïve.txt"]);
         assert_eq!(listing.entries[0].method, "LZMA2");
-        assert_eq!(listing.entries[0].modified.as_deref(), Some("2026-10-18 12:00"));
+        assert_eq!(listing.entries[0].modified, Some(local_time(1_792_324_800)));
         assert_eq!(listing.entries[0].size, 36);
         assert_eq!(listing.entries[0].crc, Some(crc32(b"# Bundle\n\nThree files and a folder.\n")));
         assert!(listing.entries[1].is_dir);
         assert_eq!(listing.entries.iter().map(|e| e.packed).collect::<Vec<_>>(), [Some(40), None, Some(139), Some(71), Some(17)]);
-        assert_eq!(listing.describe("bundle.7z", Some(500)), "7Z, 5 entries, 267 B packed from 258 B");
+        assert_eq!(listing.describe(Some(500)), "7Z, 5 entries, 267 B packed from 258 B");
         assert_eq!(read_entry(&path, &listing, 0, None, None).unwrap(), b"# Bundle\n\nThree files and a folder.\n");
         assert_eq!(read_entry(&path, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
         // Encrypted headers: no listing without the password, a wrong one says so, the right one lists and reads.
@@ -1350,7 +1378,7 @@ mod tests {
         assert_eq!(listing.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["secret.txt"]);
         assert_eq!(listing.entries[0].method, "LZMA2+AES", "as 7-Zip prints it: the cipher after the compressor");
         assert_eq!(listing.entries[0].packed, Some(32));
-        assert_eq!(listing.describe("secret.7z", Some(276)), "7Z, 1 entry, 32 B packed from 25 B");
+        assert_eq!(listing.describe(Some(276)), "7Z, 1 entry, 32 B packed from 25 B");
         assert_eq!(read_entry(&secret, &listing, 0, Some("sfoglia"), None).unwrap(), b"The password is sfoglia.\n");
         assert_eq!(ArchiveError::NeedsPassword.to_string(), "the archive is encrypted: it needs its password");
         assert_eq!(ArchiveError::WrongPassword.to_string(), "wrong password");
@@ -1376,12 +1404,20 @@ mod tests {
             assert_eq!(entry.packed, Some(std::fs::metadata(&path).unwrap().len()));
             assert!(!entry.is_dir);
             assert_eq!(read_entry(&path, &listing, 0, None, None).unwrap(), b"A note, compressed alone.\n", "{file}");
-            let summary = listing.describe(file, Some(entry.packed.unwrap()));
+            let summary = listing.describe(Some(entry.packed.unwrap()));
             assert!(summary.starts_with(&format!("{}, 1 entry, ", codec.suffixes()[0].to_ascii_uppercase())), "{summary}");
         }
         let gz = list(&fixture("note.txt.gz"), None, None).unwrap();
-        assert_eq!(gz.entries[0].modified.as_deref(), Some("2026-10-18 12:00"), "gzip keeps a time in its header");
+        assert_eq!(gz.entries[0].modified, Some(local_time(1_792_324_800)), "gzip keeps a time in its header");
         assert_eq!(list(&fixture("note.txt.bz2"), None, None).unwrap().entries[0].modified, None, "bzip2 keeps none");
+        // xz streams from xz-utils 5.8 (a second writer): a SHA-256 check and the x86 BCJ filter, which the pure
+        // decoder of the first rounds refused; both read back to their text through liblzma.
+        for file in ["sha256.xz", "bcj.xz"] {
+            let listing = list(&fixture(file), None, None).unwrap();
+            assert_eq!(listing.container, Container::Lone(Codec::Xz), "{file}");
+            assert_eq!((listing.entries[0].name.as_str(), listing.entries[0].size), (file.trim_end_matches(".xz"), 80000), "{file}");
+            assert!(read_entry(&fixture(file), &listing, 0, None, None).unwrap() == std::fs::read(fixture("sixteen.raw")).unwrap(), "{file} decodes to its raw text");
+        }
     }
 
     #[test]
@@ -1400,7 +1436,9 @@ mod tests {
             assert_eq!(listing.entries.len(), 1, "{file}");
             let entry = &listing.entries[0];
             assert_eq!((entry.name.as_str(), entry.size, entry.packed, entry.method.as_str()), (name, size, Some(packed), method), "{file}");
-            assert_eq!(entry.modified.as_deref(), Some("2026-10-18 12:00"), "{file}");
+            // A zip's time is the clock as written; a 7z's an instant, shown in this machine's zone.
+            let expected = if container == Container::Zip { "2026-10-18 12:00".to_string() } else { local_time(1_792_324_800) };
+            assert_eq!(entry.modified, Some(expected), "{file}");
             assert_eq!(entry.crc, Some(crc32(bytes)), "{file}");
             assert!(matches!(read_entry(&path, &listing, 0, None, None), Err(ArchiveError::NeedsPassword)), "{file}: no password");
             assert!(matches!(read_entry(&path, &listing, 0, Some("nope"), None), Err(ArchiveError::WrongPassword)), "{file}: a wrong one");
@@ -1443,7 +1481,7 @@ mod tests {
         let entry = &listing.entries[0];
         assert_eq!((entry.name.as_str(), entry.size, entry.packed, entry.method.as_str()), ("readme.md", 36, Some(40), "BCJ+LZMA"));
         assert_eq!(read_entry(&bcj, &listing, 0, None, None).unwrap(), b"# Bundle\n\nThree files and a folder.\n");
-        assert_eq!(listing.describe("bcj.7z", Some(162)), "7Z, 1 entry, 40 B packed from 36 B");
+        assert_eq!(listing.describe(Some(162)), "7Z, 1 entry, 40 B packed from 36 B");
     }
 
     #[test]
@@ -1462,7 +1500,7 @@ mod tests {
         assert_eq!(listing.entries.iter().map(|e| e.packed).collect::<Vec<_>>(), [Some(106), Some(531), Some(140), Some(25), None, Some(9)]);
         assert_eq!(listing.entries.iter().map(|e| e.modified.as_deref()).collect::<Vec<_>>(), [Some("2026-10-18 12:00"), Some("2026-10-18 12:01"), Some("2026-10-18 12:02"), Some("2026-10-18 12:03"), None, Some("2026-10-18 12:04")]);
         assert_eq!(listing.entries.iter().map(|e| e.method.as_str()).collect::<Vec<_>>(), ["deflate", "bzip2", "stored", "zstd", "", "deflate"]);
-        assert_eq!(listing.describe("more.zip", std::fs::metadata(&path).ok().map(|m| m.len())), "ZIP, 6 entries, 811 B packed from 1.6 KB");
+        assert_eq!(listing.describe(std::fs::metadata(&path).ok().map(|m| m.len())), "ZIP, 6 entries, 811 B packed from 1.6 KB");
         assert!(matches!(read_entry(&path, &listing, 4, None, None), Err(ArchiveError::Bad(reason)) if reason == "d/ is a folder"));
         assert_eq!(read_entry(&path, &listing, 5, None, None).unwrap(), b"nested\n");
         assert_eq!(read_entry(&path, &listing, 2, None, None).unwrap().len(), 140, "the nested zip's bytes");
@@ -1521,7 +1559,7 @@ mod tests {
             ("note.txt", 26, Some(33), "compress", None)
         );
         assert_eq!(read_entry(&note, &listing, 0, None, None).unwrap(), b"A note, compressed alone.\n");
-        assert_eq!(listing.describe("note.txt.Z", Some(33)), "Z, 1 entry, 33 B packed from 26 B");
+        assert_eq!(listing.describe(Some(33)), "Z, 1 entry, 33 B packed from 26 B");
         // Streams from a second writer (`scripts/compress-streams.pl`), read back by gzip and 7-Zip to the same bytes:
         // a 12-bit one with three clear codes after a full table, an old-format one without block mode, and a
         // 16-bit one that runs on with codes of every width.
@@ -1543,7 +1581,7 @@ mod tests {
         assert_eq!(listing.entries[0].method, "compress");
         assert_eq!(read_entry(&tar, &listing, 4, None, None).unwrap(), "Unicode name\n".as_bytes());
         assert_eq!(read_entry(&tar, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
-        assert_eq!(listing.describe("bundle.tar.Z", Some(574)), "TAR.Z, 5 entries, 574 B packed from 258 B");
+        assert_eq!(listing.describe(Some(574)), "TAR.Z, 5 entries, 574 B packed from 258 B");
         // The whole stream: 5632 bytes of tar out of 574, through the 9, 10 and 11 bit code widths.
         assert_eq!(uncompress(&std::fs::read(&tar).unwrap()).unwrap(), std::fs::read(fixture("bundle.tar")).unwrap());
         // Bad streams say so.
@@ -1574,7 +1612,7 @@ mod tests {
                 ("../climb.txt", 4, Some(4), false, false),
             ]
         );
-        assert_eq!(listing.describe("fake.rar", Some(40)), "RAR, 4 entries, 1022 B packed from 1.0 MB");
+        assert_eq!(listing.describe(Some(40)), "RAR, 4 entries, 1022 B packed from 1.0 MB");
         assert!(read_entry(&plain, &listing, 0, None, Some(&tool)).unwrap().starts_with(b"# Readme from a rar"));
         assert!(matches!(read_entry(&plain, &listing, 1, None, Some(&tool)), Err(ArchiveError::Bad(reason)) if reason == "docs/ is a folder"));
         let into = std::env::temp_dir().join(format!("sfoglia-archive-external-{}", std::process::id()));

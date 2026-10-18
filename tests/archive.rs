@@ -595,7 +595,7 @@ fn an_encrypted_seven_zip_asks_for_its_password(cx: &mut TestAppContext) {
         assert_eq!(names(&view, cx), strings(&["secret.txt"]));
         let cells = rows(&view, cx);
         assert_eq!(cells[0][0..2], strings(&["secret.txt", "25"]));
-        assert_eq!(cells[0][3..5], strings(&["2026-10-18 12:00", "LZMA2+AES"]));
+        assert_eq!(cells[0][3..5], strings(&[&archive::local_time(1_792_324_800), "LZMA2+AES"]), "a 7z's instant in this machine's zone");
         let summary = label(window, "archive-summary");
         assert!(summary.starts_with("7Z, 1 entry, ") && summary.ends_with(" packed from 25 B"), "{summary}");
         assert!(window.try_find("archive-password").is_some(), "the field stays: the entries are encrypted");

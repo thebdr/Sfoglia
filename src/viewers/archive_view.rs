@@ -193,6 +193,8 @@ pub struct ArchiveView {
     name: String,
     size: Option<u64>,
     container: Option<Container>,
+    /// What the status row calls the container, by the bytes under any name.
+    label: String,
     tools: Arc<ToolSet>,
     /// 7-Zip as found, when the container goes through it.
     tool: Option<Found>,
@@ -248,6 +250,7 @@ impl ArchiveView {
             name,
             size: std::fs::metadata(path).ok().map(|m| m.len()),
             container: None,
+            label: String::new(),
             tools,
             tool: None,
             state: State::Locked,
@@ -346,9 +349,9 @@ impl ArchiveView {
     /// `ZIP, 5 entries, 789 B packed from 5.4 KB`; the container alone while nothing is listed.
     pub fn summary(&self) -> String {
         match (&self.state, self.container) {
-            (State::Listed(listing), _) => listing.describe(&self.name, self.size),
-            (State::Locked, Some(container)) => format!("{}, encrypted", container.label(&self.name)),
-            (_, Some(container)) => container.label(&self.name),
+            (State::Listed(listing), _) => listing.describe(self.size),
+            (State::Locked, Some(_)) => format!("{}, encrypted", self.label),
+            (_, Some(_)) => self.label.clone(),
             (_, None) => String::new(),
         }
     }
@@ -404,6 +407,7 @@ impl ArchiveView {
             })
             .unwrap_or_default();
         self.container = archive::container_of(&self.name, &head);
+        self.label = self.container.map(|c| archive::label_of(c, &self.name, &head)).unwrap_or_default();
         self.tool = (self.container == Some(Container::External)).then(|| self.tools.find(Tool::SevenZip)).flatten();
         let list_with = |password: Option<&str>| match self.container {
             None => Err(ArchiveError::Bad(format!("{} is no archive", self.name))),
@@ -436,7 +440,7 @@ impl ArchiveView {
             Err(ArchiveError::NoTool) => {
                 self.set_entries(Vec::new(), cx);
                 self.state = State::NoTool;
-                let what = format!("A {}", self.container.map(|c| c.label(&self.name)).unwrap_or_default());
+                let what = format!("A {}", self.label);
                 self.message = Some(format!("{} The bytes show meanwhile.", tools::missing_message(&what, &[Tool::SevenZip])));
                 self.show_bytes(window, cx);
             }

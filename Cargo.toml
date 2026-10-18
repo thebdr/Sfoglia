@@ -41,7 +41,8 @@ csv = "1.4.0"
 zip = { version = "9", default-features = false, features = ["aes-crypto", "deflate", "bzip2", "zstd", "lzma", "time"] }
 tar = "0.4"
 bzip2 = "0.6"
-lzma-rs = "0.3"
+liblzma = { version = "0.4", default-features = false, features = ["static"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zstd = "0.14"
 sevenz-rust2 = { version = "0.24", features = ["aes256"] }
 # PDF (C-014): the window handle SumatraPDF is hosted under, and the Win32 calls that place its frame and read a tool's version resource.
