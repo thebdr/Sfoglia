@@ -429,6 +429,10 @@ mod tests {
         assert_eq!(detect_delimiter("a,b;c\n1,2;3\n", "x.csv"), b',', "an even tie: commas before the rest");
         assert_eq!(detect_delimiter("a,b|c|d\n1,2|3|4\n", "x.csv"), b'|', "the same agreement, more fields: the pipe");
         assert_eq!(detect_delimiter("x,y,z,w\n1,2|3\n4,5|6\n", "x.csv"), b',', "a title line full of commas does not decide: the count most records share does");
+        let late = format!("{}{}", "1,2\n".repeat(3), "1;2;3\n".repeat(10));
+        assert_eq!(detect_delimiter(&late, "x.csv"), b';', "records four to twenty count");
+        let beyond = format!("{}{}", "1;2\n".repeat(20), "1,2\n".repeat(30));
+        assert_eq!(detect_delimiter(&beyond, "x.csv"), b';', "records past the twentieth do not");
         assert_eq!(detect_delimiter("title\n1;2;3\n4;5;6\n", "x.csv"), b';', "a title line in front does not decide");
         assert_eq!(detect_delimiter("a;b\n1,5;2,5\n3,5;4,5\n", "x.csv"), b';', "decimal commas do not outvote the semicolons");
         assert_eq!(

@@ -449,6 +449,14 @@ fn the_raw_text_toggles_and_the_grid_follows_the_edit(cx: &mut TestAppContext) {
         let (names, _) = dump(&view, cx);
         assert_eq!(names[0], "Xid", "the grid is rebuilt from the text as edited");
         assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-8");
+        // Ctrl+Shift+F from the raw text comes back to the grid and focuses the field there.
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown());
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown(), "the grid again");
+        assert_eq!(window.focused(cx), Some(view.read(cx).search_input().read(cx).focus_handle(cx)));
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -702,6 +710,25 @@ fn an_unchanged_value_writes_nothing_whatever_the_quoting(cx: &mut TestAppContex
         assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
         let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
         assert_eq!(text, "\"id\",\"n\"\n\"1\",\"x⏎y\"\n2,9\n3\n", "that record alone, quoted only where needed");
+        // A real value past the ragged record's end: the record grows to hold it.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(2, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("9", window, cx));
+        press_enter(window, cx, &view);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B4 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert_eq!(text, "\"id\",\"n\"\n\"1\",\"x⏎y\"\n2,9\n3,9\n", "the ragged record padded to the edited cell");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -806,6 +833,13 @@ fn a_workbook_that_does_not_open_says_why(cx: &mut TestAppContext) {
         assert!(label(window, "sheet-message").starts_with("cannot open the workbook:"), "{}", label(window, "sheet-message"));
         assert!(dump(&view, cx).1.is_empty());
         assert!(panel.read(cx).editable_text(cx).is_none());
+        // Still a workbook: no edit field, no header toggle, no raw text.
+        assert!(window.try_find("sheet-edit").is_none());
+        assert!(window.try_find("sheet-header").is_none());
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+        assert_eq!(label(window, "sheet-message"), "a workbook has no text to show; Ctrl+Shift+B shows its bytes");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -882,6 +916,14 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         assert!(window.try_find("sheet-changed-on-disk").is_none());
     })
     .unwrap();
+    // No further change on disk: the bar stays down through the next checks.
+    cx.background_executor.advance_clock(Duration::from_secs(3));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_none(), "the reload took the stamp");
+    })
+    .unwrap();
     // Changed again: Keep mine keeps the sheets as read, takes the bar down and marks nothing (nothing to save).
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(&path, b"changed again").unwrap();
@@ -896,6 +938,13 @@ fn a_workbook_reload_that_fails_keeps_the_sheets_and_says_why(cx: &mut TestAppCo
         assert!(window.try_find("sheet-changed-on-disk").is_none());
         assert!(!panel.read(cx).is_dirty(cx), "a workbook has nothing to save");
         assert_eq!(dump(&view, cx).1[0][0], "changed");
+    })
+    .unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(3));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sheet-changed-on-disk").is_none(), "keep mine took the stamp too");
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(20));
@@ -1127,6 +1176,8 @@ fn a_cell_selected_under_a_sort_is_its_own_record(cx: &mut TestAppContext) {
         assert!(text.contains("\n1,\"Rossi, Mario\",\"first line\nsecond line\",7,2026-01-05\n"), "record 1 untouched: {text}");
         let (_, cells) = dump(&view, cx);
         assert_eq!(cells[1][1], "Élodie Durand", "the grid in the file's order again");
+        assert_eq!(view.read(cx).table().read(cx).selected_cell(), Some((1, 1)), "the edited cell comes up again where it stands now");
+        assert_eq!(label(window, "sheet-cell"), "B3");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
