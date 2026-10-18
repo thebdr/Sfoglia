@@ -238,7 +238,7 @@ impl ArchiveView {
                 }
             }
             // A click on a row keeps the keyboard on the rows' wrapper, where Enter and the arrows are bound.
-            TableEvent::SelectRow(_) => {}
+            TableEvent::SelectRow(_) => window.focus(&this.rows_focus, cx),
             _ => {}
         });
         let mut view = Self {
