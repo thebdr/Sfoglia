@@ -55,7 +55,7 @@ pub struct ArchiveDelegate {
 impl ArchiveDelegate {
     fn new(entries: Vec<Entry>) -> Self {
         let longest = entries.iter().take(2000).map(|e| e.name.chars().count()).max().unwrap_or(4);
-        let widths = [(longest as f32 * 8. + 24.).clamp(160., 520.), 100., 100., 130., 110., 90.];
+        let widths = [(longest as f32 * 8. + 24.).clamp(160., 520.), 100., 100., 150., 110., 90.];
         let mut delegate = Self { entries, order: Vec::new(), sort: None, filter: String::new(), widths };
         delegate.rebuild();
         delegate
@@ -238,7 +238,7 @@ impl ArchiveView {
                 }
             }
             // A click on a row keeps the keyboard on the rows' wrapper, where Enter and the arrows are bound.
-            TableEvent::SelectRow(_) => window.focus(&this.rows_focus, cx),
+            TableEvent::SelectRow(_) => {}
             _ => {}
         });
         let mut view = Self {

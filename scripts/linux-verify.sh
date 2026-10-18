@@ -27,6 +27,8 @@
 #   CLOSE_ASK=1      click into the text, type "X", then press Alt+F4 (the window manager's close
 #                    request) and capture ~/sfoglia-linux-close.png with the closing question (C-012);
 #                    the window is expected to stay, and the log says whether it did
+#   ARCHIVE_WALK=1   in the archive list (C-015): press Down and Return (the first entry opens in a tab of
+#                    its own) and capture ~/sfoglia-linux-archive.png; the log names the 7-Zip the VM has, if any
 # Writes ~/sfoglia-linux.log, ~/sfoglia-linux.png (after launch), ~/sfoglia-linux-dialog.png
 # (after the dialog, when driven) and ~/sfoglia-linux.result (one line of facts).
 set -u
@@ -45,6 +47,7 @@ PNGDATA="$HOME/sfoglia-linux-data.png"
 PNGMDRAW="$HOME/sfoglia-linux-mdraw.png"
 PNGMDBACK="$HOME/sfoglia-linux-mdback.png"
 PNGCLOSE="$HOME/sfoglia-linux-close.png"
+PNGARCHIVE="$HOME/sfoglia-linux-archive.png"
 : > "$LOG"; : > "$RESULT"; rm -f "$PNG" "$PNG2" "$PNGDARK" "$PNGEND" "$PNGRULES" "$PNGHEX" "$PNGEDIT" "$PNGDATA"
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG"; }
 shot() { scrot -o -u "$1" 2>>"$LOG" || scrot -o "$1" 2>>"$LOG"; log "$2 png=$( [ -s "$1" ] && stat -c %s "$1" || echo missing)"; }
@@ -121,6 +124,14 @@ if [ -n "$WID" ]; then
     xdotool key --window "$WID" ctrl+shift+d; sleep 2
     shot "$PNGMDBACK" "after Ctrl+Shift+D back"
   fi
+  if [ "${ARCHIVE_WALK:-0}" = "1" ]; then
+    # The archive list (C-015): the rows have the keyboard at open; Down selects the first entry, Return opens it.
+    log "7-Zip on this VM: $(command -v 7z 7zz 7za 2>/dev/null | tr '
+' ' ')"
+    xdotool key --window "$WID" Down; sleep 0.5
+    xdotool key --window "$WID" Return; sleep 2.5
+    shot "$PNGARCHIVE" "after Down and Return in the archive list"
+  fi
   if [ "${CLOSE_ASK:-0}" = "1" ]; then
     # The closing question (C-012): an edit in the active tab, then the window manager's close request.
     eval "$GEOM"
@@ -173,9 +184,9 @@ else
 fi
 kill "$APP" 2>/dev/null; wait "$APP" 2>/dev/null
 log "app stopped"
-printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s hex=%s edit=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
+printf 'build=%s test=%s window=%s title=%s png=%s dialog=%s png2=%s dark=%s end=%s rules=%s hex=%s edit=%s archive=%s\n' "$BUILD" "$TEST" "${WID:-none}" "${TITLE:-none}" \
   "$( [ -s "$PNG" ] && echo yes || echo no)" "${DIALOG:-none}" "$( [ -s "$PNG2" ] && echo yes || echo no)" \
   "$( [ -s "$PNGDARK" ] && echo yes || echo no)" "$( [ -s "$PNGEND" ] && echo yes || echo no)" \
   "$( [ -s "$PNGRULES" ] && echo yes || echo no)" "$( [ -s "$PNGHEX" ] && echo yes || echo no)" \
-  "$( [ -s "$PNGEDIT" ] && echo yes || echo no)" "$( [ -s "$PNGDATA" ] && echo yes || echo no)" > "$RESULT"
+  "$( [ -s "$PNGEDIT" ] && echo yes || echo no)" "$( [ -s "$PNGDATA" ] && echo yes || echo no)" "$( [ -s "$PNGARCHIVE" ] && echo yes || echo no)" > "$RESULT"
 cat "$RESULT"
