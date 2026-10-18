@@ -187,8 +187,15 @@ fn a_csv_opens_as_a_grid_with_its_summary_and_header_toggle(cx: &mut TestAppCont
                 rows(&["3", "quote \"inside\"", "", "-3.25", ""]),
             ]
         );
+        // A selected cell first: the toggle rebuilds the grid and drops it, so no stale record is named.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3");
         window.click("sheet-header-button", cx);
         window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "", "the toggle drops the selection");
+        assert_eq!(view.read(cx).table().read(cx).selected_cell(), None);
         assert_eq!(label(window, "sheet-summary"), "CSV, 4 rows, 5 columns, comma, UTF-8");
         assert_eq!(label(window, "sheet-header"), "Header: off");
         let (names, cells) = dump(&view, cx);
@@ -502,6 +509,7 @@ fn a_workbook_opens_on_its_sheets_with_merges_and_dates(cx: &mut TestAppContext)
         assert_eq!(label(window, "sheet-cell"), "B3");
         window.click(("sheet-tab-button", 1usize), cx);
         window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "", "a sheet switch drops the selection");
         assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Notes: 2 rows, 2 columns");
         assert_eq!(dump(&view, cx).1[1][1], "42");
         window.click(("sheet-tab-button", 2usize), cx);

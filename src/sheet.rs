@@ -433,6 +433,12 @@ mod tests {
         assert_eq!(detect_delimiter(&late, "x.csv"), b';', "records four to twenty count");
         let beyond = format!("{}{}", "1;2\n".repeat(20), "1,2\n".repeat(30));
         assert_eq!(detect_delimiter(&beyond, "x.csv"), b';', "records past the twentieth do not");
+        // Three semicolon lines, then five comma records whose quoted third field spans ten lines each: by
+        // lines the fragments would use up the twenty-record limit, by records the commas win five to three.
+        let tall = format!("a;b;c\nd;e;f\ng;h;i\n{}", "1,2,\"l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\"\n".repeat(5));
+        assert_eq!(detect_delimiter(&tall, "x.csv"), b',', "a quoted break keeps the record open");
+        assert_eq!(cell_of(&Data::Int(42), false), Cell { text: "42".to_string(), kind: CellKind::Number(42.0) }, "an integer cell");
+        assert_eq!(cell_of(&Data::Int(-7), false).text, "-7");
         assert_eq!(detect_delimiter("title\n1;2;3\n4;5;6\n", "x.csv"), b';', "a title line in front does not decide");
         assert_eq!(detect_delimiter("a;b\n1,5;2,5\n3,5;4,5\n", "x.csv"), b';', "decimal commas do not outvote the semicolons");
         assert_eq!(
@@ -466,6 +472,8 @@ mod tests {
         assert_eq!(format_number(1e-7), "0.0000001");
         assert_eq!(format_number(-2.0 / 3.0), "-0.666666666666667", "cut to fifteen, as Excel shows it");
         assert_eq!(format_number(123456789012345678.0), "123456789012345680");
+        assert_eq!(format_number(9.5e18), "9500000000000000000", "a whole number past the 64-bit edge, in full");
+        assert_eq!(format_number(1e15), "1000000000000000");
         assert_eq!(column_name(0), "A");
         assert_eq!(column_name(25), "Z");
         assert_eq!(column_name(26), "AA");
