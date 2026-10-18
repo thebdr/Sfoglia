@@ -6425,6 +6425,7 @@ dependencies = [
  "memchr",
  "memmap2",
  "png 0.18.1",
+ "raw-window-handle",
  "regex",
  "resvg 0.46.0",
  "roxmltree 0.21.1",
@@ -6437,6 +6438,7 @@ dependencies = [
  "ttf-parser",
  "ureq",
  "usvg 0.46.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

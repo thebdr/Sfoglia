@@ -455,6 +455,42 @@ fn render_families_rs(contract: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// `tests/fixtures/three.pdf`: three pages of Helvetica text (the second one smaller and landscape), a PDF 1.4
+/// written by hand with exact cross-reference offsets, the same bytes on every run.
+fn three_pdf() -> Vec<u8> {
+    let mut objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>".to_string(),
+    ];
+    for page in 1..=3usize {
+        let (box_w, box_h, y) = if page == 2 { (595, 420, 340) } else { (612, 792, 700) };
+        let content = format!(
+            "BT /F1 36 Tf 72 {y} Td (Sfoglia page {page} of 3) Tj ET BT /F1 18 Tf 72 {} Td (Lorem ipsum dolor sit amet, page {page}) Tj ET",
+            y - 50
+        );
+        let page_object = 1 + 2 * page;
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {box_w} {box_h}] /Resources << /Font << /F1 9 0 R >> >> /Contents {} 0 R >>",
+            page_object + 1
+        ));
+        objects.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+    }
+    objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string());
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (ix, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", ix + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+    for offset in offsets {
+        out.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    out.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1));
+    out.into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,6 +968,9 @@ fn fixtures(root: &Path) -> Result<(), String> {
     let only = other.add_worksheet();
     only.set_name("Only").map_err(err)?;
     only.write_string(0, 0, "changed").map_err(err)?;
+    let pdf = root.join("tests").join("fixtures").join("three.pdf");
+    std::fs::write(&pdf, three_pdf()).map_err(|e| format!("{}: {e}", pdf.display()))?;
+    println!("wrote {}", pdf.display());
     let path = root.join("tests").join("fixtures").join("book2.xlsx");
     other.save(&path).map_err(err)?;
     println!("wrote {}", path.display());

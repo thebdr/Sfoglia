@@ -15,10 +15,10 @@ pub enum Family {
     Markdown,
     /// Spreadsheets and delimited tables (C-013).
     Spreadsheets,
+    /// PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia (C-014).
+    PdfXps,
     /// Word-processing documents (P-007).
     WordProcessing,
-    /// PDF and XPS viewing (P-008).
-    PdfXps,
     /// Presentations (P-011).
     Presentations,
     /// Visio diagrams (P-012).
@@ -49,8 +49,8 @@ impl Family {
         Family::DataTrees,
         Family::Markdown,
         Family::Spreadsheets,
-        Family::WordProcessing,
         Family::PdfXps,
+        Family::WordProcessing,
         Family::Presentations,
         Family::Visio,
         Family::Project,
@@ -71,8 +71,8 @@ impl Family {
             Family::DataTrees => "data-trees",
             Family::Markdown => "markdown",
             Family::Spreadsheets => "spreadsheets",
-            Family::WordProcessing => "word-processing",
             Family::PdfXps => "pdf-xps",
+            Family::WordProcessing => "word-processing",
             Family::Presentations => "presentations",
             Family::Visio => "visio",
             Family::Project => "project",
@@ -94,8 +94,8 @@ impl Family {
             Family::DataTrees => "Structured data trees",
             Family::Markdown => "Markdown rendering",
             Family::Spreadsheets => "Spreadsheets and delimited tables",
+            Family::PdfXps => "PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia",
             Family::WordProcessing => "Word-processing documents",
-            Family::PdfXps => "PDF and XPS viewing",
             Family::Presentations => "Presentations",
             Family::Visio => "Visio diagrams",
             Family::Project => "Microsoft Project files",
@@ -117,8 +117,8 @@ impl Family {
             Family::DataTrees => "C-010",
             Family::Markdown => "C-011",
             Family::Spreadsheets => "C-013",
+            Family::PdfXps => "C-014",
             Family::WordProcessing => "P-007",
-            Family::PdfXps => "P-008",
             Family::Presentations => "P-011",
             Family::Visio => "P-012",
             Family::Project => "P-013",

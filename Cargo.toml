@@ -38,6 +38,11 @@ futures = "0.3"
 anyhow = "1"
 calamine = "0.36.1"
 csv = "1.4.0"
+# PDF (C-014): the window handle SumatraPDF is hosted under, and the Win32 calls that place its frame and read a tool's version resource.
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }

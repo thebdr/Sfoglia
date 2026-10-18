@@ -5,6 +5,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
@@ -25,10 +26,12 @@ use crate::generated::families::Family;
 use crate::hex::HexFile;
 use crate::rules;
 use crate::shell::{APP_NAME, title};
+use crate::tools::ToolSet;
 use crate::viewers::data_view::{self, Collapse, CopyPath, Expand, PrettyPrint, SelectDown, SelectUp, ToggleNode, ToggleRaw};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
 use crate::viewers::markdown_view::{self, OpenLinkedFile};
+use crate::viewers::pdf_view::{self, PdfView};
 use crate::viewers::sheet_view;
 use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, SheetView, TextView};
 
@@ -66,6 +69,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", markdown_view::ToggleRaw, Some(markdown_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", sheet_view::ToggleRaw, Some(sheet_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", sheet_view::FocusSearch, Some(sheet_view::KEY_CONTEXT)),
+        KeyBinding::new("+", pdf_view::ZoomIn, Some(pdf_view::KEY_CONTEXT)),
+        KeyBinding::new("=", pdf_view::ZoomIn, Some(pdf_view::KEY_CONTEXT)),
+        KeyBinding::new("-", pdf_view::ZoomOut, Some(pdf_view::KEY_CONTEXT)),
+        KeyBinding::new("0", pdf_view::ZoomFit, Some(pdf_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-g", FocusGoto, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
@@ -132,6 +139,8 @@ enum PanelView {
     Markdown(Entity<MarkdownView>),
     /// The spreadsheet viewer (C-013).
     Sheet(Entity<SheetView>),
+    /// A PDF or XPS through SumatraPDF or a page renderer (C-014).
+    Pdf(Entity<PdfView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -143,6 +152,8 @@ pub struct FilePanel {
     hex: Option<Entity<HexView>>,
     hex_shown: bool,
     hex_error: Option<String>,
+    /// Whether the dock shows this tab (its hosted window follows, C-014).
+    active: bool,
     /// Keeps the tab in step with the text view's modified state (C-008).
     _observe_text: Option<Subscription>,
 }
@@ -151,6 +162,7 @@ impl FilePanel {
     pub fn new(
         info: FileInfo,
         rules: &Entity<RulesStore>,
+        tools: &Arc<ToolSet>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -176,6 +188,8 @@ impl FilePanel {
                 Ok(bytes) => PanelView::Sheet(cx.new(|cx| SheetView::new(&info.path, &bytes, rules, window, cx))),
                 Err(_) => PanelView::Info,
             }
+        } else if info.error.is_none() && info.route() == Route::Family(Family::PdfXps) {
+            PanelView::Pdf(cx.new(|cx| PdfView::new(&info.path, tools.clone(), window, cx)))
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -204,7 +218,7 @@ impl FilePanel {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
-            PanelView::Image(_) | PanelView::Info => None,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => None,
         };
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
@@ -213,6 +227,7 @@ impl FilePanel {
             hex: None,
             hex_shown: false,
             hex_error: None,
+            active: true,
             _observe_text: observe_text,
         };
         // A binary nobody claims opens as hex straight away.
@@ -235,6 +250,10 @@ impl FilePanel {
                 window.focus(&focus, cx);
             }
             PanelView::Sheet(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Pdf(view) => {
                 let focus = view.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
@@ -295,6 +314,23 @@ impl FilePanel {
         }
     }
 
+    /// The PDF viewer, while it shows (C-014).
+    pub fn pdf_view(&self) -> Option<&Entity<PdfView>> {
+        match &self.view {
+            PanelView::Pdf(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
+    /// What a tab hosts outside GPUI (the SumatraPDF frame, C-014) shows only while the tab is active and
+    /// the hex view is off.
+    fn sync_hosted(&self, cx: &mut App) {
+        if let PanelView::Pdf(view) = &self.view {
+            let shown = self.active && !self.hex_shown;
+            view.update(cx, |view, cx| view.set_shown(shown, cx));
+        }
+    }
+
     /// The text that Ctrl+S saves: the text viewer, or the data viewer's raw text once it exists.
     pub fn editable_text(&self, cx: &App) -> Option<Entity<TextView>> {
         match &self.view {
@@ -302,7 +338,7 @@ impl FilePanel {
             PanelView::Data(view) => view.read(cx).text_view().cloned(),
             PanelView::Markdown(view) => Some(view.read(cx).text_view().clone()),
             PanelView::Sheet(view) => view.read(cx).text_view().cloned(),
-            PanelView::Image(_) | PanelView::Info => None,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => None,
         }
     }
 
@@ -329,6 +365,7 @@ impl FilePanel {
             }
         }
         self.hex_shown = true;
+        self.sync_hosted(cx);
         if let Some(hex) = &self.hex {
             let focus = hex.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -340,6 +377,7 @@ impl FilePanel {
     pub fn toggle_hex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hex_shown {
             self.hex_shown = false;
+            self.sync_hosted(cx);
             let focus = self.focus_handle(cx);
             window.focus(&focus, cx);
             cx.notify();
@@ -357,7 +395,7 @@ impl FilePanel {
             PanelView::Data(data) => data.read(cx).is_dirty(cx),
             PanelView::Markdown(view) => view.read(cx).is_dirty(cx),
             PanelView::Sheet(view) => view.read(cx).is_dirty(cx),
-            PanelView::Image(_) | PanelView::Info => false,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => false,
         }
     }
 
@@ -374,6 +412,12 @@ impl FilePanel {
 impl BasePanel for FilePanel {
     fn panel_name(&self) -> &'static str {
         "sfoglia-file"
+    }
+
+    /// The dock says when the tab shows; a hosted window follows.
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.active = active;
+        self.sync_hosted(cx);
     }
 
     /// A modified tab stays open until it is saved or reverted.
@@ -412,6 +456,7 @@ impl Focusable for FilePanel {
             PanelView::Data(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Markdown(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Sheet(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            PanelView::Pdf(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -483,6 +528,14 @@ impl Render for FilePanel {
                 .child(view.clone())
                 .into_any_element();
         }
+        if let PanelView::Pdf(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
         let info = &self.info;
         let route = info.route();
         let family = info
@@ -533,6 +586,8 @@ pub struct Workspace {
     open: Vec<OpenFile>,
     rules: Entity<RulesStore>,
     rules_panel: Entity<RulesPanel>,
+    /// The tools outside Sfoglia, as found on this machine or pinned by a test (C-014).
+    tools: Arc<ToolSet>,
     /// The close request being answered (C-012), while the dialog shows.
     closing: Option<Closing>,
 }
@@ -551,6 +606,16 @@ impl Workspace {
     /// The workspace with the rule file at `rules_path` (`None`: rules are not saved).
     pub fn with_rules_path(
         rules_path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_tools(rules_path, Arc::new(ToolSet::from_env()), window, cx)
+    }
+
+    /// The workspace with the rule file at `rules_path` and the tools outside Sfoglia as `tools` finds them.
+    pub fn with_tools(
+        rules_path: Option<PathBuf>,
+        tools: Arc<ToolSet>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -585,6 +650,7 @@ impl Workspace {
             open: Vec::new(),
             rules,
             rules_panel,
+            tools,
             closing: None,
         }
     }
@@ -595,6 +661,10 @@ impl Workspace {
 
     pub fn rules_panel(&self) -> &Entity<RulesPanel> {
         &self.rules_panel
+    }
+
+    pub fn tools(&self) -> &Arc<ToolSet> {
+        &self.tools
     }
 
     /// The dock the tabs live in (tests move tabs through it).
@@ -670,7 +740,8 @@ impl Workspace {
             }
             let info = FileInfo::probe(path);
             let rules = self.rules.clone();
-            let panel = cx.new(|cx| FilePanel::new(info, &rules, window, cx));
+            let tools = self.tools.clone();
+            let panel = cx.new(|cx| FilePanel::new(info, &rules, &tools, window, cx));
             // The kit's handle carries the panel's title; a bare entity would show its panel_name.
             let handle = panel_handle(panel.clone());
             self.dock_area.update(cx, |dock, cx| {
@@ -766,6 +837,10 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A tab the dock closed is forgotten here too, so its panel and what it hosts (a SumatraPDF process,
+        // a folder of drawings, C-014) go with it rather than at the next open.
+        let dock = self.dock_area.clone();
+        self.open.retain(|f| dock.read(cx).panel(PanelId::from(f.panel.entity_id())).is_some());
         let nothing_open = self.open.is_empty();
         div()
             .id("workspace")

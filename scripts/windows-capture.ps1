@@ -23,6 +23,8 @@ using System.Runtime.InteropServices;
 public class SfogliaCapture {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string title);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
@@ -47,11 +49,36 @@ $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 $hdc = $graphics.GetHdc()
 $ok = [SfogliaCapture]::PrintWindow($hwnd, $hdc, 2)
 $graphics.ReleaseHdc($hdc)
+# A window another process hosts inside ours (SumatraPDF's frame, C-014) is not part of the GPUI surface
+# PrintWindow renders: each such child is printed on its own and composed at its place.
+$hosted = 0
+$child = [SfogliaCapture]::FindWindowExW($hwnd, [IntPtr]::Zero, 'SUMATRA_PDF_FRAME', [NullString]::Value)
+while ($child -ne [IntPtr]::Zero) {
+    if ([SfogliaCapture]::IsWindowVisible($child)) {
+        $crect = New-Object SfogliaCapture+RECT
+        [SfogliaCapture]::GetWindowRect($child, [ref] $crect) | Out-Null
+        $cw = $crect.Right - $crect.Left
+        $ch = $crect.Bottom - $crect.Top
+        if ($cw -gt 0 -and $ch -gt 0) {
+            $cbitmap = New-Object System.Drawing.Bitmap $cw, $ch
+            $cgraphics = [System.Drawing.Graphics]::FromImage($cbitmap)
+            $chdc = $cgraphics.GetHdc()
+            # WM_PRINT (flag 0): the DWM path (flag 2) gives a blank surface for a child another process owns.
+            [SfogliaCapture]::PrintWindow($child, $chdc, 0) | Out-Null
+            $cgraphics.ReleaseHdc($chdc)
+            $cgraphics.Dispose()
+            $graphics.DrawImage($cbitmap, $crect.Left - $rect.Left, $crect.Top - $rect.Top)
+            $cbitmap.Dispose()
+            $hosted++
+        }
+    }
+    $child = [SfogliaCapture]::FindWindowExW($hwnd, $child, 'SUMATRA_PDF_FRAME', [NullString]::Value)
+}
 $graphics.Dispose()
-$full = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Out))
+$full = if ([System.IO.Path]::IsPathRooted($Out)) { $Out } else { [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Out)) }
 $bitmap.Save($full, [System.Drawing.Imaging.ImageFormat]::Png)
 $centre = $bitmap.GetPixel([int]($width / 2), [int]($height / 2))
 $bitmap.Dispose()
-Write-Output ("pid={0} title='{1}' hwnd={2} size={3}x{4} printed={5} centre=#{6:X2}{7:X2}{8:X2} png={9}" -f `
-    $process.Id, $process.MainWindowTitle, $hwnd, $width, $height, $ok, $centre.R, $centre.G, $centre.B, $full)
+Write-Output ("pid={0} title='{1}' hwnd={2} size={3}x{4} printed={5} hosted={10} centre=#{6:X2}{7:X2}{8:X2} png={9}" -f `
+    $process.Id, $process.MainWindowTitle, $hwnd, $width, $height, $ok, $centre.R, $centre.G, $centre.B, $full, $hosted)
 if ($started -and -not $Keep) { Stop-Process -Id $process.Id -Force }

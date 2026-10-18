@@ -56,6 +56,18 @@ A Markdown file opens rendered: headings, emphasis, lists (ordered, unordered an
 
 A csv or tsv opens as a grid: the delimiter is detected from the first lines (a `.tsv` is tabs), quoted fields keep their commas, line breaks and doubled quotes, and the first record names the columns until the `Header` item in the status row turns it into a row; a csv or tsv past 64 MB opens as text. A click on the arrow in a column header sorts the rows by that column (descending first, then ascending, then the file's order; numbers by value before text, text regardless of case, empty cells last), Ctrl+Shift+F focuses the search field and Enter finds the next cell containing the text, and a click selects a cell whose text the edit field above the grid holds (a line break shown as ⏎): Enter writes it back into its own record, and Ctrl+S saves the file as usual. Ctrl+Shift+D switches to the raw text and back. An Excel file (xls, xlsx, xlsm and the templates) opens read-only on its first sheet with a bar to switch sheets, numbers, dates, booleans and errors as Excel shows them, a formula as its cached value and merged cells shown once.
 
+## PDF and XPS
+
+A PDF, XPS or OXPS opens through a tool outside Sfoglia. On Windows that is SumatraPDF when it is installed: it runs
+inside the tab with its own toolbar (page, find, zoom, rotation, view modes), one SumatraPDF per tab, gone when the tab
+closes. Otherwise, and on Linux, an installed `mutool` (package mupdf-tools) or `pdftoppm` with `pdfinfo` (package
+poppler-utils) draws the pages into a scrollable column: fitted to the width, `+` and `-` zoom by a quarter, `0` fits
+again; the status row names the tool and its version, the page count, the page at the top and the zoom. With none of
+them installed the status row says what to install, with a `Look again` button for afterwards, and the bytes show
+meanwhile. Every tool is looked for the same way: an environment variable `SFOGLIA_SUMATRAPDF`, `SFOGLIA_MUTOOL`,
+`SFOGLIA_PDFTOPPM` or `SFOGLIA_PDFINFO` set to a path wins (a path to nothing switches the tool off), then the handler
+registered for the file class and the usual install folders, then the search path.
+
 ## Hex view
 
 A binary file that no family claims opens as rows of 16 bytes: the offset, the bytes in two groups of eight, and the printable ASCII, like `00000010  48 65 6c 6c 6f 2c 20 77  6f 72 6c 64 0a 00 ff 7f  |Hello, world....|`. Any other open file switches to its bytes and back with Ctrl+Shift+B. The file is memory-mapped, so a multi-gigabyte file opens at once and only the rows on screen are laid out. Ctrl+Shift+G goes to an offset (decimal, or `0x` and hex); Ctrl+Shift+F finds text, or bytes as hex pairs when Ctrl+M has switched the mode, and Enter steps to the next hit. The hit is marked in both columns and the status row names its offset.

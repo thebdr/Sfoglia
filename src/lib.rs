@@ -10,10 +10,14 @@ pub mod hex;
 pub mod images;
 pub mod markdown;
 pub mod net;
+#[cfg(windows)]
+pub mod pdf_host;
+pub mod pdf_pages;
 pub mod rules;
 pub mod sheet;
 pub mod shell;
 pub mod text;
+pub mod tools;
 pub mod viewers;
 pub mod workspace;
 

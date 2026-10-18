@@ -185,9 +185,10 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         // The tab is named after the file, not after the panel kind. The kit draws the
         // tab bar from these names; the drawn tab bar itself is checked in the captures.
         let rules = workspace.read(cx).rules().clone();
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), &rules, window, cx));
+        let tools = workspace.read(cx).tools().clone();
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&hello), &rules, &tools, window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("hello.txt"));
-        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), &rules, window, cx));
+        let panel = cx.new(|cx| FilePanel::new(FileInfo::probe(&missing), &rules, &tools, window, cx));
         assert_eq!(panel.read(cx).tab_name(cx).as_deref(), Some("does-not-exist.txt"));
     })
     .unwrap();
