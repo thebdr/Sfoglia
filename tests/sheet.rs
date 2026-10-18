@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gpui_kit::component::table::ColumnSort;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px};
 use sfoglia::generated::families::Family;
 use sfoglia::sheet::{self, CellKind, Merge};
 use sfoglia::text::Encoding;
@@ -171,7 +171,9 @@ fn the_workbook_fixtures_read_their_typed_cells() {
 
 #[gpui_kit::test]
 fn a_csv_opens_as_a_grid_with_its_summary_and_header_toggle(cx: &mut TestAppContext) {
-    let (handle, _panel, view) = open_sheet(cx, fixture("table.csv"));
+    let dir = scratch_dir("sheet-open");
+    let path = copy_fixture("table.csv", &dir);
+    let (handle, _panel, view) = open_sheet(cx, path);
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-8");
@@ -202,13 +204,38 @@ fn a_csv_opens_as_a_grid_with_its_summary_and_header_toggle(cx: &mut TestAppCont
         assert_eq!(names, rows(&["A", "B", "C", "D", "E"]));
         assert_eq!(cells[0], rows(&["id", "name", "note", "amount", "when"]));
         assert_eq!(cells.len(), 4);
-        // With the header off, the first record is row 1.
+        // With the header off, the first record is row 1, and an edit there writes into record 1.
         let table = view.read(cx).table().clone();
         table.update(cx, |table, cx| table.set_selected_cell(0, 0, cx));
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-cell"), "A1");
     })
     .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "id");
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("key", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "A1 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert!(text.starts_with("key,name,note,amount,when\n1,\"Rossi, Mario\""), "{text}");
+        let (names, cells) = dump(&view, cx);
+        assert_eq!(names, rows(&["A", "B", "C", "D", "E"]), "still lettered");
+        assert_eq!(cells.len(), 4);
+        assert_eq!(cells[0][0], "key");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A `.csv` that holds tabs is read by tabs and labelled by its delimiter (C-013).
@@ -364,8 +391,30 @@ fn an_edit_in_the_grid_rewrites_its_record_alone_and_saves(cx: &mut TestAppConte
     let (handle, panel, view) = open_sheet(cx, path.clone());
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
+        // A real click selects a cell: B3 named, its text in the field; a second click keeps the cell (no
+        // escalation to the row, the row-number column being there).
+        window.click(("cell", 1usize * 4096 + 1), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3", "a click selects the cell");
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "Élodie");
+        window.click(("cell", 1usize * 4096 + 1), cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3", "a second click keeps the cell");
+        // A column is resizable: a drag on the boundary at the right of the `name` header widens it.
+        let before = window.find(("col-header", 1usize)).bounds();
+        let from = point(before.right() - px(2.), before.center().y);
+        let to = point(before.right() + px(40.), before.center().y);
+        window.drag(from, to, cx);
+        window.render_frame(cx);
+        let after = window.find(("col-header", 1usize)).bounds();
+        assert!(after.size.width > before.size.width + px(30.), "resized from {:?} to {:?}", before.size.width, after.size.width);
         let table = view.read(cx).table().clone();
-        // C2 first: a two-line note shows its break as ⏎ in the one-line field, and Enter with nothing
+        // C2 next: a two-line note shows its break as ⏎ in the one-line field, and Enter with nothing
         // changed writes nothing.
         table.update(cx, |table, cx| table.set_selected_cell(0, 2, cx));
     })
@@ -1007,16 +1056,41 @@ fn a_mixed_column_sorts_numbers_before_text_case_insensitively(cx: &mut TestAppC
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A `.tsv` is read by tabs and says so (C-013).
+/// A `.tsv` is read by tabs and says so, and an edit is written back by tabs (C-013).
 #[gpui_kit::test]
 fn a_tsv_opens_by_tabs_and_says_so(cx: &mut TestAppContext) {
-    let (handle, _panel, view) = open_sheet(cx, fixture("table.tsv"));
+    let dir = scratch_dir("sheet-tsv");
+    let path = copy_fixture("table.tsv", &dir);
+    let (handle, _panel, view) = open_sheet(cx, path.clone());
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "TSV, 3 rows, 5 columns, tab, UTF-8");
         assert_eq!(dump(&view, cx).1[0][1], "Rossi, Mario", "a comma inside a field is no delimiter here");
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(1, 1, cx));
     })
     .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("Élodie Durand", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        let expected = String::from_utf8(fixture_bytes("table.tsv")).unwrap().replace("2\tÉlodie\tplain", "2\tÉlodie Durand\tplain");
+        assert_eq!(text, expected, "that record alone, by tabs");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A UTF-16 file names its encoding before and after an edit saved back with its mark, that record alone
@@ -1111,6 +1185,28 @@ fn a_semicolon_and_a_pipe_file_name_their_delimiter(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, semicolon, UTF-8");
         assert_eq!(dump(&view, cx).1[0], rows(&["1", "2"]));
+        // An edit is written in the file's own dialect.
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("9", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B2 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert_eq!(text, "a;b\n1;9\n", "semicolons kept");
     })
     .unwrap();
     let pipe = dir.join("pipe.csv");

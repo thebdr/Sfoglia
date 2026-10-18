@@ -7,7 +7,7 @@ data trees, Markdown, closing with modified tabs).
 ## In flight
 
 - **C-013 Spreadsheets and delimited tables** (branch `c-013-spreadsheets`): implemented and tested (15 tests,
-  Windows and Linux captures). Three refuter passes found and fixed real bugs; passes four to seven found no code defect, only promises without a test, all pinned since (24 tests); passes eight and nine mutated the code and pinned what survived (29 tests); the tenth pass pinned four more; the eleventh is running (29 tests). Left: the holds verdict, `zen verify`, a last Linux run, the merge to main, CI.
+  Windows and Linux captures). Three refuter passes found and fixed real bugs; passes four to seven found no code defect, only promises without a test, all pinned since (24 tests); passes eight and nine mutated the code and pinned what survived (29 tests); passes ten and eleven pinned eight more; the twelfth is running (29 tests). Left: the holds verdict, `zen verify`, a last Linux run, the merge to main, CI.
 - Run evidence of C-002, C-004 and C-008 refreshed on 2026-10-18; `zen status` reports no drift.
 
 ## Pending clauses, in the order I plan to take them
