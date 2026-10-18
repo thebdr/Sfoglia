@@ -13,7 +13,7 @@ Legend: **done** = proven by a verified clause. **in progress** = clause exists,
 | Structured data trees | C-010 | done | done | user request 2026-10-13 | json, jsonl, xml, yaml, yml, toml, ini |
 | Markdown rendering | C-011 | done | done | user request 2026-10-13 | md, markdown |
 | Spreadsheets and delimited tables | C-013 | done | no | user request 2026-10-13 | csv, tsv, xls, xlt, xlsm, xlsx, xltx, xltm |
-| PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia | C-014 | in progress | no | ingest (user request #pdf xps); stack decided by the user on 2026 10 18: "integrate sumatraPDF" 2026-10-13 | pdf, oxps, xps |
+| PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia | C-014 | done | no | ingest (user request #pdf xps); stack decided by the user on 2026 10 18: "integrate sumatraPDF" 2026-10-13 | pdf, oxps, xps |
 | Word-processing documents | P-007 | planned | later | user request 2026-10-13 | doc, docm, docx, dot, dotm, dotx, epub, odt, ott, rtf, wps |
 | Presentations | P-011 | planned | no | user request 2026-10-13 | odp, pot, potm, potx, pps, ppsx, ppt, pptm, pptx |
 | Visio diagrams | P-012 | planned | no | user request 2026-10-13 | vdw, vdx, vsd, vsdm, vsdx, vss, vssx, vst, vstm, vstx, vsx, vtx |
