@@ -1,53 +1,53 @@
 {
   "clause": "C-004",
   "verdict": "holds",
-  "ranAt": "2026-10-15T09:13:22.143Z",
-  "headCommit": "46388a049da8cda041e49bae25abce2c411be557",
+  "ranAt": "2026-10-18T01:14:00.410Z",
+  "headCommit": "3035ce0bc845478674ce2bc1e15cd5da1549e8ff",
   "tests": [
     {
       "name": "every_family_extension_routes_to_its_family",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "a_definitive_signature_overrides_a_misleading_extension",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "container_signatures_never_override_a_known_extension",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "every_signature_is_recognised_with_its_real_header",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "unknown_extension_is_settled_by_content",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "shared_extensions_are_settled_by_content_then_contract_order",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "empty_and_text_files_go_to_text_and_unknown_binary_to_hex",
       "file": "src/detect.rs",
-      "symbolSha": "9e12f8bf1312bcb49d6034f86e2c8cfd114b1fa4a214ecaf08ecabf585c34621"
+      "symbolSha": "80558f8a6a2290c28384944277afb18f1063210af6afd2d70f0969920f524ff9"
     },
     {
       "name": "generated_family_table_matches_the_committed_contract",
       "file": "xtask/src/main.rs",
-      "symbolSha": "0cb020fb94e0dab5bc26442b7036b372fece39c48a52ab3946849e6f0e999ce3"
+      "symbolSha": "7d8ac97369ddf6b5865a31543443a73528b05fc6c159fb0e5cca8de8bc0d86dc"
     },
     {
       "name": "opening_files_adds_tabs_and_reopening_activates_the_existing_tab",
       "file": "tests/ui.rs",
-      "symbolSha": "a9f9e57563f477b0372826117ca26285c204a1c5bf8675f75fc7c991e97d7807"
+      "symbolSha": "1c1adab1434a594ef0af2bc684e47de63476c3aa12b87fa9849cd3a6cffb17d7"
     }
   ]
 }

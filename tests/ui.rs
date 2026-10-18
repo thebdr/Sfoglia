@@ -209,6 +209,32 @@ fn opening_files_adds_tabs_and_reopening_activates_the_existing_tab(cx: &mut Tes
         assert_eq!(workspace.read(cx).panels(cx).len(), 4);
     })
     .unwrap();
+
+    // A family whose viewer is still pending shows the info rows: the name, the path, the size,
+    // the family with its slug, the viewer's id and the clause that brings it (a `.docx` keeps its
+    // word-processing family through the ZIP container signature). The file is written here,
+    // under one fixed name, and removed at the end.
+    let placeholder = std::env::temp_dir().join("sfoglia-ui-placeholder.docx");
+    std::fs::write(&placeholder, b"PK\x03\x04\x14\x00\x00\x00\x08\x00word/document.xml not really").unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[placeholder.clone()], window, cx));
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 5);
+        assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("sfoglia-ui-placeholder.docx".into()));
+        assert_eq!(window.find("file-name").label().as_deref(), Some("sfoglia-ui-placeholder.docx"));
+        assert_eq!(window.find("file-path").label().as_deref(), Some(placeholder.display().to_string().as_str()));
+        assert_eq!(window.find("file-size").label().as_deref(), Some("38 bytes"));
+        assert_eq!(window.find("file-family").label().as_deref(), Some("Word-processing documents (word-processing)"));
+        assert_eq!(window.find("file-viewer").label().as_deref(), Some("word-processing"));
+        assert_eq!(window.find("file-content").label().as_deref(), Some("Signature { family: Archives, label: \"ZIP container\", definitive: false }"));
+        let status = window.find("file-status").label().unwrap_or_default().to_string();
+        assert!(
+            status.starts_with("The word-processing viewer arrives with clause P-007."),
+            "{status}"
+        );
+    })
+    .unwrap();
+    std::fs::remove_file(&placeholder).unwrap();
 }
 
 #[gpui_kit::test]
