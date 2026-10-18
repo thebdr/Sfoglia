@@ -684,6 +684,12 @@ impl Workspace {
     }
 
     /// The dock the tabs live in (tests move tabs through it).
+    /// The workspace's own focus handle, the window's root focus (tests put the focus there to stand for
+    /// "somewhere outside a view").
+    pub fn own_focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
     pub fn dock_area(&self) -> &Entity<DockArea> {
         &self.dock_area
     }

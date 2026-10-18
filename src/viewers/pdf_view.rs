@@ -253,12 +253,16 @@ impl PdfView {
     pub fn host_failed(&mut self, reason: String, window: &mut Window, cx: &mut Context<Self>) {
         self.host_state = HostState::Failed;
         self.message = reason;
-        match self.tools.first_found(&[Tool::MuTool, Tool::PdfToPpm]) {
+        let renderers: Vec<Tool> = candidates().iter().copied().filter(|tool| *tool != Tool::SumatraPdf).collect();
+        match self.tools.first_found(&renderers) {
             Some((tool, found)) => {
                 self.tool = Some((tool, found.clone()));
                 self.start_pages(tool, found, cx);
             }
-            None => self.go_missing(window, cx),
+            None => {
+                self.tool = None;
+                self.go_missing(window, cx);
+            }
         }
         cx.notify();
     }
@@ -551,9 +555,12 @@ impl PdfView {
     }
 
     fn message_text(&self) -> String {
-        if !self.message.is_empty() {
-            return self.message.clone();
-        }
+        let own = self.mode_text();
+        if self.message.is_empty() { own } else { format!("{} {own}", self.message) }
+    }
+
+    /// The mode's own text: the host's controls, the page column's keys, or the hint.
+    fn mode_text(&self) -> String {
         match &self.mode {
             #[cfg(windows)]
             Mode::Host(_) => "the page, find, zoom, rotation and view controls are SumatraPDF's own".to_string(),

@@ -564,7 +564,7 @@ fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut T
         (Tool::PdfToPpm, Some(stub("pdftoppm"))),
         (Tool::PdfInfo, Some(later.clone())),
     ]);
-    let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    let (handle, workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
     let hint = format!("pdftoppm needs pdfinfo from the same package to list the pages: {}", Tool::PdfInfo.install_hint());
     let drawings = cx
         .update_window(handle, |_, window, cx| {
@@ -582,17 +582,26 @@ fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut T
             drawings
         })
         .unwrap();
-    // pdfinfo arrives at its pinned path: Look again lists the pages, pdftoppm draws them.
+    // pdfinfo arrives at its pinned path: Look again lists the pages, pdftoppm draws them. The focus sits on
+    // the workspace itself meanwhile, and stays there: Look again moves no focus from outside the view.
     install_wrapper(&later, &stub("pdfinfo"));
-    cx.update_window(handle, |_, window, cx| {
+    let elsewhere = cx.update_window(handle, |_, window, cx| {
+        let elsewhere = workspace.read(cx).own_focus_handle();
+        window.focus(&elsewhere, cx);
+        window.render_frame(cx);
+        assert!(elsewhere.is_focused(window));
         window.click("pdf-look-again-button", cx);
         window.render_frame(cx);
         assert!(view.read(cx).is_listing());
+        assert!(elsewhere.is_focused(window), "a focus outside the view is left alone");
+        assert!(!view.read(cx).focus_handle(cx).is_focused(window));
+        elsewhere
     })
     .unwrap();
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
+        assert!(elsewhere.is_focused(window), "still there once the pages are listed");
         let v = view.read(cx);
         assert_eq!(v.page_sizes(), pages(&[(612.0, 792.0), (792.0, 612.0)]), "the second page's quarter turn swaps its sides");
         assert_eq!(v.failure(), None);
@@ -877,7 +886,7 @@ fn the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window(cx: &mut T
         (Tool::MuTool, Some(stub("mutool"))),
         (Tool::PdfToPpm, None),
     ]);
-    let (handle, _workspace, panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    let (handle, workspace, panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         let v = view.read(cx);
@@ -918,7 +927,7 @@ fn the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window(cx: &mut T
         assert_eq!(v.mode_name(), "pages");
         assert_eq!(v.tool().map(|(t, f)| (t, f.path.clone())), Some((Tool::MuTool, stub("mutool"))));
         assert_eq!(label(window, "pdf-tool"), "mutool 9.9");
-        assert_eq!(label(window, "pdf-message"), reason);
+        assert_eq!(label(window, "pdf-message"), format!("{reason} + and - zoom, 0 fits the width"), "the reason joins the column's own text");
         assert_eq!(label(window, "pdf-summary"), "PDF, listing the pages");
     })
     .unwrap();
@@ -927,6 +936,36 @@ fn the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window(cx: &mut T
         window.render_frame(cx);
         assert_eq!(view.read(cx).page_sizes().len(), 2, "the pages listed through mutool");
         assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "));
+        let reason = "SumatraPDF ended before it showed a window (exit code: 1).";
+        assert_eq!(label(window, "pdf-message"), format!("{reason} + and - zoom, 0 fits the width"), "the reason joins the column's own text");
+    })
+    .unwrap();
+    // With both renderers there, mutool serves first; with none, the hint joins the reason, no tool is named,
+    // the bytes show and Look again is offered.
+    let both = Arc::new(ToolSet::stubbed([
+        (Tool::SumatraPdf, Some(stub("sumatra"))),
+        (Tool::MuTool, Some(stub("mutool"))),
+        (Tool::PdfToPpm, Some(stub("pdftoppm"))),
+        (Tool::PdfInfo, Some(stub("pdfinfo"))),
+    ]));
+    let none = Arc::new(ToolSet::stubbed([(Tool::SumatraPdf, Some(stub("sumatra"))), (Tool::MuTool, None), (Tool::PdfToPpm, None)]));
+    cx.update_window(handle, |_, window, cx| {
+        let rules = workspace.read(cx).rules().clone();
+        let reason = "SumatraPDF could not start: a made-up reason.".to_string();
+        let with_both = cx.new(|cx| FilePanel::new(FileInfo::probe(&fixture("three.pdf")), &rules, &both, window, cx));
+        let view = with_both.read(cx).pdf_view().unwrap().clone();
+        view.update(cx, |v, cx| v.host_failed(reason.clone(), window, cx));
+        assert_eq!(view.read(cx).tool().map(|(t, _)| t), Some(Tool::MuTool), "mutool before pdftoppm, as among the candidates");
+        let with_none = cx.new(|cx| FilePanel::new(FileInfo::probe(&fixture("three.pdf")), &rules, &none, window, cx));
+        let view = with_none.read(cx).pdf_view().unwrap().clone();
+        view.update(cx, |v, cx| v.host_failed(reason.clone(), window, cx));
+        let v = view.read(cx);
+        assert_eq!(v.mode_name(), "missing");
+        assert_eq!(v.tool().map(|(t, _)| t), None, "a SumatraPDF that counts as absent is not named as the tool");
+        assert_eq!(v.tool_label(), "no tool");
+        assert_eq!(v.message(), format!("{reason} {} The bytes show meanwhile.", tools::missing_message("A PDF", candidates())));
+        assert!(v.hex_view().is_some());
+        assert!(v.wants_look_again());
     })
     .unwrap();
 }
