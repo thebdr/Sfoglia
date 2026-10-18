@@ -10,13 +10,15 @@ data trees, Markdown, closing with modified tabs, spreadsheets and delimited tab
   `c-014-pdf`): P-008 promoted with P-025 folded in. SumatraPDF 3.6 embeds in the tab through its plugin mode
   (experiments logged in `.zen/evidence/C-014.md`), its frame placed on every paint, hidden with the tab,
   driven by `WM_COPYDATA`; mutool or pdftoppm draw a page column elsewhere; the hint and the bytes without a
-  tool. Implemented with 25 tests (9 unit, 16 headless); seven refuter passes found some twenty unpinned promises and
-  nine defects (a failed drawing retried on every paint, a tab behind another keeping its frame visible, a PDF
+  tool. Implemented with 29 tests (10 unit, 19 headless); ten refuter passes found some thirty unpinned promises and
+  thirteen defects (a failed drawing retried on every paint, a tab behind another keeping its frame visible, a PDF
   called by its name, a closed tab leaving its drawings, zoom keys eating the hex fields' digits, a complaint
   cleared by another page, zero pages passing as a listing, a dead SumatraPDF never counted absent and its
-  reason hiding the hint, Look again losing the focus), all fixed and pinned; the Windows captures (two tabs,
+  reason hiding the hint, Look again losing the focus, the
+  keyboard stuck in a hidden frame, Sfoglia's overlays covered by the frame, chords dead on a stale focus), all
+  fixed and pinned; the Windows captures (two tabs,
   the hex toggle, a resize, a page jump, a dead stand-in) and the Linux pass (the real pdftoppm in the VM) are
-  in the evidence; the eighth pass, the run records and the merge remain.
+  in the evidence; the eleventh pass, the run records and the merge remain.
 - Run evidence of C-002, C-004 and C-008 refreshed on 2026-10-18; `zen status` reports no drift.
 
 ## Pending clauses, in the order I plan to take them

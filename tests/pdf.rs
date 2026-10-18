@@ -1045,6 +1045,20 @@ fn each_tab_group_shows_its_own_active_tab(cx: &mut TestAppContext) {
         assert!(visible.contains(&PanelId::from(panels[1].entity_id())));
         assert!(first.read(cx).shown(), "the first tab is its group's only tab again");
         assert!(second_view.read(cx).shown());
+        // Ctrl+W closes the tab the keyboard is in, not the first group's: the focus in the right-hand group.
+        let focus = second_view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["three.pdf"], "the right-hand group's tab closed, the first group's stays");
+        assert!(first.read(cx).shown());
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

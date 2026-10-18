@@ -253,10 +253,12 @@ fn focus_window() -> HWND {
 /// Bring the keyboard back to Sfoglia's window when a window hosted under it holds the focus (SumatraPDF
 /// takes it as it starts and keeps it after a click in the document): Sfoglia's chords work again.
 pub fn reclaim_focus(parent: HWND) {
-    // Only while Sfoglia's window is the one in front: the keyboard is never taken from another application.
+    // Only while Sfoglia's window is the one in front (SumatraPDF makes its own frame, a child of ours, the
+    // foreground window as it starts: that counts): the keyboard is never taken from another application.
     // SAFETY: window handles only passed back to the system; SetFocus targets this process's own window.
     unsafe {
-        if GetForegroundWindow() != parent {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() || GetAncestor(foreground, GA_ROOT) != parent {
             return;
         }
         let focus = focus_window();
