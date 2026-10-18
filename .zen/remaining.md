@@ -1,25 +1,15 @@
-# What is still missing (snapshot of 2026-10-18, 04:30)
+# What is still missing (snapshot of 2026-10-18, evening)
 
 The contract (`.zen/contract.md`) is the source of truth; this is a dated reading of it for the user. Verified
-and on main: C-001 to C-013 (shell, checklist, CI, open and route, text, rules, hex, edit and save, images,
-data trees, Markdown, closing with modified tabs, spreadsheets and delimited tables).
+and on main: C-001 to C-014 (shell, checklist, CI, open and route, text, rules, hex, edit and save, images,
+data trees, Markdown, closing with modified tabs, spreadsheets and delimited tables, PDF and XPS through
+SumatraPDF or a page renderer with the tools outside Sfoglia).
 
 ## In flight
 
-- **C-014 PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia** (branch
-  `c-014-pdf`): P-008 promoted with P-025 folded in. SumatraPDF 3.6 embeds in the tab through its plugin mode
-  (experiments logged in `.zen/evidence/C-014.md`), its frame placed on every paint, hidden with the tab,
-  driven by `WM_COPYDATA`; mutool or pdftoppm draw a page column elsewhere; the hint and the bytes without a
-  tool. Implemented with 29 tests (10 unit, 19 headless); twelve refuter passes (the twelfth holds) found some forty
-  unpinned promises and fourteen defects (a failed drawing retried on every paint, a tab behind another keeping its frame visible, a PDF
-  called by its name, a closed tab leaving its drawings, zoom keys eating the hex fields' digits, a complaint
-  cleared by another page, zero pages passing as a listing, a dead SumatraPDF never counted absent and its
-  reason hiding the hint, Look again losing the focus, the
-  keyboard stuck in a hidden frame, Sfoglia's overlays covered by the frame, chords dead on a stale focus), all
-  fixed and pinned; the Windows captures (two tabs,
-  the hex toggle, a resize, a page jump, a dead stand-in) and the Linux pass (the real pdftoppm in the VM) are
-  in the evidence; the run records are being refreshed; the zen verification and the merge to main come next.
-- Run evidence of C-002, C-004 and C-008 refreshed on 2026-10-18; `zen status` reports no drift.
+- Nothing: C-014 merged to main (b7fa3ac) after twelve refuter passes (fourteen defects found and fixed on the
+  way, some forty promises pinned, 29 tests), Windows captures and the Linux pass with the real pdftoppm in the
+  VM. Next in line: P-021 (archives, read side) as C-015.
 
 ## Pending clauses, in the order I plan to take them
 
