@@ -179,6 +179,10 @@ fn a_csv_opens_as_a_grid_with_its_summary_and_header_toggle(cx: &mut TestAppCont
         assert_eq!(label(window, "sheet-summary"), "CSV, 3 rows, 5 columns, comma, UTF-8");
         assert_eq!(label(window, "sheet-message"), "the arrow in a header sorts, Ctrl+Shift+F finds a cell, Ctrl+Shift+D shows the text");
         assert_eq!(label(window, "sheet-header"), "Header: on");
+        // Columns sized to their content: `id` (one digit) is narrower than `note` (`second line`).
+        let id_width = window.find(("col-header", 0usize)).bounds().size.width;
+        let note_width = window.find(("col-header", 2usize)).bounds().size.width;
+        assert!(id_width < note_width, "id {id_width:?} against note {note_width:?}");
         let (names, cells) = dump(&view, cx);
         assert_eq!(names, rows(&["id", "name", "note", "amount", "when"]));
         assert_eq!(
@@ -531,6 +535,10 @@ fn a_workbook_opens_on_its_sheets_with_merges_and_dates(cx: &mut TestAppContext)
         assert!(panel.read(cx).editable_text(cx).is_none(), "nor a text to save");
         let (names, cells) = dump(&view, cx);
         assert_eq!(names, rows(&["A", "B", "C", "D", "E", "F"]));
+        // Columns sized to their content: A holds `merged across three`, E holds `FALSE` at most.
+        let a_width = window.find(("col-header", 0usize)).bounds().size.width;
+        let e_width = window.find(("col-header", 4usize)).bounds().size.width;
+        assert!(a_width > e_width, "A {a_width:?} against E {e_width:?}");
         assert_eq!(cells[1], rows(&["1", "Rossi, Mario", "12.5", "2026-01-05", "TRUE", "first line\nsecond line"]));
         assert_eq!(cells[2], rows(&["2", "Élodie", "7", "2026-02-28 14:30:00", "FALSE", ""]));
         assert_eq!(cells[4][2], "16.25", "the formula's cached value");
