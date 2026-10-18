@@ -332,6 +332,13 @@ fn without_a_tool_the_hint_names_each_tool_and_the_bytes_show_until_look_again(c
         window.render_frame(cx);
         assert_eq!(view.read(cx).page_sizes(), pages(&[(612.0, 792.0), (400.0, 200.0)]));
         assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "));
+        // The focus was in the hint's offset field: it is the page column's now, so the zoom keys work at once.
+        assert!(view.read(cx).focus_handle(cx).is_focused(window), "the view holds the focus after Look again");
+        let fit = view.read(cx).effective_zoom();
+        window.press("+", cx);
+        window.render_frame(cx);
+        let zoom = view.read(cx).zoom().expect("the key reached the page column");
+        assert!((zoom - fit * 1.25).abs() < 1e-5, "{zoom} vs {fit}");
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -901,6 +908,25 @@ fn the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window(cx: &mut T
             p.set_active(true, window, cx);
         });
         assert_eq!(view.read(cx).host_state(), HostState::NoWindow);
+        // A SumatraPDF that ends before it shows a window (what the frame poll reports in the real window) counts
+        // as absent: mutool serves next, the reason stays in the status row.
+        let reason = "SumatraPDF ended before it showed a window (exit code: 1).".to_string();
+        view.update(cx, |v, cx| v.host_failed(reason.clone(), window, cx));
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert_eq!(v.host_state(), HostState::Failed);
+        assert_eq!(v.mode_name(), "pages");
+        assert_eq!(v.tool().map(|(t, f)| (t, f.path.clone())), Some((Tool::MuTool, stub("mutool"))));
+        assert_eq!(label(window, "pdf-tool"), "mutool 9.9");
+        assert_eq!(label(window, "pdf-message"), reason);
+        assert_eq!(label(window, "pdf-summary"), "PDF, listing the pages");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).page_sizes().len(), 2, "the pages listed through mutool");
+        assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "));
     })
     .unwrap();
 }

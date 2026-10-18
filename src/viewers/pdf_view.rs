@@ -204,50 +204,63 @@ impl PdfView {
                 // since a tab already behind another never paints: every tenth of a second for five seconds, then
                 // every half second for as long as the process lives (a cold start can take longer). The frame
                 // found is hidden at once when the tab is hidden, and a repaint places it when it shows.
-                self._tasks.push(cx.spawn(async move |this, cx| {
+                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
                     let mut tries = 0u32;
                     loop {
                         let wait = if tries < 50 { 100 } else { 500 };
                         tries += 1;
                         cx.background_executor().timer(Duration::from_millis(wait)).await;
-                        match this.update(cx, |view, cx| {
+                        match this.update_in(cx, |view, window, cx| {
                             let settled = view.settle_host();
+                            if let Err(reason) = &settled {
+                                view.host_failed(reason.clone(), window, cx);
+                            }
                             cx.notify();
                             settled
                         }) {
-                            Ok(false) => continue,
+                            Ok(Ok(false)) => continue,
                             _ => break,
                         }
                     }
                 }));
             }
-            Err(error) => {
-                // A SumatraPDF that cannot start counts as absent: the renderers are tried next, with the reason
-                // kept in the status row.
-                self.host_state = HostState::Failed;
-                self.message = format!("SumatraPDF could not start: {error}.");
-                match self.tools.first_found(&[Tool::MuTool, Tool::PdfToPpm]) {
-                    Some((tool, found)) => {
-                        self.tool = Some((tool, found.clone()));
-                        self.start_pages(tool, found, cx);
-                    }
-                    None => self.go_missing(window, cx),
-                }
-            }
+            Err(error) => self.host_failed(format!("SumatraPDF could not start: {error}."), window, cx),
         }
     }
 
-    /// Whether the host's frame is known (looked for now), or there is nothing left to wait for: another
-    /// mode, or a process that is gone.
+    /// Whether the host's frame is known (looked for now): `Ok(true)` when it is, or when there is nothing to wait
+    /// for (another mode); `Ok(false)` while the process is still coming up; `Err` with the reason when the
+    /// process ended before it showed a window.
     #[cfg(windows)]
-    fn settle_host(&mut self) -> bool {
+    fn settle_host(&mut self) -> Result<bool, String> {
         match &self.mode {
             Mode::Host(Some(host)) => {
                 let mut host = host.borrow_mut();
-                host.settle() || !host.is_running()
+                if host.settle() {
+                    Ok(true)
+                } else if let Some(status) = host.exit_status() {
+                    Err(format!("SumatraPDF ended before it showed a window ({status})."))
+                } else {
+                    Ok(false)
+                }
             }
-            _ => true,
+            _ => Ok(true),
         }
+    }
+
+    /// A SumatraPDF that could not start, or ended before it showed a window, counts as absent: the renderers
+    /// are tried next and the reason stays in the status row.
+    pub fn host_failed(&mut self, reason: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.host_state = HostState::Failed;
+        self.message = reason;
+        match self.tools.first_found(&[Tool::MuTool, Tool::PdfToPpm]) {
+            Some((tool, found)) => {
+                self.tool = Some((tool, found.clone()));
+                self.start_pages(tool, found, cx);
+            }
+            None => self.go_missing(window, cx),
+        }
+        cx.notify();
     }
 
     fn start_pages(&mut self, tool: Tool, found: Found, cx: &mut Context<Self>) {
@@ -306,7 +319,13 @@ impl PdfView {
             self.tools.refresh(*tool);
         }
         self._tasks.clear();
+        // A focus inside the view (the hex view's field under the hint, say) would stay on an element no longer
+        // drawn: it moves to the view's own handle, which the page column or the host tracks now.
+        let inside = self.focus_handle.contains_focused(window, cx);
         self.detect(window, cx);
+        if inside {
+            window.focus(&self.focus_handle, cx);
+        }
     }
 
     /// Hide or show what the panel hosts (the tab inactive, the hex view on).

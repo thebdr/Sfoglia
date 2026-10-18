@@ -97,6 +97,11 @@ impl SumatraHost {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// How the process ended, once it has.
+    pub fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
     /// Whether the frame window has been found under the parent.
     pub fn is_embedded(&self) -> bool {
         self.frame.is_some()
