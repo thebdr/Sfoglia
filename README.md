@@ -67,7 +67,8 @@ complaint when it has one. With none of them installed the status row says what 
 for afterwards (offered on a failed listing too), and the bytes show meanwhile. Every tool is looked for the same way:
 an environment variable `SFOGLIA_SUMATRAPDF`, `SFOGLIA_MUTOOL`, `SFOGLIA_PDFTOPPM` or `SFOGLIA_PDFINFO` set to a path
 wins (a path to nothing switches the tool off), then the handler registered for the file class and the usual install
-folders, then the search path.
+folders, then the search path. A PDF is a PDF by its header whatever its name; one SumatraPDF runs per tab, hidden
+while its tab is behind another, and ends with the tab, or with Sfoglia however Sfoglia ends.
 
 ## Hex view
 

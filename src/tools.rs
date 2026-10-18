@@ -63,8 +63,16 @@ impl Tool {
     pub fn source(self) -> &'static str {
         match self {
             Tool::SumatraPdf => "https://www.sumatrapdfreader.org",
-            Tool::MuTool => "the package mupdf-tools",
-            Tool::PdfToPpm | Tool::PdfInfo => "the package poppler-utils",
+            Tool::MuTool => {
+                if cfg!(windows) { "https://mupdf.com (mutool.exe in the MuPDF release)" } else { "the package mupdf-tools" }
+            }
+            Tool::PdfToPpm | Tool::PdfInfo => {
+                if cfg!(windows) {
+                    "a poppler build for Windows (https://github.com/oschwartz10612/poppler-windows)"
+                } else {
+                    "the package poppler-utils"
+                }
+            }
             Tool::SevenZip => "https://www.7-zip.org",
             Tool::LibreOffice => "https://www.libreoffice.org",
             Tool::Vlc => "https://www.videolan.org",
@@ -466,14 +474,26 @@ mod tests {
             Tool::SumatraPdf.install_hint(),
             "install SumatraPDF from https://www.sumatrapdfreader.org, or set SFOGLIA_SUMATRAPDF to its path"
         );
-        assert_eq!(
-            Tool::MuTool.install_hint(),
-            "install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path"
-        );
-        assert_eq!(
-            missing_message("A PDF", &[Tool::MuTool, Tool::PdfToPpm]),
-            "A PDF needs mutool or pdftoppm, and none is installed: install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path; install pdftoppm from the package poppler-utils, or set SFOGLIA_PDFTOPPM to its path."
-        );
+        // The source is the platform's: a package on Linux, a site on Windows (where no package manager is assumed).
+        if cfg!(windows) {
+            assert_eq!(
+                Tool::MuTool.install_hint(),
+                "install mutool from https://mupdf.com (mutool.exe in the MuPDF release), or set SFOGLIA_MUTOOL to its path"
+            );
+            assert_eq!(
+                missing_message("A PDF", &[Tool::MuTool, Tool::PdfToPpm]),
+                "A PDF needs mutool or pdftoppm, and none is installed: install mutool from https://mupdf.com (mutool.exe in the MuPDF release), or set SFOGLIA_MUTOOL to its path; install pdftoppm from a poppler build for Windows (https://github.com/oschwartz10612/poppler-windows), or set SFOGLIA_PDFTOPPM to its path."
+            );
+        } else {
+            assert_eq!(
+                Tool::MuTool.install_hint(),
+                "install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path"
+            );
+            assert_eq!(
+                missing_message("A PDF", &[Tool::MuTool, Tool::PdfToPpm]),
+                "A PDF needs mutool or pdftoppm, and none is installed: install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path; install pdftoppm from the package poppler-utils, or set SFOGLIA_PDFTOPPM to its path."
+            );
+        }
         assert_eq!(
             missing_message("X", &[Tool::Vlc]),
             "X needs VLC, and none is installed: install VLC from https://www.videolan.org, or set SFOGLIA_VLC to its path."
@@ -514,7 +534,7 @@ mod tests {
         assert_eq!(set.find(Tool::PdfToPpm), None, "a path to nothing is not installed");
         assert_eq!(
             set.status_line(Tool::PdfToPpm),
-            "pdftoppm is not installed: install pdftoppm from the package poppler-utils, or set SFOGLIA_PDFTOPPM to its path"
+            format!("pdftoppm is not installed: {}", Tool::PdfToPpm.install_hint())
         );
         assert_eq!(
             set.first_found(&[Tool::SumatraPdf, Tool::MuTool, Tool::PdfToPpm]).map(|(t, f)| (t, f.path)),

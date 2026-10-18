@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gpui_kit::component::button::Button;
@@ -16,6 +16,7 @@ use gpui_kit::{
     SharedString, Size, Task, TestSupportExt, Window, actions, canvas, div, img, px,
 };
 
+use crate::detect::Content;
 use crate::hex::HexFile;
 use crate::images;
 use crate::pdf_pages::{Backend, PageSize, Renderer};
@@ -34,6 +35,21 @@ const PAGE_GAP: f32 = 12.0;
 const PRELOAD: usize = 1;
 /// The dots per inch a page is drawn at are kept within reason.
 const DPI_RANGE: (f32, f32) = (24.0, 600.0);
+
+/// `PDF`, `XPS` or `OXPS`: a PDF header makes a PDF whatever the name (the family routes by that signature);
+/// otherwise the name says which of the two XPS flavours, and anything else is taken for a PDF.
+pub fn kind_for(path: &Path, content: &Content) -> String {
+    if let Content::Signature { label, .. } = content
+        && label.starts_with("PDF")
+    {
+        return "PDF".to_string();
+    }
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_uppercase()).as_deref() {
+        Some("XPS") => "XPS".to_string(),
+        Some("OXPS") => "OXPS".to_string(),
+        _ => "PDF".to_string(),
+    }
+}
 
 /// `A PDF`, `An XPS`, `An OXPS`: the article the kind takes when read aloud.
 pub fn article_for(kind: &str) -> &'static str {
@@ -76,10 +92,15 @@ struct Pages {
     zoom: Option<f32>,
     scroll: ScrollHandle,
     dir: PathBuf,
+    /// False once these pages are gone: a drawing still running then removes the folder itself.
+    alive: Arc<AtomicBool>,
+    /// The drawings in flight; dropped with the pages, so none lands in another tab's state.
+    tasks: Vec<Task<()>>,
 }
 
 impl Drop for Pages {
     fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -93,6 +114,8 @@ enum Mode {
 
 pub struct PdfView {
     path: PathBuf,
+    /// `PDF`, `XPS` or `OXPS`, from the content and the name (see `kind_for`).
+    kind: String,
     focus_handle: FocusHandle,
     tools: Arc<ToolSet>,
     tool: Option<(Tool, Found)>,
@@ -109,9 +132,10 @@ pub struct PdfView {
 static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
 
 impl PdfView {
-    pub fn new(path: &Path, tools: Arc<ToolSet>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(path: &Path, kind: String, tools: Arc<ToolSet>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             path: path.to_path_buf(),
+            kind,
             focus_handle: cx.focus_handle(),
             tools,
             tool: None,
@@ -156,12 +180,19 @@ impl PdfView {
             Ok(host) => {
                 self.host_state = HostState::Started;
                 self.mode = Mode::Host(Some(std::rc::Rc::new(std::cell::RefCell::new(host))));
-                // SumatraPDF creates its frame a moment after it starts: a few repaints place it in time.
+                // SumatraPDF creates its frame a moment after it starts. The view looks for it every tenth of a
+                // second (up to five seconds), not only on paint, since a tab already inactive never paints: the
+                // frame found is hidden at once when the tab is hidden, and a repaint places it when it shows.
                 self._tasks.push(cx.spawn(async move |this, cx| {
-                    for ms in [100u64, 300, 700, 1500] {
-                        cx.background_executor().timer(Duration::from_millis(ms)).await;
-                        if this.update(cx, |_, cx| cx.notify()).is_err() {
-                            break;
+                    for _ in 0..50 {
+                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                        match this.update(cx, |view, cx| {
+                            let settled = view.settle_host();
+                            cx.notify();
+                            settled
+                        }) {
+                            Ok(false) => continue,
+                            _ => break,
                         }
                     }
                 }));
@@ -174,11 +205,21 @@ impl PdfView {
         }
     }
 
+    /// Whether the host's frame is known (looked for now); true when there is nothing to wait for.
+    #[cfg(windows)]
+    fn settle_host(&mut self) -> bool {
+        match &self.mode {
+            Mode::Host(Some(host)) => host.borrow_mut().settle(),
+            _ => true,
+        }
+    }
+
     fn start_pages(&mut self, tool: Tool, found: Found, cx: &mut Context<Self>) {
         let backend = if tool == Tool::MuTool { Backend::MuTool } else { Backend::PdfToPpm };
         let info_exe = (backend == Backend::PdfToPpm).then(|| self.tools.find(Tool::PdfInfo).map(|f| f.path)).flatten();
         let renderer = Arc::new(Renderer { backend, exe: found.path, info_exe });
         let dir = std::env::temp_dir().join(format!("sfoglia-pdf-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::create_dir_all(&dir);
         self.mode = Mode::Pages(Box::new(Pages {
             renderer: renderer.clone(),
             sizes: Vec::new(),
@@ -191,6 +232,8 @@ impl PdfView {
             zoom: None,
             scroll: ScrollHandle::new(),
             dir,
+            alive: Arc::new(AtomicBool::new(true)),
+            tasks: Vec::new(),
         }));
         let path = self.path.clone();
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -237,6 +280,11 @@ impl PdfView {
         if let Mode::Host(Some(host)) = &self.mode {
             host.borrow_mut().show(shown);
         }
+    }
+
+    /// Whether the tab shows this view (the dock shows the tab and the hex view is off).
+    pub fn shown(&self) -> bool {
+        self.shown
     }
 
     pub fn tool(&self) -> Option<(Tool, &Found)> {
@@ -391,9 +439,9 @@ impl PdfView {
         self.zoom_fit(cx);
     }
 
-    /// `PDF`, `XPS` or `OXPS` by the extension.
+    /// `PDF`, `XPS` or `OXPS`.
     pub fn kind(&self) -> String {
-        self.path.extension().map_or("PDF".to_string(), |e| e.to_string_lossy().to_ascii_uppercase())
+        self.kind.clone()
     }
 
     /// The page at the top of the viewport, from 1.
@@ -455,7 +503,7 @@ impl PdfView {
             #[cfg(windows)]
             Mode::Host(_) => "the page, find, zoom, rotation and view controls are SumatraPDF's own".to_string(),
             Mode::Pages(pages) => {
-                if pages.renderer.backend == Backend::PdfToPpm && !self.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+                if pages.renderer.backend == Backend::PdfToPpm && self.kind != "PDF" {
                     format!("pdftoppm reads PDF alone: for {} {}", self.kind(), Tool::MuTool.install_hint())
                 } else {
                     "+ and - zoom, 0 fits the width".to_string()
@@ -499,18 +547,25 @@ impl PdfView {
             pages.pending.insert((page, dpi));
             let renderer = pages.renderer.clone();
             let dir = pages.dir.clone();
+            let alive = pages.alive.clone();
             let path = self.path.clone();
-            cx.spawn(async move |this, cx| {
+            let task = cx.spawn(async move |this, cx| {
                 let drawn = cx
                     .background_spawn(async move {
-                        let png = renderer.render(&path, page, dpi, &dir)?;
-                        let bytes = std::fs::read(&png).map_err(|e| format!("cannot read {}: {e}", png.display()))?;
-                        images::decode(&bytes, "png")
+                        let drawn = renderer.render(&path, page, dpi, &dir).and_then(|png| {
+                            let bytes = std::fs::read(&png).map_err(|e| format!("cannot read {}: {e}", png.display()))?;
+                            images::decode(&bytes, "png")
+                        });
+                        if !alive.load(Ordering::SeqCst) {
+                            // The tab closed while this drawing ran: the folder it wrote into goes too.
+                            let _ = std::fs::remove_dir_all(&dir);
+                        }
+                        drawn
                     })
                     .await;
                 let _ = this.update(cx, |view, cx| view.page_drawn(page, dpi, drawn, cx));
-            })
-            .detach();
+            });
+            pages.tasks.push(task);
         }
     }
 

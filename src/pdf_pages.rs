@@ -81,9 +81,8 @@ impl Renderer {
         }
     }
 
-    /// Draw one page; the PNG's path.
+    /// Draw one page into `dir` (which the caller made and owns); the PNG's path.
     pub fn render(&self, pdf: &Path, page: usize, dpi: u32, dir: &Path) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let (command, out) = self.render_command(pdf, page, dpi, dir);
         run(command)?;
         if out.is_file() { Ok(out) } else { Err(format!("the renderer left no {}", out.file_name().unwrap_or_default().to_string_lossy())) }
@@ -274,8 +273,9 @@ mod tests {
         assert_eq!(args, ["-f", "1", "-l", "1000000", "/d/x.pdf"]);
         // Without pdfinfo nothing lists the pages and nothing is run: the hint names the package.
         let alone = Renderer { backend: Backend::PdfToPpm, exe: PathBuf::from("/nowhere/pdftoppm"), info_exe: None };
-        let expected = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
-        assert_eq!(alone.pages_command(Path::new("/d/x.pdf")).err().as_deref(), Some(expected));
-        assert_eq!(alone.pages(Path::new("/d/x.pdf")), Err(expected.to_string()), "the exe does not exist: had it run, the error would say so");
+        let expected = format!("pdftoppm needs pdfinfo from the same package to list the pages: {}", crate::tools::Tool::PdfInfo.install_hint());
+        assert!(expected.ends_with(", or set SFOGLIA_PDFINFO to its path"), "{expected}");
+        assert_eq!(alone.pages_command(Path::new("/d/x.pdf")).err(), Some(expected.clone()));
+        assert_eq!(alone.pages(Path::new("/d/x.pdf")), Err(expected), "the exe does not exist: had it run, the error would say so");
     }
 }

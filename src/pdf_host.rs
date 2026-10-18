@@ -34,6 +34,17 @@ pub struct Placement {
     pub height: i32,
 }
 
+/// What `WM_COPYDATA` carries: the command text in UTF-16 with its terminating zero (`cbData` is twice this length).
+pub fn payload(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// What to do with a frame the moment it is found: SumatraPDF shows it, so a hidden tab hides it; a shown tab
+/// leaves it be until the first paint places it.
+pub fn command_on_found(shown: bool) -> Option<i32> {
+    if shown { None } else { Some(SW_HIDE) }
+}
+
 /// The command line that starts SumatraPDF as a plugin of `parent` on `pdf`.
 pub fn arguments(parent: usize, pdf: &Path) -> Vec<OsString> {
     vec![OsString::from("-plugin"), OsString::from(parent.to_string()), pdf.as_os_str().to_os_string()]
@@ -105,10 +116,21 @@ impl SumatraHost {
             unsafe { GetWindowThreadProcessId(found, &mut owner) };
             if owner == pid {
                 self.frame = Some(found);
+                // A tab already inactive (or on its bytes) by the time the frame appears hides it at once.
+                if let Some(command) = command_on_found(self.shown) {
+                    // SAFETY: a window handle this process found under its own parent.
+                    unsafe { ShowWindow(found, command) };
+                }
                 return self.frame;
             }
             after = found;
         }
+    }
+
+    /// Look for the frame now (the view polls after the start, since an inactive tab never paints); true once
+    /// it is known.
+    pub fn settle(&mut self) -> bool {
+        self.find_frame().is_some()
     }
 
     /// Put the frame over the panel; nothing happens while the placement is unchanged.
@@ -138,7 +160,7 @@ impl SumatraHost {
     /// Send a DDE command text to this instance; true when the frame took it.
     pub fn command(&mut self, text: &str) -> bool {
         let Some(frame) = self.find_frame() else { return false };
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let wide = payload(text);
         let data = COPYDATASTRUCT {
             dwData: DDE_WIDE,
             cbData: (wide.len() * 2) as u32,
@@ -231,10 +253,12 @@ mod tests {
         );
         assert_eq!(dde_command("CmdClose", Path::new(r"C:\x.pdf"), &[]), r#"[CmdClose("C:\x.pdf")]"#);
         assert_eq!(DDE_WIDE, 0x44646557, "the four bytes of DdeW");
-        assert!(wide_len_of("[GotoPage(\"x\", 1)]") == 2 * (18 + 1));
-    }
-
-    fn wide_len_of(text: &str) -> usize {
-        text.encode_utf16().chain(Some(0)).count() * 2
+        let wide = payload("[GotoPage(\"x\", 1)]");
+        assert_eq!(wide.len(), 18 + 1, "the text and its terminating zero");
+        assert_eq!(wide.last(), Some(&0));
+        assert_eq!(String::from_utf16(&wide[..18]).unwrap(), "[GotoPage(\"x\", 1)]");
+        assert_eq!(payload("é").len(), 2, "UTF-16 units, not bytes");
+        assert_eq!(command_on_found(true), None, "a shown tab's frame stays as SumatraPDF shows it");
+        assert_eq!(command_on_found(false), Some(SW_HIDE), "an inactive tab's frame is hidden the moment it is found");
     }
 }

@@ -189,7 +189,10 @@ impl FilePanel {
                 Err(_) => PanelView::Info,
             }
         } else if info.error.is_none() && info.route() == Route::Family(Family::PdfXps) {
-            PanelView::Pdf(cx.new(|cx| PdfView::new(&info.path, tools.clone(), window, cx)))
+            PanelView::Pdf(cx.new(|cx| {
+                let kind = pdf_view::kind_for(&info.path, &info.detection.content);
+                PdfView::new(&info.path, kind, tools.clone(), window, cx)
+            }))
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -322,6 +325,20 @@ impl FilePanel {
         }
     }
 
+    /// Whether the dock shows this tab (the active tab of its group).
+    pub fn shown_by_dock(&self) -> bool {
+        self.active
+    }
+
+    /// The workspace says on every render whether the dock shows this tab; the kit's dock calls no
+    /// `set_active` of its own, so this is how a hosted window learns its tab went behind another.
+    pub fn set_shown_by_dock(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.active != shown {
+            self.active = shown;
+            self.sync_hosted(cx);
+        }
+    }
+
     /// What a tab hosts outside GPUI (the SumatraPDF frame, C-014) shows only while the tab is active and
     /// the hex view is off.
     fn sync_hosted(&self, cx: &mut App) {
@@ -416,8 +433,7 @@ impl BasePanel for FilePanel {
 
     /// The dock says when the tab shows; a hosted window follows.
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
-        self.active = active;
-        self.sync_hosted(cx);
+        self.set_shown_by_dock(active, cx);
     }
 
     /// A modified tab stays open until it is saved or reverted.
@@ -719,6 +735,21 @@ impl Workspace {
             .map(|f| f.panel.clone())
     }
 
+    /// The panels the centre shows: the active tab of every group.
+    pub fn visible_panels(&self, cx: &App) -> Vec<PanelId> {
+        fn shown_in(node: &PaneNode, out: &mut Vec<PanelId>) {
+            match node.kind() {
+                PaneRef::Tabs { panels, active_ix } => out.extend(panels.get(active_ix).copied()),
+                PaneRef::Split { children, .. } => children.iter().for_each(|child| shown_in(child, out)),
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(layout) = self.dock_area.read(cx).layout(DockPlacement::Center) {
+            shown_in(layout.root(), &mut out);
+        }
+        out
+    }
+
     /// The file whose tab is active in the centre, if any.
     pub fn active_file(&self, cx: &App) -> Option<FileInfo> {
         self.active_panel(cx).map(|panel| panel.read(cx).info.clone())
@@ -841,6 +872,13 @@ impl Render for Workspace {
         // a folder of drawings, C-014) go with it rather than at the next open.
         let dock = self.dock_area.clone();
         self.open.retain(|f| dock.read(cx).panel(PanelId::from(f.panel.entity_id())).is_some());
+        // Each panel hears whether the dock shows it (the active tab of its group), so a hosted window hides
+        // behind another tab even when it appears only after the tab went behind.
+        let visible = self.visible_panels(cx);
+        for file in &self.open {
+            let shown = visible.contains(&PanelId::from(file.panel.entity_id()));
+            file.panel.update(cx, |panel, cx| panel.set_shown_by_dock(shown, cx));
+        }
         let nothing_open = self.open.is_empty();
         div()
             .id("workspace")

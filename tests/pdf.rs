@@ -281,7 +281,7 @@ fn without_a_tool_the_hint_names_each_tool_and_the_bytes_show_until_look_again(c
         if cfg!(windows) {
             assert_eq!(
                 expected,
-                "A PDF needs SumatraPDF, mutool or pdftoppm, and none is installed: install SumatraPDF from https://www.sumatrapdfreader.org, or set SFOGLIA_SUMATRAPDF to its path; install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path; install pdftoppm from the package poppler-utils, or set SFOGLIA_PDFTOPPM to its path. The bytes show meanwhile."
+                "A PDF needs SumatraPDF, mutool or pdftoppm, and none is installed: install SumatraPDF from https://www.sumatrapdfreader.org, or set SFOGLIA_SUMATRAPDF to its path; install mutool from https://mupdf.com (mutool.exe in the MuPDF release), or set SFOGLIA_MUTOOL to its path; install pdftoppm from a poppler build for Windows (https://github.com/oschwartz10612/poppler-windows), or set SFOGLIA_PDFTOPPM to its path. The bytes show meanwhile."
             );
         } else {
             assert_eq!(
@@ -348,10 +348,11 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
     .unwrap();
 
     // Other tool sets, through panels built directly: pdftoppm without pdfinfo, pdftoppm on an XPS, nothing on an OXPS.
+    // An XPS and an OXPS are ZIP files: a PDF copied under those names would be a PDF by its header.
     let xps = dir.join("pages.xps");
-    std::fs::copy(fixture("three.pdf"), &xps).unwrap();
+    std::fs::write(&xps, b"PK\x03\x04\x14\x00\x00\x00\x08\x00not an xps inside").unwrap();
     let oxps = dir.join("pages.oxps");
-    std::fs::copy(fixture("three.pdf"), &oxps).unwrap();
+    std::fs::write(&oxps, b"PK\x03\x04\x14\x00\x00\x00\x08\x00not an oxps inside").unwrap();
     let without_info = Arc::new(ToolSet::stubbed([
         (Tool::SumatraPdf, None),
         (Tool::MuTool, None),
@@ -377,10 +378,8 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
             let view = on_xps.read(cx).pdf_view().unwrap().read(cx);
             assert_eq!(view.kind(), "XPS");
             assert_eq!(view.tool_label(), "pdftoppm 9.9");
-            assert_eq!(
-                view.message(),
-                "pdftoppm reads PDF alone: for XPS install mutool from the package mupdf-tools, or set SFOGLIA_MUTOOL to its path"
-            );
+            assert_eq!(view.message(), format!("pdftoppm reads PDF alone: for XPS {}", Tool::MuTool.install_hint()));
+            assert!(view.message().contains("SFOGLIA_MUTOOL"));
             let view = on_oxps.read(cx).pdf_view().unwrap().read(cx);
             assert_eq!(view.mode_name(), "missing");
             assert_eq!(view.kind(), "OXPS");
@@ -394,8 +393,8 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
     cx.update_window(handle, |_, _, cx| {
         // Without pdfinfo nothing lists the pages and nothing is run: the hint is the complaint.
         let view = no_info.read(cx).pdf_view().unwrap().read(cx);
-        let hint = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
-        assert_eq!(view.failure(), Some(hint));
+        let hint = format!("pdftoppm needs pdfinfo from the same package to list the pages: {}", Tool::PdfInfo.install_hint());
+        assert_eq!(view.failure(), Some(hint.as_str()));
         assert_eq!(view.summary(), format!("PDF, {hint}"));
         assert!(view.wants_look_again());
         assert!(!view.scratch_dir().unwrap().join("calls.log").exists(), "the stub was never run");
@@ -545,7 +544,7 @@ fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut T
         (Tool::PdfInfo, Some(later.clone())),
     ]);
     let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
-    let hint = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
+    let hint = format!("pdftoppm needs pdfinfo from the same package to list the pages: {}", Tool::PdfInfo.install_hint());
     let drawings = cx
         .update_window(handle, |_, window, cx| {
             window.render_frame(cx);
@@ -553,7 +552,7 @@ fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut T
             assert_eq!(v.mode_name(), "pages");
             assert_eq!(v.tool().map(|(t, f)| (t, f.path.clone())), Some((Tool::PdfToPpm, stub("pdftoppm"))));
             assert_eq!(v.tool_label(), "pdftoppm 24.02.0", "the version from the banner on stderr");
-            assert_eq!(v.failure(), Some(hint));
+            assert_eq!(v.failure(), Some(hint.as_str()));
             assert_eq!(label(window, "pdf-summary"), format!("PDF, {hint}"));
             assert!(window.try_find("pdf-look-again").is_some());
             assert_eq!(v.page_sizes(), vec![]);
@@ -596,6 +595,125 @@ fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut T
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     let _ = drawings;
+}
+
+#[gpui_kit::test]
+fn a_pdf_under_another_name_is_still_a_pdf(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-named");
+    let report = dir.join("report.txt");
+    std::fs::copy(fixture("three.pdf"), &report).unwrap();
+    let tools = ToolSet::stubbed([
+        (Tool::SumatraPdf, None),
+        (Tool::MuTool, None),
+        (Tool::PdfToPpm, Some(stub("pdftoppm"))),
+        (Tool::PdfInfo, Some(stub("pdfinfo"))),
+    ]);
+    let (handle, workspace, _panel, view) = open_pdf(cx, tools, report.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert_eq!(v.kind(), "PDF", "the header says PDF, whatever the name");
+        assert_eq!(v.failure(), None);
+        assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "), "{}", label(window, "pdf-summary"));
+        assert_eq!(label(window, "pdf-message"), "+ and - zoom, 0 fits the width", "pdftoppm reads it: it is a PDF");
+    })
+    .unwrap();
+    // With nothing installed the hint names a PDF too; an XPS by name with a ZIP inside stays an XPS.
+    let xps = dir.join("pages.xps");
+    std::fs::write(&xps, b"PK\x03\x04\x14\x00\x00\x00\x08\x00not really an xps").unwrap();
+    let nothing = Arc::new(ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, None), (Tool::PdfToPpm, None)]));
+    cx.update_window(handle, |_, window, cx| {
+        let rules = workspace.read(cx).rules().clone();
+        let named = cx.new(|cx| FilePanel::new(FileInfo::probe(&report), &rules, &nothing, window, cx));
+        let view = named.read(cx).pdf_view().unwrap().read(cx);
+        assert_eq!(view.kind(), "PDF");
+        assert!(view.message().starts_with("A PDF needs "), "{}", view.message());
+        let zipped = cx.new(|cx| FilePanel::new(FileInfo::probe(&xps), &rules, &nothing, window, cx));
+        let view = zipped.read(cx).pdf_view().unwrap().read(cx);
+        assert_eq!(view.kind(), "XPS");
+        assert_eq!(view.summary(), "XPS");
+        assert!(view.message().starts_with("An XPS needs "), "{}", view.message());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn a_closed_tab_leaves_no_drawings_even_mid_flight(cx: &mut TestAppContext) {
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool"))), (Tool::PdfToPpm, None)]);
+    let (handle, workspace, panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx)).unwrap();
+    cx.run_until_parked();
+    let dir = cx.update_window(handle, |_, _, cx| view.read(cx).scratch_dir().unwrap()).unwrap();
+    assert!(dir.is_dir());
+    let weak = view.downgrade();
+    drop(view);
+    drop(panel);
+    cx.update_window(handle, |_, window, cx| {
+        // A second tab so the first can close; then, with the PDF tab active, a zoom change asks for new
+        // drawings, and the tab closes while they are in flight.
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("hello.txt"), fixture("three.pdf")], window, cx));
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[0].clone();
+        let focus = panel.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("+", cx);
+        window.render_frame(cx);
+        assert_eq!(weak.upgrade().map(|v| v.read(cx).drawn_pages().len()), Some(2), "the old drawings stay while the new ones run");
+        window.dispatch_action(Box::new(ClosePanel), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["hello.txt"]);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| weak.upgrade().map(|v| v.read(cx).kind())), None, "the closed tab's view is dropped");
+    assert!(!dir.exists(), "the drawings folder is gone even though drawings were in flight: {}", dir.display());
+}
+
+#[gpui_kit::test]
+fn a_tab_behind_another_tells_its_view_so_a_hosted_window_hides(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-behind");
+    let second = dir.join("second.pdf");
+    std::fs::copy(fixture("three.pdf"), &second).unwrap();
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool"))), (Tool::PdfToPpm, None)]);
+    let (handle, workspace, first_panel, first) = open_pdf(cx, tools, fixture("three.pdf"));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(first.read(cx).shown());
+        assert!(first_panel.read(cx).shown_by_dock());
+        // A second PDF opens in front: the first tab's view hears it went behind, at the next render.
+        workspace.update(cx, |w, cx| w.open_paths(&[second.clone()], window, cx));
+        window.render_frame(cx);
+        let second_panel = workspace.read(cx).panels(cx)[1].clone();
+        let second_view = second_panel.read(cx).pdf_view().unwrap().clone();
+        assert_eq!(workspace.read(cx).visible_panels(cx).len(), 1, "one tab group, one visible tab");
+        assert!(!first_panel.read(cx).shown_by_dock());
+        assert!(!first.read(cx).shown(), "the tab behind tells its view");
+        assert!(second_panel.read(cx).shown_by_dock());
+        assert!(second_view.read(cx).shown());
+        // Back to the first: it shows, the second hides.
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("three.pdf")], window, cx));
+        window.render_frame(cx);
+        assert!(first.read(cx).shown());
+        assert!(!second_view.read(cx).shown());
+        // The hex view on the shown tab hides its view too; off again, it shows.
+        first_panel.update(cx, |p, cx| p.toggle_hex(window, cx));
+        window.render_frame(cx);
+        assert!(!first.read(cx).shown());
+        assert!(first_panel.read(cx).shown_by_dock(), "the dock still shows the tab, the bytes are in front");
+        first_panel.update(cx, |p, cx| p.toggle_hex(window, cx));
+        window.render_frame(cx);
+        assert!(first.read(cx).shown());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(windows)]
