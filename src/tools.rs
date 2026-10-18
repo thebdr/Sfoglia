@@ -604,6 +604,23 @@ mod tests {
         if let Some(handler) = registered_handler("SumatraPDF.pdf") {
             assert_eq!(places.first(), Some(&handler));
         }
+        // Then the Program Files folders and the local application data, from the environment as it is.
+        let mut expected = Vec::new();
+        for root in ["ProgramFiles", "ProgramFiles(x86)"] {
+            expected.extend(std::env::var_os(root).map(|r| PathBuf::from(r).join("SumatraPDF/SumatraPDF.exe")));
+        }
+        expected.extend(std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("SumatraPDF/SumatraPDF.exe")));
+        let tail = &places[places.len() - expected.len()..];
+        assert_eq!(tail, &expected[..], "{places:?}");
+        assert_eq!(
+            Tool::MuTool.known_places(),
+            vec![PathBuf::from("/usr/bin/mutool"), PathBuf::from("/usr/local/bin/mutool")],
+            "the renderers install under /usr/bin or /usr/local/bin, nowhere fixed on Windows"
+        );
+        assert_eq!(Tool::PdfInfo.known_places(), vec![PathBuf::from("/usr/bin/pdfinfo"), PathBuf::from("/usr/local/bin/pdfinfo")]);
+        let seven = Tool::SevenZip.known_places();
+        assert!(seven.iter().all(|p| p.ends_with("7-Zip/7z.exe") || p.starts_with("/usr")), "{seven:?}");
+        assert!(seven.iter().any(|p| p == Path::new("/usr/local/bin/7za")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

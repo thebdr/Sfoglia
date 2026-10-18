@@ -7,12 +7,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui_kit::component::dock::{BasePanel as _, ClosePanel};
+use gpui_kit::component::Placement;
+use gpui_kit::component::dock::{BasePanel as _, ClosePanel, DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px};
 use sfoglia::detect::{Route, detect};
 use sfoglia::generated::families::Family;
-use sfoglia::pdf_pages::PageSize;
+use sfoglia::pdf_pages::{Backend, PageSize, Renderer};
 use sfoglia::tools::{self, Tool, ToolSet};
 use sfoglia::viewers::PdfView;
 use sfoglia::viewers::pdf_view::{self, candidates};
@@ -471,6 +472,7 @@ fn drawings_follow_the_scroll_around_the_visible_pages(cx: &mut TestAppContext) 
         expected.dedup();
         assert_eq!(v.drawn_pages().iter().map(|(p, _)| *p).collect::<Vec<_>>(), expected, "scrolled to the end");
         assert_eq!(v.current_page(), Some(first));
+        assert_eq!(label(window, "pdf-summary"), format!("PDF, 8 pages · page {first} · {} %", (v.effective_zoom() * 100.0).round()));
         assert_eq!(draw_calls(&dir).len(), expected.len());
         assert_eq!(v.draw_failure(), None);
         assert!(!v.wants_look_again());
@@ -509,14 +511,16 @@ fn a_page_that_fails_to_draw_is_asked_again_only_after_a_zoom_change(cx: &mut Te
     let calls = draw_calls(&dir);
     assert_eq!(calls.iter().filter(|c| c.starts_with("draw 2 ")).count(), 1, "one try for page 2: {calls:?}");
     assert_eq!(calls.len(), 2);
-    // A zoom change asks again at the new dpi; the complaint stays while the page stays undrawn.
+    // A zoom change asks again at the new dpi; the complaint stays until the page draws (the stand-in fails
+    // page 2 the first time alone), then goes, and the summary is whole again.
     cx.update_window(handle, |_, window, cx| {
         let focus = view.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         window.render_frame(cx);
         window.press("+", cx);
         window.render_frame(cx);
-        assert_eq!(view.read(cx).draw_failure(), None, "a zoom change wipes the old complaint until the drawing is tried again");
+        assert_eq!(view.read(cx).draw_failure(), Some(complaint), "the complaint stays until the page draws");
+        assert!(label(window, "pdf-summary").ends_with(&format!(" · {complaint}")));
     })
     .unwrap();
     cx.run_until_parked();
@@ -524,8 +528,9 @@ fn a_page_that_fails_to_draw_is_asked_again_only_after_a_zoom_change(cx: &mut Te
         window.render_frame(cx);
         let v = view.read(cx);
         let dpi = (fit * 1.25 * 96.0 * window.scale_factor()).round() as u32;
-        assert_eq!(v.drawn_pages(), vec![(1, dpi)]);
-        assert_eq!(v.draw_failure(), Some(complaint));
+        assert_eq!(v.drawn_pages(), vec![(1, dpi), (2, dpi)], "the second try drew page 2");
+        assert_eq!(v.draw_failure(), None, "gone when the page draws");
+        assert_eq!(label(window, "pdf-summary"), format!("PDF, 2 pages · page 1 · {} %", (fit * 1.25 * 100.0).round()));
     })
     .unwrap();
     let calls = draw_calls(&dir);
@@ -616,6 +621,24 @@ fn a_pdf_under_another_name_is_still_a_pdf(cx: &mut TestAppContext) {
         assert_eq!(v.failure(), None);
         assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "), "{}", label(window, "pdf-summary"));
         assert_eq!(label(window, "pdf-message"), "+ and - zoom, 0 fits the width", "pdftoppm reads it: it is a PDF");
+    })
+    .unwrap();
+    // Even under an XPS name a PDF header makes a PDF, and pdftoppm reads it without complaint.
+    let doc = dir.join("doc.xps");
+    std::fs::copy(fixture("three.pdf"), &doc).unwrap();
+    let poppler = Arc::new(ToolSet::stubbed([
+        (Tool::SumatraPdf, None),
+        (Tool::MuTool, None),
+        (Tool::PdfToPpm, Some(stub("pdftoppm"))),
+        (Tool::PdfInfo, Some(stub("pdfinfo"))),
+    ]));
+    cx.update_window(handle, |_, window, cx| {
+        let rules = workspace.read(cx).rules().clone();
+        let named = cx.new(|cx| FilePanel::new(FileInfo::probe(&doc), &rules, &poppler, window, cx));
+        let view = named.read(cx).pdf_view().unwrap().read(cx);
+        assert_eq!(view.kind(), "PDF", "a PDF header under an XPS name");
+        assert_eq!(view.message(), "+ and - zoom, 0 fits the width");
+        assert_eq!(view.summary(), "PDF, listing the pages");
     })
     .unwrap();
     // With nothing installed the hint names a PDF too; an XPS by name with a ZIP inside stays an XPS.
@@ -711,6 +734,72 @@ fn a_tab_behind_another_tells_its_view_so_a_hosted_window_hides(cx: &mut TestApp
         first_panel.update(cx, |p, cx| p.toggle_hex(window, cx));
         window.render_frame(cx);
         assert!(first.read(cx).shown());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_drawing_landing_after_its_pages_are_gone_removes_the_folder() {
+    use std::sync::atomic::AtomicBool;
+    let renderer = Renderer { backend: Backend::MuTool, exe: stub("mutool"), info_exe: None };
+    let dir = scratch_dir("pdf-landing");
+    // Alive: the drawing is decoded and the folder stays with its PNG.
+    let alive = AtomicBool::new(true);
+    let picture = pdf_view::draw_page(&renderer, &fixture("three.pdf"), 1, 96, &dir, &alive).expect("gradient.png decodes");
+    assert_eq!((picture.width, picture.height), (320, 200), "the stand-in's gradient fixture");
+    assert!(dir.join("page-1-96.png").is_file());
+    // Gone meanwhile: the drawing still lands, and the folder it wrote into is removed.
+    alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    let picture = pdf_view::draw_page(&renderer, &fixture("three.pdf"), 2, 96, &dir, &alive).expect("dot.png decodes");
+    assert_eq!((picture.width, picture.height), (1, 1));
+    assert!(!dir.exists(), "the folder is gone: {}", dir.display());
+    // A failed drawing with the pages gone removes the folder too.
+    let broken = Renderer { backend: Backend::MuTool, exe: stub("mutool-broken"), info_exe: None };
+    std::fs::create_dir_all(&dir).unwrap();
+    let failed = pdf_view::draw_page(&broken, &fixture("three.pdf"), 1, 96, &dir, &alive);
+    assert_eq!(failed.err().as_deref(), Some("mutool-broken: error: cannot open document"));
+    assert!(!dir.exists());
+}
+
+#[gpui_kit::test]
+fn each_tab_group_shows_its_own_active_tab(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-split");
+    let second = dir.join("second.pdf");
+    std::fs::copy(fixture("three.pdf"), &second).unwrap();
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool"))), (Tool::PdfToPpm, None)]);
+    let (handle, workspace, _first_panel, first) = open_pdf(cx, tools, fixture("three.pdf"));
+    fn first_tabs(node: &PaneNode) -> Option<NodeId> {
+        match node.kind() {
+            PaneRef::Tabs { .. } => Some(node.id()),
+            PaneRef::Split { children, .. } => children.iter().find_map(first_tabs),
+        }
+    }
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[second.clone()], window, cx));
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        let second_view = panels[1].read(cx).pdf_view().unwrap().clone();
+        assert_eq!(workspace.read(cx).visible_panels(cx).len(), 1);
+        assert!(!first.read(cx).shown());
+        // The second tab split off to the right: two groups, each showing its tab.
+        let dock = workspace.read(cx).dock_area().clone();
+        let node = first_tabs(dock.read(cx).layout(DockPlacement::Center).expect("the centre layout").root()).expect("a tab group");
+        dock.update(cx, |dock, cx| {
+            dock.move_panel(
+                PanelId::from(panels[1].entity_id()),
+                InsertTarget::Split { node, placement: Placement::Right, size: None },
+                window,
+                cx,
+            )
+        });
+        window.render_frame(cx);
+        let visible = workspace.read(cx).visible_panels(cx);
+        assert_eq!(visible.len(), 2, "one visible tab per group");
+        assert!(visible.contains(&PanelId::from(panels[0].entity_id())));
+        assert!(visible.contains(&PanelId::from(panels[1].entity_id())));
+        assert!(first.read(cx).shown(), "the first tab is its group's only tab again");
+        assert!(second_view.read(cx).shown());
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

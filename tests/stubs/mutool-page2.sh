@@ -8,7 +8,12 @@ case "$1" in
       '<page pagenum="2">' '<MediaBox l="0" b="0" r="612" t="792" />' '</page>' ;;
   draw)
     echo "draw $9 at $5" >> "$(dirname "$7")/calls.log"
-    if [ "$9" = "2" ]; then echo "error: cannot draw page 2" 1>&2; exit 1; fi
+    # the first try of page 2 fails; the marker makes the next one draw
+    if [ "$9" = "2" ] && [ ! -e "$(dirname "$7")/page2-failed.marker" ]; then
+      echo failed > "$(dirname "$7")/page2-failed.marker"
+      echo "error: cannot draw page 2" 1>&2
+      exit 1
+    fi
     cp "$here/../fixtures/gradient.png" "$7" ;;
   *) echo "unknown command $1" 1>&2; exit 2 ;;
 esac

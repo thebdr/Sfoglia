@@ -36,6 +36,26 @@ const PRELOAD: usize = 1;
 /// The dots per inch a page is drawn at are kept within reason.
 const DPI_RANGE: (f32, f32) = (24.0, 600.0);
 
+/// Draw one page through the renderer and decode it. When the pages that asked are gone by the time the
+/// drawing lands (`alive` false: the tab closed meanwhile), the folder it wrote into goes with it.
+pub fn draw_page(
+    renderer: &Renderer,
+    path: &Path,
+    page: usize,
+    dpi: u32,
+    dir: &Path,
+    alive: &AtomicBool,
+) -> Result<images::Picture, String> {
+    let drawn = renderer.render(path, page, dpi, dir).and_then(|png| {
+        let bytes = std::fs::read(&png).map_err(|e| format!("cannot read {}: {e}", png.display()))?;
+        images::decode(&bytes, "png")
+    });
+    if !alive.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    drawn
+}
+
 /// `PDF`, `XPS` or `OXPS`: a PDF header makes a PDF whatever the name (the family routes by that signature);
 /// otherwise the name says which of the two XPS flavours, and anything else is taken for a PDF.
 pub fn kind_for(path: &Path, content: &Content) -> String {
@@ -180,12 +200,16 @@ impl PdfView {
             Ok(host) => {
                 self.host_state = HostState::Started;
                 self.mode = Mode::Host(Some(std::rc::Rc::new(std::cell::RefCell::new(host))));
-                // SumatraPDF creates its frame a moment after it starts. The view looks for it every tenth of a
-                // second (up to five seconds), not only on paint, since a tab already inactive never paints: the
-                // frame found is hidden at once when the tab is hidden, and a repaint places it when it shows.
+                // SumatraPDF creates its frame a moment after it starts. The view looks for it, not only on paint,
+                // since a tab already behind another never paints: every tenth of a second for five seconds, then
+                // every half second for as long as the process lives (a cold start can take longer). The frame
+                // found is hidden at once when the tab is hidden, and a repaint places it when it shows.
                 self._tasks.push(cx.spawn(async move |this, cx| {
-                    for _ in 0..50 {
-                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                    let mut tries = 0u32;
+                    loop {
+                        let wait = if tries < 50 { 100 } else { 500 };
+                        tries += 1;
+                        cx.background_executor().timer(Duration::from_millis(wait)).await;
                         match this.update(cx, |view, cx| {
                             let settled = view.settle_host();
                             cx.notify();
@@ -205,11 +229,15 @@ impl PdfView {
         }
     }
 
-    /// Whether the host's frame is known (looked for now); true when there is nothing to wait for.
+    /// Whether the host's frame is known (looked for now), or there is nothing left to wait for: another
+    /// mode, or a process that is gone.
     #[cfg(windows)]
     fn settle_host(&mut self) -> bool {
         match &self.mode {
-            Mode::Host(Some(host)) => host.borrow_mut().settle(),
+            Mode::Host(Some(host)) => {
+                let mut host = host.borrow_mut();
+                host.settle() || !host.is_running()
+            }
             _ => true,
         }
     }
@@ -421,8 +449,8 @@ impl PdfView {
     fn set_zoom(&mut self, zoom: Option<f32>, cx: &mut Context<Self>) {
         if let Mode::Pages(pages) = &mut self.mode {
             pages.zoom = zoom;
+            // A failed page is asked for again at the new zoom; its complaint stays until it draws.
             pages.failed.clear();
-            pages.draw_failure = None;
             cx.notify();
         }
     }
@@ -550,19 +578,7 @@ impl PdfView {
             let alive = pages.alive.clone();
             let path = self.path.clone();
             let task = cx.spawn(async move |this, cx| {
-                let drawn = cx
-                    .background_spawn(async move {
-                        let drawn = renderer.render(&path, page, dpi, &dir).and_then(|png| {
-                            let bytes = std::fs::read(&png).map_err(|e| format!("cannot read {}: {e}", png.display()))?;
-                            images::decode(&bytes, "png")
-                        });
-                        if !alive.load(Ordering::SeqCst) {
-                            // The tab closed while this drawing ran: the folder it wrote into goes too.
-                            let _ = std::fs::remove_dir_all(&dir);
-                        }
-                        drawn
-                    })
-                    .await;
+                let drawn = cx.background_spawn(async move { draw_page(&renderer, &path, page, dpi, &dir, &alive) }).await;
                 let _ = this.update(cx, |view, cx| view.page_drawn(page, dpi, drawn, cx));
             });
             pages.tasks.push(task);

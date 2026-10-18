@@ -39,6 +39,11 @@ pub fn payload(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+/// The `WM_COPYDATA` header for a DDE text: the `DdeW` tag and the byte count of the UTF-16 units, zero included.
+pub fn copydata(wide: &[u16]) -> (usize, u32) {
+    (DDE_WIDE, (wide.len() * 2) as u32)
+}
+
 /// What to do with a frame the moment it is found: SumatraPDF shows it, so a hidden tab hides it; a shown tab
 /// leaves it be until the first paint places it.
 pub fn command_on_found(shown: bool) -> Option<i32> {
@@ -161,9 +166,10 @@ impl SumatraHost {
     pub fn command(&mut self, text: &str) -> bool {
         let Some(frame) = self.find_frame() else { return false };
         let wide = payload(text);
+        let (tag, size) = copydata(&wide);
         let data = COPYDATASTRUCT {
-            dwData: DDE_WIDE,
-            cbData: (wide.len() * 2) as u32,
+            dwData: tag,
+            cbData: size,
             lpData: wide.as_ptr() as *mut core::ffi::c_void,
         };
         // SAFETY: `data` and the text it points to outlive the synchronous SendMessageW call.
@@ -258,6 +264,8 @@ mod tests {
         assert_eq!(wide.last(), Some(&0));
         assert_eq!(String::from_utf16(&wide[..18]).unwrap(), "[GotoPage(\"x\", 1)]");
         assert_eq!(payload("é").len(), 2, "UTF-16 units, not bytes");
+        assert_eq!(copydata(&wide), (0x44646557, 38), "the DdeW tag and twice the units");
+        assert_eq!(copydata(&payload("[CmdClose]")).1, 2 * 11);
         assert_eq!(command_on_found(true), None, "a shown tab's frame stays as SumatraPDF shows it");
         assert_eq!(command_on_found(false), Some(SW_HIDE), "an inactive tab's frame is hidden the moment it is found");
     }
