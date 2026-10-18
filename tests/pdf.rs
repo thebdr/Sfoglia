@@ -966,6 +966,15 @@ fn the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window(cx: &mut T
         assert_eq!(v.message(), format!("{reason} {} The bytes show meanwhile.", tools::missing_message("A PDF", candidates())));
         assert!(v.hex_view().is_some());
         assert!(v.wants_look_again());
+        // Look again asks afresh: SumatraPDF (the stand-in) is found again and hosted, and the old reason is
+        // gone from the status row.
+        view.update(cx, |v, cx| v.look_again(window, cx));
+        let v = view.read(cx);
+        assert_eq!(v.mode_name(), "host");
+        assert_eq!(v.host_state(), HostState::NoWindow);
+        assert_eq!(v.tool().map(|(t, _)| t), Some(Tool::SumatraPdf));
+        assert_eq!(v.message(), "the page, find, zoom, rotation and view controls are SumatraPDF's own", "the failed attempt's reason does not linger");
+        assert!(!v.wants_look_again());
     })
     .unwrap();
 }
