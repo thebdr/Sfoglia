@@ -1067,3 +1067,92 @@ fn a_semicolon_and_a_pipe_file_name_their_delimiter(cx: &mut TestAppContext) {
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Under a sort, the selected cell is still named by the file's own records, the field holds that record's
+/// text, the search selects by the file's rows, and Enter writes into that record (C-013).
+#[gpui_kit::test]
+fn a_cell_selected_under_a_sort_is_its_own_record(cx: &mut TestAppContext) {
+    let dir = scratch_dir("sheet-sorted-edit");
+    let path = copy_fixture("table.csv", &dir);
+    let (handle, _panel, view) = open_sheet(cx, path.clone());
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // amount descending: Élodie (record 2) comes first on screen.
+        window.click(("icon-sort", 3usize), cx);
+        window.render_frame(cx);
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3", "the first row on screen is record 2 of the file");
+        assert_eq!(view.read(cx).edit_input().read(cx).value().as_ref(), "Élodie");
+        window.press("ctrl-shift-f", cx);
+        window.render_frame(cx);
+        window.input("rossi", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "match 1 of 1");
+        assert_eq!(label(window, "sheet-cell"), "B2", "Rossi is record 1 whatever the sort shows first");
+        assert_eq!(view.read(cx).table().read(cx).selected_cell(), Some((1, 1)), "on the second row on screen");
+        assert!(view.read(cx).table().read(cx).delegate().sort().is_some(), "the sort stays through a search");
+        let table = view.read(cx).table().clone();
+        table.update(cx, |table, cx| table.set_selected_cell(0, 1, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-cell"), "B3");
+        let edit = view.read(cx).edit_input().clone();
+        edit.update(cx, |edit, cx| edit.set_value("Élodie Durand", window, cx));
+        let focus = edit.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-message"), "B3 set; Ctrl+S saves");
+        let text = view.read(cx).text_view().unwrap().read(cx).text(cx).to_string();
+        assert!(text.contains("\n2,Élodie Durand,plain,12.50,2026-02-28\n"), "{text}");
+        assert!(text.contains("\n1,\"Rossi, Mario\",\"first line\nsecond line\",7,2026-01-05\n"), "record 1 untouched: {text}");
+        let (_, cells) = dump(&view, cx);
+        assert_eq!(cells[1][1], "Élodie Durand", "the grid in the file's order again");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A legacy xls opens through the viewer as a workbook, on its sheets (C-013).
+#[gpui_kit::test]
+fn a_legacy_xls_opens_as_a_workbook(cx: &mut TestAppContext) {
+    let (handle, panel, view) = open_sheet(cx, fixture("book.xls"));
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(label(window, "sheet-summary"), "Excel, 3 sheets · Data: 7 rows, 6 columns");
+        assert_eq!(view.read(cx).sheet_names(), rows(&["Data", "Notes", "Empty"]));
+        assert_eq!(dump(&view, cx).1[1], rows(&["1", "Rossi, Mario", "12.5", "2026-01-05", "TRUE", "first line\nsecond line"]));
+        assert!(panel.read(cx).editable_text(cx).is_none(), "read-only");
+    })
+    .unwrap();
+}
+
+#[test]
+fn the_workbook_names_are_the_excel_family_in_any_case() {
+    use sfoglia::viewers::sheet_view::is_workbook_name;
+    for name in ["a.xls", "a.xlt", "a.xlsm", "a.xlsx", "a.xltx", "a.xltm", "A.XLSX", "A.XLS"] {
+        assert!(is_workbook_name(name), "{name}");
+    }
+    for name in ["a.csv", "a.tsv", "a.txt", "xlsx", "a.xlsx.csv"] {
+        assert!(!is_workbook_name(name), "{name}");
+    }
+}
