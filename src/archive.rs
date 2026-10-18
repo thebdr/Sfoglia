@@ -16,7 +16,7 @@ pub enum Codec {
     Xz,
     Lzma,
     Zstd,
-    /// Unix `compress` (`.Z`): no library here reads it, 7-Zip does.
+    /// Unix `compress` (`.Z`): LZW, decoded here (7-Zip lists such a file without naming its one entry).
     Compress,
 }
 
@@ -123,9 +123,6 @@ pub fn container_of(name: &str, head: &[u8]) -> Option<Container> {
         return Some(Container::Tar(None));
     }
     if let Some(codec) = Codec::by_signature(head) {
-        if codec == Codec::Compress {
-            return Some(Container::External);
-        }
         return Some(if names_a_tar(name) { Container::Tar(Some(codec)) } else { Container::Lone(codec) });
     }
     let ext = extension(name);
@@ -133,16 +130,15 @@ pub fn container_of(name: &str, head: &[u8]) -> Option<Container> {
         "zip" | "zipx" | "jar" | "war" | "apk" | "cbz" | "pk3" | "pk4" | "pkz" => Container::Zip,
         "7z" => Container::SevenZ,
         "tar" => Container::Tar(None),
-        "tgz" | "taz" => Container::Tar(Some(Codec::Gzip)),
+        "tgz" => Container::Tar(Some(Codec::Gzip)),
+        "taz" => Container::Tar(Some(Codec::Compress)),
         "tbz" | "tbz2" => Container::Tar(Some(Codec::Bzip2)),
         "txz" => Container::Tar(Some(Codec::Xz)),
         "tzst" => Container::Tar(Some(Codec::Zstd)),
         "tlz" => Container::Tar(Some(Codec::Lzma)),
-        "z" => Container::External,
         "rar" | "cbr" | "cab" | "iso" | "rpm" | "deb" | "cpio" | "lha" | "lzh" | "arj" | "chm" | "xar" | "wim"
         | "dmg" | "vhd" | "hfs" | "dd" | "deskthemepack" => Container::External,
         other => match Codec::by_suffix(other) {
-            Some(Codec::Compress) => Container::External,
             Some(codec) => {
                 if names_a_tar(name) { Container::Tar(Some(codec)) } else { Container::Lone(codec) }
             }
@@ -163,6 +159,8 @@ pub struct Entry {
     pub method: String,
     pub crc: Option<u32>,
     pub is_dir: bool,
+    /// Whether the entry's bytes need the password.
+    pub encrypted: bool,
     /// The entry's index inside the container, for the containers read by index; none for a folder the listing
     /// fills in because the archive records no entry for it.
     pub raw: Option<usize>,
@@ -268,7 +266,12 @@ pub fn decode(codec: Codec, reader: Box<dyn Read>) -> Result<Box<dyn Read>, Arch
             lzma_rs::lzma_decompress(&mut BufReader::new(reader), &mut out).map_err(|e| ArchiveError::Bad(e.to_string()))?;
             Box::new(Cursor::new(out))
         }
-        Codec::Compress => return Err(ArchiveError::NoTool),
+        Codec::Compress => {
+            let mut packed = Vec::new();
+            let mut reader = reader;
+            reader.read_to_end(&mut packed)?;
+            Box::new(Cursor::new(uncompress(&packed).map_err(ArchiveError::Bad)?))
+        }
     })
 }
 
@@ -305,16 +308,12 @@ pub fn list(path: &Path, password: Option<&str>, tool: Option<&SevenZipTool>) ->
         }
     };
     let entries = fill_in_folders(entries);
-    let encrypted = match container {
-        Container::Zip => zip_has_encrypted(path)?,
-        Container::SevenZ => seven_z_wants_password(path),
-        _ => false,
-    };
+    let encrypted = entries.iter().any(|e| e.encrypted) || (container == Container::SevenZ && seven_z_wants_password(path));
     // A password given is checked now, on the smallest encrypted entry, so a wrong one is said at once.
     if let Some(password) = password
         && encrypted
     {
-        verify_password(path, container, &entries, password)?;
+        verify_password(path, container, &entries, password, tool)?;
     }
     Ok(Listing { container, entries, encrypted })
 }
@@ -337,7 +336,7 @@ fn fill_in_folders(entries: Vec<Entry>) -> Vec<Entry> {
                 }
                 let folder = format!("{}/", &path[..at]);
                 if known.insert(folder.clone()) {
-                    out.push(Entry { name: folder, size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, raw: None });
+                    out.push(Entry { name: folder, size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, encrypted: false, raw: None });
                 }
             }
         }
@@ -355,10 +354,18 @@ fn seven_z_entry_encrypted(archive: &sevenz_rust2::Archive, raw: usize) -> bool 
 }
 
 /// Check `password` on the smallest encrypted entry: a zip through `by_index_decrypt` (ZipCrypto's check byte
-/// or AES's verifier refuse a wrong one, a checksum catches the rest), a 7z through its reader. Nothing
-/// encrypted to try it on passes.
-fn verify_password(path: &Path, container: Container, entries: &[Entry], password: &str) -> Result<(), ArchiveError> {
+/// or AES's verifier refuse a wrong one, a checksum catches the rest), a 7z through its reader, an external
+/// archive through 7-Zip's `e -so` (which says `Wrong password`). Nothing encrypted to try it on passes.
+fn verify_password(path: &Path, container: Container, entries: &[Entry], password: &str, tool: Option<&SevenZipTool>) -> Result<(), ArchiveError> {
     match container {
+        Container::External => {
+            let listing = Listing { container, entries: entries.to_vec(), encrypted: true };
+            let smallest = entries.iter().enumerate().filter(|(_, e)| e.encrypted && !e.is_dir).min_by_key(|(_, e)| e.size).map(|(i, _)| i);
+            match smallest {
+                Some(index) => read_entry(path, &listing, index, Some(password), tool).map(|_| ()),
+                None => Ok(()),
+            }
+        }
         Container::Zip => {
             let mut archive = zip::ZipArchive::new(File::open(path)?)?;
             let mut smallest: Option<(u64, usize)> = None;
@@ -650,6 +657,107 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Unix `compress` undone: LZW with 9 to 16 bit codes, little-endian bit order, block mode (code 256 clears the
+/// table) when the header says so, and the quirk of the original: codes come in groups of eight, so when the
+/// code width grows or the table is cleared the rest of the current group is skipped.
+pub fn uncompress(input: &[u8]) -> Result<Vec<u8>, String> {
+    if input.len() < 3 || input[0] != 0x1f || input[1] != 0x9d {
+        return Err("not a compress stream (no 1f 9d header)".to_string());
+    }
+    let max_bits = (input[2] & 0x1f) as u32;
+    let block_mode = input[2] & 0x80 != 0;
+    if !(9..=16).contains(&max_bits) {
+        return Err(format!("compress: {max_bits} bits per code is outside 9 to 16"));
+    }
+    const CLEAR: u32 = 256;
+    let first_free: u32 = if block_mode { 257 } else { 256 };
+    let max_max_code: u32 = 1 << max_bits;
+    let mut prefix = vec![0u16; 1 << max_bits];
+    let mut suffix = vec![0u8; 1 << max_bits];
+    for (i, byte) in suffix.iter_mut().enumerate().take(256) {
+        *byte = i as u8;
+    }
+    let mut out = Vec::new();
+    let mut stack = Vec::new();
+    let total_bits = input.len() * 8;
+    let mut pos_bits = 24usize;
+    // Groups of eight codes count from the data start and anew after every change of width or clear (the
+    // original decoder shifts its buffer and restarts its bit position at zero there).
+    let mut group_start = pos_bits;
+    let mut n_bits = 9u32;
+    let mut max_code: u32 = (1 << n_bits) - 1;
+    let mut free_ent = first_free;
+    let mut old_code: Option<u32> = None;
+    let mut fin_char = 0u8;
+    // The rest of the current group of eight codes, skipped as the original decoder does.
+    let align = |pos_bits: usize, group_start: usize, n_bits: u32| -> usize {
+        let group = (n_bits as usize) * 8;
+        group_start + (pos_bits - group_start).div_ceil(group) * group
+    };
+    loop {
+        if free_ent > max_code {
+            pos_bits = align(pos_bits, group_start, n_bits);
+            group_start = pos_bits;
+            n_bits += 1;
+            max_code = if n_bits == max_bits { max_max_code } else { (1 << n_bits) - 1 };
+        }
+        if pos_bits + n_bits as usize > total_bits {
+            break;
+        }
+        let byte = pos_bits / 8;
+        let mut word = input[byte] as u32;
+        if let Some(b) = input.get(byte + 1) {
+            word |= (*b as u32) << 8;
+        }
+        if let Some(b) = input.get(byte + 2) {
+            word |= (*b as u32) << 16;
+        }
+        let code = (word >> (pos_bits % 8)) & ((1 << n_bits) - 1);
+        pos_bits += n_bits as usize;
+        let Some(previous) = old_code else {
+            if code >= 256 {
+                return Err("compress: the first code is no literal".to_string());
+            }
+            fin_char = code as u8;
+            out.push(fin_char);
+            old_code = Some(code);
+            continue;
+        };
+        if code == CLEAR && block_mode {
+            free_ent = first_free - 1;
+            pos_bits = align(pos_bits, group_start, n_bits);
+            group_start = pos_bits;
+            n_bits = 9;
+            max_code = (1 << n_bits) - 1;
+            continue;
+        }
+        let in_code = code;
+        let mut code = code;
+        stack.clear();
+        if code >= free_ent {
+            if code > free_ent {
+                return Err(format!("compress: code {code} is past the table ({free_ent})"));
+            }
+            stack.push(fin_char);
+            code = previous;
+        }
+        while code >= 256 {
+            stack.push(suffix[code as usize]);
+            code = prefix[code as usize] as u32;
+        }
+        fin_char = suffix[code as usize];
+        stack.push(fin_char);
+        out.extend(stack.iter().rev());
+        if free_ent < max_max_code {
+            prefix[free_ent as usize] = previous as u16;
+            suffix[free_ent as usize] = fin_char;
+            free_ent += 1;
+        }
+        old_code = Some(in_code);
+    }
+    Ok(out)
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
@@ -690,20 +798,11 @@ fn list_zip(path: &Path) -> Result<Vec<Entry>, ArchiveError> {
             method: if is_dir { String::new() } else { method_label(file.compression()) },
             crc: (!is_dir).then_some(file.crc32()),
             is_dir,
+            encrypted: file.encrypted(),
             raw: Some(i),
         });
     }
     Ok(entries)
-}
-
-fn zip_has_encrypted(path: &Path) -> Result<bool, ArchiveError> {
-    let mut archive = zip::ZipArchive::new(File::open(path)?)?;
-    for i in 0..archive.len() {
-        if archive.by_index_raw(i)?.encrypted() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn tar_stream(path: &Path, codec: Option<Codec>) -> Result<Box<dyn Read>, ArchiveError> {
@@ -734,6 +833,7 @@ fn list_tar(path: &Path, codec: Option<Codec>) -> Result<Vec<Entry>, ArchiveErro
             method: if is_dir { String::new() } else { method.clone() },
             crc: None,
             is_dir,
+            encrypted: false,
             raw: Some(i),
         });
     }
@@ -802,6 +902,7 @@ fn list_seven_z(path: &Path, password: Option<&str>) -> Result<Vec<Entry>, Archi
             method: if is_dir { String::new() } else { seven_z_method(archive, i) },
             crc: (entry.has_crc && !is_dir).then_some(entry.crc as u32),
             is_dir,
+            encrypted: seven_z_entry_encrypted(archive, i),
             raw: Some(i),
         });
     }
@@ -826,6 +927,7 @@ fn lone_entry(path: &Path, name: &str, codec: Codec) -> Result<Entry, ArchiveErr
         method: codec.label().to_string(),
         crc: None,
         is_dir: false,
+        encrypted: false,
         raw: Some(0),
     })
 }
@@ -861,7 +963,7 @@ fn list_external(path: &Path, password: Option<&str>, tool: &SevenZipTool) -> Re
 
 /// `7z l -slt` output: after the `----------` line, one block per entry with `Path = `, `Size = `,
 /// `Packed Size = `, `Modified = 2026-10-18 12:00:00`, `Attributes = D....` (or `Folder = +`), `CRC = `,
-/// `Method = `; blank lines between blocks.
+/// `Method = `, `Encrypted = +` for an entry that needs the password; blank lines between blocks.
 pub fn parse_seven_zip_listing(text: &str) -> Result<Vec<Entry>, String> {
     let body = match text.find("\n----------") {
         Some(at) => &text[at..],
@@ -900,6 +1002,7 @@ pub fn parse_seven_zip_listing(text: &str) -> Result<Vec<Entry>, String> {
                     method: String::new(),
                     crc: None,
                     is_dir: false,
+                    encrypted: false,
                     raw: None,
                 });
             }
@@ -936,6 +1039,11 @@ pub fn parse_seven_zip_listing(text: &str) -> Result<Vec<Entry>, String> {
             "Method" => {
                 if let Some(entry) = current.as_mut() {
                     entry.method = value.to_string();
+                }
+            }
+            "Encrypted" => {
+                if let Some(entry) = current.as_mut() {
+                    entry.encrypted = value == "+";
                 }
             }
             _ => {}
@@ -1018,7 +1126,7 @@ mod tests {
         assert_eq!(container_of("odd.bin", &tar), Some(Container::Tar(None)), "ustar at 257");
         assert_eq!(container_of("a.tar.gz", b"\x1f\x8b\x08\x00"), Some(Container::Tar(Some(Codec::Gzip))));
         assert_eq!(container_of("a.tgz", b""), Some(Container::Tar(Some(Codec::Gzip))));
-        assert_eq!(container_of("a.taz", b""), Some(Container::Tar(Some(Codec::Gzip))));
+        assert_eq!(container_of("a.taz", b""), Some(Container::Tar(Some(Codec::Compress))), "a taz is a tar through compress");
         assert_eq!(container_of("a.tar.bz2", b"BZh91AY&SY"), Some(Container::Tar(Some(Codec::Bzip2))));
         assert_eq!(container_of("a.tbz2", b""), Some(Container::Tar(Some(Codec::Bzip2))));
         assert_eq!(container_of("a.tar.xz", b"\xfd7zXZ\x00"), Some(Container::Tar(Some(Codec::Xz))));
@@ -1031,8 +1139,8 @@ mod tests {
         assert_eq!(container_of("note.txt.xz", b""), Some(Container::Lone(Codec::Xz)));
         assert_eq!(container_of("note.txt.lzma", b""), Some(Container::Lone(Codec::Lzma)));
         assert_eq!(container_of("note.txt.zst", b""), Some(Container::Lone(Codec::Zstd)));
-        assert_eq!(container_of("note.txt.Z", b"\x1f\x9d\x90"), Some(Container::External), "compress is 7-Zip's");
-        assert_eq!(container_of("a.tar.z", b""), Some(Container::External));
+        assert_eq!(container_of("note.txt.Z", b"\x1f\x9d\x90"), Some(Container::Lone(Codec::Compress)), "compress is a codec of its own");
+        assert_eq!(container_of("a.tar.z", b""), Some(Container::Tar(Some(Codec::Compress))));
         for ext in ["cab", "iso", "rpm", "deb", "cpio", "lha", "lzh", "arj", "chm", "xar", "wim", "dmg", "vhd", "hfs", "dd", "deskthemepack", "apk", "war", "cbz", "pk3", "pk4", "pkz", "zipx"] {
             assert!(container_of(&format!("a.{ext}"), b"").is_some(), "{ext}");
         }
@@ -1055,7 +1163,7 @@ mod tests {
 
     #[test]
     fn seven_zip_listings_parse_with_their_fields() {
-        let text = "\n7-Zip 24.08 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-08-11\n\nScanning the drive for archives:\n1 file, 1234 bytes (2 KiB)\n\nListing archive: x.rar\n\n--\nPath = x.rar\nType = Rar5\n\n----------\nPath = docs\\readme.md\nFolder = -\nSize = 42\nPacked Size = 40\nModified = 2026-10-18 12:00:00\nAttributes = A\nCRC = 1A2B3C4D\nMethod = RAR5:LZSS\n\nPath = docs\nFolder = +\nSize = 0\nPacked Size = 0\nModified = 2026-10-18 12:00:00\nAttributes = D\nCRC = \nMethod = \n\nPath = big.bin\nFolder = -\nSize = 1048576\nPacked Size = 1000\nModified = 2026-10-18 12:00:00\nAttributes = A\nCRC = 00000000\nMethod = RAR5:LZSS\n";
+        let text = "\n7-Zip 24.08 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-08-11\n\nScanning the drive for archives:\n1 file, 1234 bytes (2 KiB)\n\nListing archive: x.rar\n\n--\nPath = x.rar\nType = Rar5\n\n----------\nPath = docs\\readme.md\nFolder = -\nSize = 42\nPacked Size = 40\nModified = 2026-10-18 12:00:00\nAttributes = A\nCRC = 1A2B3C4D\nEncrypted = +\nMethod = RAR5:LZSS\n\nPath = docs\nFolder = +\nSize = 0\nPacked Size = 0\nModified = 2026-10-18 12:00:00\nAttributes = D\nCRC = \nMethod = \n\nPath = big.bin\nFolder = -\nSize = 1048576\nPacked Size = 1000\nModified = 2026-10-18 12:00:00\nAttributes = A\nCRC = 00000000\nMethod = RAR5:LZSS\n";
         let entries = parse_seven_zip_listing(text).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(
@@ -1068,10 +1176,12 @@ mod tests {
                 method: "RAR5:LZSS".to_string(),
                 crc: Some(0x1A2B3C4D),
                 is_dir: false,
+                encrypted: true,
                 raw: None,
             }
         );
         assert_eq!(entries[1].name, "docs/");
+        assert!(!entries[1].encrypted && !entries[2].encrypted, "only the entry with Encrypted = +");
         assert!(entries[1].is_dir);
         assert_eq!(entries[1].crc, None);
         assert_eq!(entries[1].method, "");
@@ -1346,7 +1456,7 @@ mod tests {
         let folder = &listing.entries[4];
         assert_eq!(
             folder,
-            &Entry { name: "d/".to_string(), size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, raw: None }
+            &Entry { name: "d/".to_string(), size: 0, packed: None, modified: None, method: String::new(), crc: None, is_dir: true, encrypted: false, raw: None }
         );
         assert_eq!(listing.entries[5].raw, Some(4), "the file keeps its own index inside the zip");
         assert_eq!(listing.entries.iter().map(|e| e.packed).collect::<Vec<_>>(), [Some(106), Some(531), Some(140), Some(25), None, Some(9)]);
@@ -1371,7 +1481,7 @@ mod tests {
         assert!(!into.join("d").join("n.txt").exists());
         let _ = std::fs::remove_dir_all(&into);
         // The fill-in itself: every missing parent, once, before the first child; `.` and `..` never.
-        let file = |name: &str| Entry { name: name.to_string(), size: 1, packed: None, modified: None, method: String::new(), crc: None, is_dir: false, raw: Some(0) };
+        let file = |name: &str| Entry { name: name.to_string(), size: 1, packed: None, modified: None, method: String::new(), crc: None, is_dir: false, encrypted: false, raw: Some(0) };
         let filled = fill_in_folders(vec![file("a/b/c.txt"), file("a/d.txt"), file("../x.txt"), file("./y.txt"), file("a/b/e.txt")]);
         assert_eq!(filled.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["a/", "a/b/", "a/b/c.txt", "a/d.txt", "../x.txt", "./y.txt", "a/b/e.txt"]);
         assert!(filled[0].is_dir && filled[1].is_dir && filled[0].raw.is_none());
@@ -1396,6 +1506,93 @@ mod tests {
         assert_eq!(std::fs::read(into.join("d").join("n.txt")).unwrap(), b"nested
 ");
         let _ = std::fs::remove_dir_all(&into);
+    }
+
+    #[test]
+    fn compress_streams_decode_natively_as_lone_files_and_tars() {
+        // `note.txt.Z` and `bundle.tar.Z` come from xtask's own LZW writer (the real 7-Zip reads both back to the
+        // same bytes); `hand.txt.Z` was written by hand by another writer and read back the same by 7-Zip.
+        let note = fixture("note.txt.Z");
+        let listing = list(&note, None, None).unwrap();
+        assert_eq!(listing.container, Container::Lone(Codec::Compress));
+        let entry = &listing.entries[0];
+        assert_eq!(
+            (entry.name.as_str(), entry.size, entry.packed, entry.method.as_str(), entry.modified.as_deref()),
+            ("note.txt", 26, Some(33), "compress", None)
+        );
+        assert_eq!(read_entry(&note, &listing, 0, None, None).unwrap(), b"A note, compressed alone.\n");
+        assert_eq!(listing.describe("note.txt.Z", Some(33)), "Z, 1 entry, 33 B packed from 26 B");
+        assert_eq!(uncompress(&std::fs::read(fixture("hand.txt.Z")).unwrap()).unwrap(), b"A note, compressed alone.\n");
+        let tar = fixture("bundle.tar.Z");
+        let listing = list(&tar, None, None).unwrap();
+        assert_eq!(listing.container, Container::Tar(Some(Codec::Compress)));
+        let plain = list(&fixture("bundle.tar"), None, None).unwrap();
+        let through: Vec<(&str, u64, bool)> = listing.entries.iter().map(|e| (e.name.as_str(), e.size, e.is_dir)).collect();
+        let expected: Vec<(&str, u64, bool)> = plain.entries.iter().map(|e| (e.name.as_str(), e.size, e.is_dir)).collect();
+        assert_eq!(through, expected);
+        assert_eq!(listing.entries[0].method, "compress");
+        assert_eq!(read_entry(&tar, &listing, 4, None, None).unwrap(), "Unicode name\n".as_bytes());
+        assert_eq!(read_entry(&tar, &listing, 3, None, None).unwrap(), std::fs::read(fixture("dot.png")).unwrap());
+        assert_eq!(listing.describe("bundle.tar.Z", Some(574)), "TAR.Z, 5 entries, 574 B packed from 258 B");
+        // The whole stream: 5632 bytes of tar out of 574, through the 9, 10 and 11 bit code widths.
+        assert_eq!(uncompress(&std::fs::read(&tar).unwrap()).unwrap(), std::fs::read(fixture("bundle.tar")).unwrap());
+        // Bad streams say so.
+        assert_eq!(uncompress(b"PK\x03\x04"), Err("not a compress stream (no 1f 9d header)".to_string()));
+        assert_eq!(uncompress(b"\x1f\x9d\x88"), Err("compress: 8 bits per code is outside 9 to 16".to_string()));
+        assert_eq!(uncompress(b"\x1f\x9d\x90"), Ok(Vec::new()), "a header alone is an empty file");
+        assert_eq!(uncompress(b"\x1f\x9d\x90\x00\x01"), Err("compress: the first code is no literal".to_string()));
+        assert_eq!(lone_entry_name("note.txt.Z"), "note.txt");
+    }
+
+    #[test]
+    fn external_archives_through_the_stand_in_say_what_they_need() {
+        // The 7-Zip stand-in (`tests/stubs/sevenzip.{cmd,sh}`), driven as the real tool is: `--` before the
+        // archive, `-spd` and the name for one entry, an include list for an extraction.
+        let stub = if cfg!(windows) { "sevenzip.cmd" } else { "sevenzip.sh" };
+        let tool = SevenZipTool(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("stubs").join(stub));
+        let plain = fixture("fake.rar");
+        assert!(matches!(list(&plain, None, None), Err(ArchiveError::NoTool)), "no 7-Zip, no listing");
+        let listing = list(&plain, None, Some(&tool)).unwrap();
+        assert_eq!(listing.container, Container::External);
+        assert!(!listing.encrypted);
+        assert_eq!(
+            listing.entries.iter().map(|e| (e.name.as_str(), e.size, e.packed, e.is_dir, e.encrypted)).collect::<Vec<_>>(),
+            [
+                ("docs/readme.md", 20, Some(18), false, false),
+                ("docs/", 0, Some(0), true, false),
+                ("big.bin", 1_048_576, Some(1000), false, false),
+                ("../climb.txt", 4, Some(4), false, false),
+            ]
+        );
+        assert_eq!(listing.describe("fake.rar", Some(40)), "RAR, 4 entries, 1022 B packed from 1.0 MB");
+        assert!(read_entry(&plain, &listing, 0, None, Some(&tool)).unwrap().starts_with(b"# Readme from a rar"));
+        assert!(matches!(read_entry(&plain, &listing, 1, None, Some(&tool)), Err(ArchiveError::Bad(reason)) if reason == "docs/ is a folder"));
+        let into = std::env::temp_dir().join(format!("sfoglia-archive-external-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&into);
+        let done = extract(&plain, &listing, Some(&[2]), &into, None, Some(&tool)).unwrap();
+        assert_eq!(done.written, [into.join("big.bin")]);
+        assert!(!into.join("docs").exists(), "only the selected entry was named to 7-Zip");
+        let done = extract(&plain, &listing, None, &into, None, Some(&tool)).unwrap();
+        assert_eq!(done.skipped, ["../climb.txt"]);
+        assert_eq!(done.written, [into.join("docs").join("readme.md"), into.join("docs"), into.join("big.bin")]);
+        assert!(!into.join("climb.txt").exists() && !into.parent().unwrap().join("climb.txt").exists(), "the climbing entry was never named");
+        let _ = std::fs::remove_dir_all(&into);
+        // Encrypted headers (`*secret*`): nothing lists without the password.
+        let secret = fixture("fake-secret.rar");
+        assert!(matches!(list(&secret, None, Some(&tool)), Err(ArchiveError::NeedsPassword)));
+        assert!(matches!(list(&secret, Some("nope"), Some(&tool)), Err(ArchiveError::WrongPassword)));
+        assert_eq!(list(&secret, Some("sfoglia"), Some(&tool)).unwrap().entries.len(), 4);
+        // Encrypted entries under clear headers (`*entries*`, a rar made with plain -p): listed, asked on reading.
+        let entries = fixture("fake-entries.rar");
+        let listing = list(&entries, None, Some(&tool)).unwrap();
+        assert!(listing.encrypted, "7-Zip's `Encrypted = +` lines");
+        assert_eq!(listing.entries.iter().map(|e| e.encrypted).collect::<Vec<_>>(), [true, false, true, false]);
+        assert_eq!(listing.entries[0].method, "AES RAR5:LZSS");
+        assert!(matches!(read_entry(&entries, &listing, 0, None, Some(&tool)), Err(ArchiveError::NeedsPassword)));
+        assert!(matches!(read_entry(&entries, &listing, 0, Some("nope"), Some(&tool)), Err(ArchiveError::WrongPassword)));
+        assert!(matches!(list(&entries, Some("nope"), Some(&tool)), Err(ArchiveError::WrongPassword)), "a password given is checked on the smallest encrypted entry");
+        assert!(read_entry(&entries, &listing, 0, Some("sfoglia"), Some(&tool)).unwrap().starts_with(b"# Readme from a rar"));
+        assert!(list(&entries, Some("sfoglia"), Some(&tool)).unwrap().encrypted);
     }
 
     /// The CRC-32 the zip and 7z formats record (IEEE), for the expected values.

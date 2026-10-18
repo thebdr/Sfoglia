@@ -491,6 +491,61 @@ fn three_pdf() -> Vec<u8> {
     out.into_bytes()
 }
 
+
+/// Unix `compress` (LZW, 16-bit codes, block mode) as ncompress writes it: codes little-endian in groups of
+/// eight, the rest of a group written zero-filled when the code width grows; no clear code is ever sent (a
+/// fixture never fills the table).
+fn compress_lzw(input: &[u8]) -> Vec<u8> {
+    use std::collections::HashMap;
+    const MAX_BITS: u32 = 16;
+    let max_max_code: u32 = 1 << MAX_BITS;
+    let mut out = vec![0x1f, 0x9d, 0x80 | MAX_BITS as u8];
+    let mut bits: u64 = 0;
+    let mut count: u32 = 0;
+    let mut n_bits: u32 = 9;
+    let mut max_code: u32 = (1 << n_bits) - 1;
+    let mut free_ent: u32 = 257;
+    let mut in_group: u32 = 0;
+    let mut dict: HashMap<(u32, u8), u32> = HashMap::new();
+    let Some((&first, rest)) = input.split_first() else { return out };
+    let mut ent = first as u32;
+    let emit = |code: u32, n_bits: u32, out: &mut Vec<u8>, bits: &mut u64, count: &mut u32, in_group: &mut u32| {
+        *bits |= (code as u64) << *count;
+        *count += n_bits;
+        while *count >= 8 {
+            out.push(*bits as u8);
+            *bits >>= 8;
+            *count -= 8;
+        }
+        *in_group = (*in_group + 1) % 8;
+    };
+    for &c in rest {
+        if let Some(&code) = dict.get(&(ent, c)) {
+            ent = code;
+            continue;
+        }
+        emit(ent, n_bits, &mut out, &mut bits, &mut count, &mut in_group);
+        if free_ent > max_code {
+            // The original writes the whole group of eight codes before it changes the width.
+            while in_group != 0 {
+                emit(0, n_bits, &mut out, &mut bits, &mut count, &mut in_group);
+            }
+            n_bits += 1;
+            max_code = if n_bits == MAX_BITS { max_max_code } else { (1 << n_bits) - 1 };
+        }
+        if free_ent < max_max_code {
+            dict.insert((ent, c), free_ent);
+            free_ent += 1;
+        }
+        ent = c as u32;
+    }
+    emit(ent, n_bits, &mut out, &mut bits, &mut count, &mut in_group);
+    if count > 0 {
+        out.push(bits as u8);
+    }
+    out
+}
+
 /// The archive fixtures (C-015): the same five entries in a zip (one method each), a tar plain and through
 /// every codec, a 7z, an encrypted 7z, a lone compressed note per codec, and two archives with an entry that
 /// climbs out of its folder. One fixed time, so the bytes are the same on every run (the encrypted 7z salts
@@ -590,6 +645,9 @@ fn archives(root: &Path) -> Result<(), String> {
     std::fs::write(fixtures.join("note.txt.xz"), xz(note)?).map_err(|e| err(&e))?;
     std::fs::write(fixtures.join("note.txt.lzma"), lzma(note)?).map_err(|e| err(&e))?;
     std::fs::write(fixtures.join("note.txt.zst"), zst(note)?).map_err(|e| err(&e))?;
+    // Unix compress, written here (no tool on this machine writes it): a lone note and the tar through it.
+    std::fs::write(fixtures.join("note.txt.Z"), compress_lzw(note)).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("bundle.tar.Z"), compress_lzw(&tar_bytes)).map_err(|e| err(&e))?;
     {
         let mut builder = tar::Builder::new(Vec::new());
         for (name, bytes) in [("../climb.txt", &b"out\n"[..]), ("ok.txt", &b"fine\n"[..])] {
@@ -727,6 +785,9 @@ fn archives(root: &Path) -> Result<(), String> {
             println!("wrote {}", entries.display());
         }
     }
+    // A rar by signature whose entries the stand-in reports encrypted, its headers in the clear: the bytes of
+    // `fake-secret.rar`, under the name that drives the stand-in.
+    std::fs::copy(fixtures.join("fake.rar"), fixtures.join("fake-entries.rar")).map_err(|e| err(&e))?;
     // A rar by signature whose name asks the 7-Zip stand-in for a password.
     std::fs::write(fixtures.join("fake-secret.rar"), [b"Rar!\x1a\x07\x01\x00".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;
     Ok(())

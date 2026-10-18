@@ -5,8 +5,9 @@
 #   e -so -y -sccUTF-8 -spd -pPW -- ARCHIVE ENTRY                  one entry's bytes on stdout
 #   x -oDIR -y -sccUTF-8 -scsUTF-8 -spd -i@LIST -pPW -- ARCHIVE    the entries the list file names, written
 # Every call must carry -sccUTF-8 and end its switches with -- (so a name is never a switch); x must name its
-# entries through the list file (the real 7-Zip would write everything otherwise); an archive named *secret*
-# opens with -psfoglia alone and answers as the real 7-Zip does otherwise.
+# entries through the list file (the real 7-Zip would write everything otherwise). An archive named *secret*
+# opens with -psfoglia alone (encrypted headers); one named *entries* lists in the clear but its files need the
+# password, as a rar made with plain -p; both answer as the real 7-Zip does otherwise.
 here=$(dirname "$0")
 if [ "$#" -eq 0 ]; then
   echo "7-Zip 24.08 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-08-11"
@@ -41,6 +42,13 @@ case "$archive" in
       exit 2
     fi ;;
 esac
+locked=0
+case "$archive" in *entries*|*Entries*|*ENTRIES*) locked=1 ;; esac
+if [ "$locked" = "1" ] && [ "$cmd" != "l" ] && [ "$pw" != "sfoglia" ]; then
+  echo
+  echo "ERROR: Wrong password : $entry"
+  exit 2
+fi
 write() {
   case "$2" in
     docs/readme.md) mkdir -p "$1/docs"; echo "# Readme from a rar" > "$1/docs/readme.md" ;;
@@ -61,7 +69,11 @@ case "$cmd" in
     echo "Path = $archive"
     echo "Type = Rar5"
     echo
-    cat "$here/sevenzip-listing.txt"
+    if [ "$locked" = "1" ]; then
+      cat "$here/sevenzip-listing-encrypted.txt"
+    else
+      cat "$here/sevenzip-listing.txt"
+    fi
     exit 0 ;;
   e)
     case "$entry" in

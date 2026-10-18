@@ -296,16 +296,19 @@ fn join_names(names: &[&str]) -> String {
     }
 }
 
-/// The version the tool reports: its version resource on Windows (an `.exe`), else the first number with a
-/// dot in what it prints when asked.
+/// The version the tool reports: what it prints when asked (the first number with a dot; 7-Zip says `26.04`,
+/// which its version resource rounds to `26.4`), else its version resource on Windows (an `.exe` that cannot be
+/// asked, SumatraPDF).
 pub fn version_of(tool: Tool, path: &Path) -> Option<String> {
-    if let Some(version) = resource_version(path) {
-        return Some(version);
+    if let Some(args) = tool.version_arguments()
+        && let Ok(output) = Command::new(path).args(args).output()
+    {
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        if let Some(version) = parse_version(&text) {
+            return Some(version);
+        }
     }
-    let args = tool.version_arguments()?;
-    let output = Command::new(path).args(args).output().ok()?;
-    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    parse_version(&text)
+    resource_version(path)
 }
 
 /// `mutool version 1.24.9` → `1.24.9`; `7-Zip 24.08 (x64) : Copyright` → `24.08`; nothing → none.

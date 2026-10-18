@@ -423,6 +423,36 @@ fn an_entry_opens_inside_sfoglia_read_only_in_its_own_viewer(cx: &mut TestAppCon
         assert_eq!(panels.len(), 4, "the double-clicked image opened");
         assert_eq!(panels[3].read(cx).tab_name(cx).map(|s| s.to_string()), Some("bundle.zip › data/dot.png".to_string()));
         assert!(panels[3].read(cx).image_view().is_some(), "a .png entry opens in the image viewer");
+    })
+    .unwrap();
+    // The same path inside another archive is another entry, in a tab named after that archive, while the first
+    // archive's tab of the same name is open.
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("bundle.7z")], window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let seven = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let panels = workspace.read(cx).panels(cx);
+            assert_eq!(panels.len(), 5);
+            let seven = panels[4].read(cx).archive_view().expect("the 7z opens in the archive viewer").clone();
+            assert_eq!(names(&seven, cx)[0], "readme.md");
+            press_enter_on(&seven, 0, window, cx);
+            seven
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 6, "a tab of its own, not bundle.zip's readme.md");
+        assert_eq!(panels[5].read(cx).tab_name(cx).map(|s| s.to_string()), Some("bundle.7z › readme.md".to_string()));
+        assert_eq!(panels[5].read(cx).info().origin.as_ref().map(|o| o.archive.clone()), Some(fixture("bundle.7z")));
+        assert_eq!(seven.read(cx).message(), Some("opening readme.md"));
+        assert_eq!(workspace.read(cx).active_panel(cx).map(|p| p.entity_id()), Some(panels[5].entity_id()));
         // Closing the entry tab removes its folder.
         workspace.read(cx).dock_area().clone().update(cx, |dock, cx| dock.remove_panel(entry_panel.clone(), window, cx));
     })
@@ -431,7 +461,7 @@ fn an_entry_opens_inside_sfoglia_read_only_in_its_own_viewer(cx: &mut TestAppCon
     cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(workspace.read(cx).panels(cx).len(), 3);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 5);
     })
     .unwrap();
     cx.run_until_parked();
@@ -717,6 +747,54 @@ fn an_exotic_container_goes_through_seven_zip_or_says_what_to_install(cx: &mut T
         assert_eq!(names(&secret, cx), strings(&["docs/readme.md", "docs/", "big.bin", "../climb.txt"]));
         assert_eq!(label(window, "archive-summary"), "RAR, 4 entries, 1022 B packed from 1.0 MB");
         assert!(window.try_find("archive-password").is_none(), "the entries list in the clear once the password is right");
+        // An archive whose entries are encrypted under clear headers (a rar made with plain -p): listed at once,
+        // the password field beside the list, a wrong password said on Unlock, the right one opens.
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("fake-entries.rar")], window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let locked = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let panels = workspace.read(cx).panels(cx);
+            assert_eq!(panels.len(), 4);
+            let locked = panels[3].read(cx).archive_view().expect("the archive viewer").clone();
+            assert_eq!(locked.read(cx).state_name(), "listed");
+            assert!(locked.read(cx).listing().is_some_and(|l| l.encrypted));
+            assert_eq!(names(&locked, cx), strings(&["docs/readme.md", "docs/", "big.bin", "../climb.txt"]));
+            assert_eq!(rows(&locked, cx)[0][4], "AES RAR5:LZSS");
+            assert!(window.try_find("archive-password").is_some(), "the entries are encrypted: the field shows beside the list");
+            press_enter_on(&locked, 0, window, cx);
+            locked
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).panels(cx).len(), 4, "nothing opened without the password");
+        assert_eq!(label(window, "archive-message"), "the archive is encrypted: it needs its password");
+        let password = locked.read(cx).password_input().clone();
+        password.update(cx, |state, cx| state.set_value("nope", window, cx));
+        window.click("archive-unlock", cx);
+        window.render_frame(cx);
+        assert_eq!(label(window, "archive-message"), "wrong password (try 1)");
+        assert_eq!(locked.read(cx).state_name(), "listed");
+        assert_eq!(names(&locked, cx).len(), 4, "the list stays");
+        password.update(cx, |state, cx| state.set_value("sfoglia", window, cx));
+        window.click("archive-unlock", cx);
+        window.render_frame(cx);
+        assert_eq!(locked.read(cx).message(), None);
+        press_enter_on(&locked, 0, window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let panels = workspace.read(cx).panels(cx);
+        assert_eq!(panels.len(), 5);
+        assert_eq!(panels[4].read(cx).tab_name(cx).map(|s| s.to_string()), Some("fake-entries.rar › docs/readme.md".to_string()));
+        assert!(std::fs::read(&panels[4].read(cx).info().path).unwrap().starts_with(b"# Readme from a rar"));
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&out);

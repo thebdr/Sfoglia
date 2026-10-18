@@ -52,6 +52,15 @@ if not errorlevel 1 if not "%pw%"=="sfoglia" (
   echo ERROR: %archive% : Cannot open encrypted archive. Wrong password?
   exit /b 2
 )
+rem An archive named *entries* lists in the clear but its files need the password, as a rar made with plain -p.
+set "locked=0"
+echo.%archive%| findstr /i "entries" >nul
+if not errorlevel 1 set "locked=1"
+if "%locked%"=="1" if not "%cmd%"=="l" if not "%pw%"=="sfoglia" (
+  echo.
+  echo ERROR: Wrong password : %entry%
+  exit /b 2
+)
 if "%cmd%"=="l" goto list
 if "%cmd%"=="e" goto one
 if "%cmd%"=="x" goto all
@@ -68,7 +77,11 @@ echo --
 echo Path = %archive%
 echo Type = Rar5
 echo.
-type "%~dp0sevenzip-listing.txt"
+if "%locked%"=="1" (
+  type "%~dp0sevenzip-listing-encrypted.txt"
+) else (
+  type "%~dp0sevenzip-listing.txt"
+)
 exit /b 0
 
 :one

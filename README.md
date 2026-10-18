@@ -87,7 +87,7 @@ entry opens it inside Sfoglia, read-only (a save says so), in the viewer its nam
 closes. `Extract all` and `Extract selected` ask for a folder and write the entries with their paths inside it, never
 outside it (an entry whose path climbs out is skipped and named in the status row). The containers read here are zip
 (stored, deflate, bzip2, zstd and lzma entries), 7z (LZMA, LZMA2, BCJ, AES with a password), tar plain or through gzip,
-bzip2, xz, lzma or zstd (`tgz`, `tbz2`, `txz`, `tzst` and the rest of the spellings too), and a lone compressed file as a
+bzip2, xz, lzma, zstd or Unix compress (`tgz`, `tbz2`, `txz`, `tzst`, `taz` and the rest of the spellings too), and a lone compressed file as a
 one-entry archive named after the file without its suffix; the container is told by the bytes first, so a `.zip` that
 holds a 7z opens as a 7z. An encrypted archive (a zip with AES or ZipCrypto entries, a 7z with encrypted entries or
 headers) asks for the password in the tools row, checks it on `Unlock` and says so after a wrong one, counting the
