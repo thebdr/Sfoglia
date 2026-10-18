@@ -4,7 +4,10 @@
 
 ## Status
 
-Early. The application shell opens a window; everything else is planned. [FORMATS.md](FORMATS.md) is the checklist of every extension Sfoglia intends to read or write and how far each family has come.
+Growing clause by clause. Sfoglia opens text and source files with highlighting rules, edits and saves them, shows
+images, structured data, Markdown, spreadsheets and delimited tables, PDF and XPS (through SumatraPDF on Windows or a
+page renderer), and the bytes of anything else; the window asks before closing modified tabs. [FORMATS.md](FORMATS.md)
+is the checklist of every extension Sfoglia intends to read or write and how far each family has come.
 
 ## Open files
 
