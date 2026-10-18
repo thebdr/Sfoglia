@@ -194,6 +194,8 @@ pub struct SheetView {
     disk_changed: bool,
     seen_operations: u64,
     seen_reloads: u64,
+    /// Why the file may not be saved (an archive entry, C-015), handed to the text view when it is built.
+    read_only: Option<String>,
     _subscriptions: Vec<Subscription>,
     _watch: Task<()>,
 }
@@ -255,6 +257,7 @@ impl SheetView {
             disk_changed: false,
             seen_operations: 0,
             seen_reloads: 0,
+            read_only: None,
             _subscriptions: vec![on_search, on_edit, on_table],
             _watch: watch,
         };
@@ -566,11 +569,23 @@ impl SheetView {
     }
 
     /// Build the text viewer on the file's bytes the first time it is needed (delimited files only).
+    /// The file may not be saved, for `reason` (an archive entry): the raw text, now or when built, says so.
+    pub fn set_read_only(&mut self, reason: String, cx: &mut Context<Self>) {
+        if let Some(text) = &self.text {
+            text.update(cx, |text, cx| text.set_read_only(reason.clone(), cx));
+        }
+        self.read_only = Some(reason);
+        cx.notify();
+    }
+
     fn ensure_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextView> {
         if let Some(text) = &self.text {
             return text.clone();
         }
         let text = cx.new(|cx| TextView::new_as_read(&self.path, &self.bytes, self.read_at, &self.rules, window, cx));
+        if let Some(reason) = &self.read_only {
+            text.update(cx, |text, cx| text.set_read_only(reason.clone(), cx));
+        }
         self._subscriptions.push(cx.observe_in(&text, window, |this, _, window, cx| this.follow_text(String::new(), window, cx)));
         self.text = Some(text.clone());
         self.bytes = Vec::new();

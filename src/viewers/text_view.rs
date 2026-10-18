@@ -77,6 +77,8 @@ pub struct TextView {
     save_endings: LineEndings,
     /// Whether the text may be edited: a file with undecodable units is read-only.
     editable: bool,
+    /// Why the text may not be saved, when a reason beyond its bytes was given (an archive entry, C-015).
+    read_only_reason: Option<String>,
     dirty: bool,
     /// What the last save or failed save said.
     message: Option<String>,
@@ -159,6 +161,7 @@ impl TextView {
             save_encoding: encoding,
             save_endings: line_endings,
             editable: replaced == 0,
+            read_only_reason: None,
             dirty: false,
             message: None,
             operations: 0,
@@ -243,6 +246,13 @@ impl TextView {
     /// Whether the text may be edited.
     pub fn is_editable(&self) -> bool {
         self.editable
+    }
+
+    /// The text may not be saved, for `reason`: the editor turns read-only and a save says why.
+    pub fn set_read_only(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.editable = false;
+        self.read_only_reason = Some(reason);
+        cx.notify();
     }
 
     /// Whether another program changed the file since it was read or written.
@@ -346,7 +356,7 @@ impl TextView {
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         self.operations += 1;
         if !self.editable {
-            let error = "this file has undecodable units and is read-only".to_string();
+            let error = self.read_only_reason.clone().unwrap_or_else(|| "this file has undecodable units and is read-only".to_string());
             self.message = Some(error.clone());
             cx.notify();
             return Err(error);
@@ -405,7 +415,7 @@ impl TextView {
                 self.status.replaced = replaced;
                 self.save_encoding = encoding;
                 self.save_endings = line_endings;
-                self.editable = replaced == 0;
+                self.editable = replaced == 0 && self.read_only_reason.is_none();
                 self.message = None;
                 self.dirty = false;
                 self.reloads += 1;

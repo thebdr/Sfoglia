@@ -21,6 +21,7 @@ use gpui_kit::{
     Window, actions, div, px,
 };
 
+use crate::archive::TempFolder;
 use crate::detect::{Content, Detection, Route, SNIFF_BYTES, detect};
 use crate::generated::families::Family;
 use crate::hex::HexFile;
@@ -30,10 +31,11 @@ use crate::tools::ToolSet;
 use crate::viewers::data_view::{self, Collapse, CopyPath, Expand, PrettyPrint, SelectDown, SelectUp, ToggleNode, ToggleRaw};
 use crate::viewers::hex_view::{self, FocusGoto, FocusSearch, ToggleSearchMode};
 use crate::viewers::image_view::{self, RotateQuarter, ZoomActual, ZoomFit, ZoomIn, ZoomOut};
+use crate::viewers::archive_view::{self, OpenArchiveEntry};
 use crate::viewers::markdown_view::{self, OpenLinkedFile};
 use crate::viewers::pdf_view::{self, PdfView};
 use crate::viewers::sheet_view;
-use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, SheetView, TextView};
+use crate::viewers::{ArchiveView, DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, SheetView, TextView};
 
 actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs, CloseTab]);
 
@@ -72,6 +74,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", markdown_view::ToggleRaw, Some(markdown_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-d", sheet_view::ToggleRaw, Some(sheet_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-f", sheet_view::FocusSearch, Some(sheet_view::KEY_CONTEXT)),
+        KeyBinding::new("enter", archive_view::OpenEntry, Some(archive_view::ROWS_CONTEXT)),
+        KeyBinding::new("up", archive_view::SelectUp, Some(archive_view::ROWS_CONTEXT)),
+        KeyBinding::new("down", archive_view::SelectDown, Some(archive_view::ROWS_CONTEXT)),
+        KeyBinding::new("home", archive_view::SelectFirst, Some(archive_view::ROWS_CONTEXT)),
+        KeyBinding::new("end", archive_view::SelectLast, Some(archive_view::ROWS_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", archive_view::FocusSearch, Some(archive_view::KEY_CONTEXT)),
         KeyBinding::new("+", pdf_view::ZoomIn, Some(pdf_view::KEY_CONTEXT)),
         KeyBinding::new("=", pdf_view::ZoomIn, Some(pdf_view::KEY_CONTEXT)),
         KeyBinding::new("-", pdf_view::ZoomOut, Some(pdf_view::KEY_CONTEXT)),
@@ -80,6 +88,26 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-f", FocusSearch, Some(hex_view::KEY_CONTEXT)),
         KeyBinding::new("ctrl-m", ToggleSearchMode, Some(hex_view::KEY_CONTEXT)),
     ]);
+}
+
+/// Where an entry tab's file comes from (C-015): the archive and the path inside it; the folder holding the
+/// file goes when the tab does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryOrigin {
+    pub archive: PathBuf,
+    pub inside: String,
+    pub folder: Arc<TempFolder>,
+}
+
+impl EntryOrigin {
+    pub fn archive_name(&self) -> String {
+        self.archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// `bundle.zip › data/table.csv`.
+    pub fn label(&self) -> String {
+        format!("{} › {}", self.archive_name(), self.inside)
+    }
 }
 
 /// What is known about an open file.
@@ -91,6 +119,8 @@ pub struct FileInfo {
     pub detection: Detection,
     /// Set when the file could not be read; the tab still opens and says so.
     pub error: Option<String>,
+    /// Set for an entry opened out of an archive (C-015).
+    pub origin: Option<EntryOrigin>,
 }
 
 impl FileInfo {
@@ -120,6 +150,7 @@ impl FileInfo {
             name,
             size,
             error,
+            origin: None,
         }
     }
 
@@ -144,6 +175,8 @@ enum PanelView {
     Sheet(Entity<SheetView>),
     /// A PDF or XPS through SumatraPDF or a page renderer (C-014).
     Pdf(Entity<PdfView>),
+    /// An archive's entries (C-015).
+    Archive(Entity<ArchiveView>),
 }
 
 /// One open file: a tab in the centre of the dock.
@@ -196,6 +229,8 @@ impl FilePanel {
                 let kind = pdf_view::kind_for(&info.path, &info.detection.content);
                 PdfView::new(&info.path, kind, tools.clone(), window, cx)
             }))
+        } else if info.error.is_none() && info.route() == Route::Family(Family::Archives) {
+            PanelView::Archive(cx.new(|cx| ArchiveView::new(&info.path, tools.clone(), window, cx)))
         } else if Self::opens_as_text(&info) {
             match std::fs::read(&info.path) {
                 Ok(bytes) => PanelView::Text(
@@ -206,6 +241,17 @@ impl FilePanel {
         } else {
             PanelView::Info
         };
+        // An entry of an archive is read-only inside Sfoglia (C-015): a save says so.
+        if let Some(origin) = &info.origin {
+            let reason = format!("read-only: an entry of {}; extract it to edit a copy", origin.archive_name());
+            match &view {
+                PanelView::Text(v) => v.update(cx, |v, cx| v.set_read_only(reason, cx)),
+                PanelView::Data(v) => v.update(cx, |v, cx| v.set_read_only(reason, cx)),
+                PanelView::Markdown(v) => v.update(cx, |v, cx| v.set_read_only(reason, cx)),
+                PanelView::Sheet(v) => v.update(cx, |v, cx| v.set_read_only(reason, cx)),
+                PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Archive(_) | PanelView::Info => {}
+            }
+        }
         // The tab's name and its close permission follow the text view's modified state.
         let observe_text = match &view {
             PanelView::Text(text) => Some(cx.observe(text, |_, _, cx| {
@@ -224,7 +270,7 @@ impl FilePanel {
                 cx.emit(PanelEvent::LayoutChanged);
                 cx.notify();
             })),
-            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => None,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Archive(_) | PanelView::Info => None,
         };
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
@@ -260,6 +306,10 @@ impl FilePanel {
                 window.focus(&focus, cx);
             }
             PanelView::Pdf(view) => {
+                let focus = view.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            PanelView::Archive(view) => {
                 let focus = view.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
@@ -328,6 +378,14 @@ impl FilePanel {
         }
     }
 
+    /// The archive viewer, while it shows (C-015).
+    pub fn archive_view(&self) -> Option<&Entity<ArchiveView>> {
+        match &self.view {
+            PanelView::Archive(view) if !self.hex_shown => Some(view),
+            _ => None,
+        }
+    }
+
     /// Whether the dock shows this tab (the active tab of its group).
     pub fn shown_by_dock(&self) -> bool {
         self.active
@@ -358,7 +416,7 @@ impl FilePanel {
             PanelView::Data(view) => view.read(cx).text_view().cloned(),
             PanelView::Markdown(view) => Some(view.read(cx).text_view().clone()),
             PanelView::Sheet(view) => view.read(cx).text_view().cloned(),
-            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => None,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Archive(_) | PanelView::Info => None,
         }
     }
 
@@ -415,17 +473,17 @@ impl FilePanel {
             PanelView::Data(data) => data.read(cx).is_dirty(cx),
             PanelView::Markdown(view) => view.read(cx).is_dirty(cx),
             PanelView::Sheet(view) => view.read(cx).is_dirty(cx),
-            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Info => false,
+            PanelView::Image(_) | PanelView::Pdf(_) | PanelView::Archive(_) | PanelView::Info => false,
         }
     }
 
     /// The tab's name: the file name, with a dot while it has unsaved edits.
     fn tab_label(&self, cx: &App) -> String {
-        if self.is_dirty(cx) {
-            format!("{} •", self.info.name)
-        } else {
-            self.info.name.clone()
-        }
+        let name = match &self.info.origin {
+            Some(origin) => origin.label(),
+            None => self.info.name.clone(),
+        };
+        if self.is_dirty(cx) { format!("{name} •") } else { name }
     }
 }
 
@@ -476,6 +534,7 @@ impl Focusable for FilePanel {
             PanelView::Markdown(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Sheet(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             PanelView::Pdf(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
+            PanelView::Archive(view) if !self.hex_shown => view.read(cx).focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -548,6 +607,14 @@ impl Render for FilePanel {
                 .into_any_element();
         }
         if let PanelView::Pdf(view) = &self.view {
+            return div()
+                .id("file-panel")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(view.clone())
+                .into_any_element();
+        }
+        if let PanelView::Archive(view) = &self.view {
             return div()
                 .id("file-panel")
                 .track_focus(&self.focus_handle)
@@ -779,17 +846,48 @@ impl Workspace {
                 continue;
             }
             let info = FileInfo::probe(path);
-            let rules = self.rules.clone();
-            let tools = self.tools.clone();
-            let panel = cx.new(|cx| FilePanel::new(info, &rules, &tools, window, cx));
-            // The kit's handle carries the panel's title; a bare entity would show its panel_name.
-            let handle = panel_handle(panel.clone());
-            self.dock_area.update(cx, |dock, cx| {
-                dock.add_panel_view(handle, DockPlacement::Center, None, window, cx)
-            });
-            self.open.push(OpenFile { key, panel });
+            self.open_info(key, info, window, cx);
         }
         cx.notify();
+    }
+
+    /// A tab for `info`, remembered under `key` so the next open of the same file finds it.
+    fn open_info(&mut self, key: PathBuf, info: FileInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let rules = self.rules.clone();
+        let tools = self.tools.clone();
+        let panel = cx.new(|cx| FilePanel::new(info, &rules, &tools, window, cx));
+        // The kit's handle carries the panel's title; a bare entity would show its panel_name.
+        let handle = panel_handle(panel.clone());
+        self.dock_area.update(cx, |dock, cx| dock.add_panel_view(handle, DockPlacement::Center, None, window, cx));
+        self.open.push(OpenFile { key, panel });
+        cx.notify();
+    }
+
+    /// An archive view asks for an entry to open (C-015): the entry's tab, if it is open already, comes to
+    /// the front; else the view writes the entry into a folder of its own and a tab opens on it, read-only.
+    fn on_open_archive_entry(&mut self, action: &OpenArchiveEntry, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.panels(cx).iter().find_map(|panel| {
+            let view = panel.read(cx).archive_view()?.clone();
+            same_file(view.read(cx).path(), &action.archive).then_some(view)
+        }) else {
+            return;
+        };
+        let Some(inside) = view.read(cx).entry_name(action.index) else { return };
+        let open_already = self.panels(cx).into_iter().find(|panel| {
+            panel.read(cx).info.origin.as_ref().is_some_and(|o| o.inside == inside && same_file(&o.archive, &action.archive))
+        });
+        if let Some(panel) = open_already {
+            let id = PanelId::from(panel.entity_id());
+            self.dock_area.update(cx, |dock, cx| dock.select_panel(id, window, cx));
+            let focus = panel.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            cx.notify();
+            return;
+        }
+        let Ok((folder, file, inside)) = view.update(cx, |view, cx| view.materialize(action.index, cx)) else { return };
+        let mut info = FileInfo::probe(&file);
+        info.origin = Some(EntryOrigin { archive: action.archive.clone(), inside, folder: Arc::new(folder) });
+        self.open_info(file, info, window, cx);
     }
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
@@ -947,6 +1045,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_image_as))
             .on_action(cx.listener(Self::on_open_linked_file))
+            .on_action(cx.listener(Self::on_open_archive_entry))
             .on_action(cx.listener(Self::on_close_tab))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {

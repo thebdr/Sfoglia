@@ -17,6 +17,8 @@ pub enum Family {
     Spreadsheets,
     /// PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia (C-014).
     PdfXps,
+    /// Archives read: the entries listed, opened inside Sfoglia and extracted (C-015).
+    Archives,
     /// Word-processing documents (P-007).
     WordProcessing,
     /// Presentations (P-011).
@@ -37,8 +39,6 @@ pub enum Family {
     Audio,
     /// Video playback through VLC (P-020).
     Video,
-    /// Archives, with 7z read and write, as the seed of an archive manager (P-021).
-    Archives,
 }
 
 impl Family {
@@ -50,6 +50,7 @@ impl Family {
         Family::Markdown,
         Family::Spreadsheets,
         Family::PdfXps,
+        Family::Archives,
         Family::WordProcessing,
         Family::Presentations,
         Family::Visio,
@@ -60,7 +61,6 @@ impl Family {
         Family::CameraRaw,
         Family::Audio,
         Family::Video,
-        Family::Archives,
     ];
 
     /// The slug the contract names the family by.
@@ -72,6 +72,7 @@ impl Family {
             Family::Markdown => "markdown",
             Family::Spreadsheets => "spreadsheets",
             Family::PdfXps => "pdf-xps",
+            Family::Archives => "archives",
             Family::WordProcessing => "word-processing",
             Family::Presentations => "presentations",
             Family::Visio => "visio",
@@ -82,7 +83,6 @@ impl Family {
             Family::CameraRaw => "camera-raw",
             Family::Audio => "audio",
             Family::Video => "video",
-            Family::Archives => "archives",
         }
     }
 
@@ -95,6 +95,7 @@ impl Family {
             Family::Markdown => "Markdown rendering",
             Family::Spreadsheets => "Spreadsheets and delimited tables",
             Family::PdfXps => "PDF and XPS through SumatraPDF or a page renderer, and the tools outside Sfoglia",
+            Family::Archives => "Archives read: the entries listed, opened inside Sfoglia and extracted",
             Family::WordProcessing => "Word-processing documents",
             Family::Presentations => "Presentations",
             Family::Visio => "Visio diagrams",
@@ -105,7 +106,6 @@ impl Family {
             Family::CameraRaw => "Camera RAW images",
             Family::Audio => "Audio playback",
             Family::Video => "Video playback through VLC",
-            Family::Archives => "Archives, with 7z read and write, as the seed of an archive manager",
         }
     }
 
@@ -118,6 +118,7 @@ impl Family {
             Family::Markdown => "C-011",
             Family::Spreadsheets => "C-013",
             Family::PdfXps => "C-014",
+            Family::Archives => "C-015",
             Family::WordProcessing => "P-007",
             Family::Presentations => "P-011",
             Family::Visio => "P-012",
@@ -128,7 +129,6 @@ impl Family {
             Family::CameraRaw => "P-018",
             Family::Audio => "P-019",
             Family::Video => "P-020",
-            Family::Archives => "P-021",
         }
     }
 }
@@ -433,6 +433,7 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("tar.lzma", &[Family::Archives]),
     ("tar.xz", &[Family::Archives]),
     ("tar.z", &[Family::Archives]),
+    ("tar.zst", &[Family::Archives]),
     ("targa", &[Family::Images]),
     ("taz", &[Family::Archives]),
     ("tbz", &[Family::Archives]),
@@ -456,6 +457,7 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("txd", &[Family::Images]),
     ("txt", &[Family::Text]),
     ("txz", &[Family::Archives]),
+    ("tzst", &[Family::Archives]),
     ("vb", &[Family::Video]),
     ("vc1", &[Family::Video]),
     ("vdw", &[Family::Visio]),
@@ -522,4 +524,5 @@ pub static EXTENSIONS: &[(&str, &[Family])] = &[
     ("z", &[Family::Archives]),
     ("zip", &[Family::Archives]),
     ("zipx", &[Family::Archives]),
+    ("zst", &[Family::Archives]),
 ];

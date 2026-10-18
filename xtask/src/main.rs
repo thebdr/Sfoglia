@@ -491,6 +491,161 @@ fn three_pdf() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// The archive fixtures (C-015): the same five entries in a zip (one method each), a tar plain and through
+/// every codec, a 7z, an encrypted 7z, a lone compressed note per codec, and two archives with an entry that
+/// climbs out of its folder. One fixed time, so the bytes are the same on every run (the encrypted 7z salts
+/// itself, so it is written once and kept).
+fn archives(root: &Path) -> Result<(), String> {
+    use std::io::Write as _;
+    let fixtures = root.join("tests").join("fixtures");
+    let err = |e: &dyn std::fmt::Display| e.to_string();
+    // 2026-10-18 12:00:00 UTC.
+    const UNIX: u64 = 1_792_324_800;
+    let readme: &[u8] = b"# Bundle\n\nThree files and a folder.\n";
+    let table = std::fs::read(fixtures.join("table.csv")).map_err(|e| err(&e))?;
+    let dot = std::fs::read(fixtures.join("dot.png")).map_err(|e| err(&e))?;
+    let naive: &[u8] = "Unicode name\n".as_bytes();
+    let note: &[u8] = b"A note, compressed alone.\n";
+
+    // zip: deflate, bzip2, stored, zstd; the folder as an entry of its own after readme.md.
+    {
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, DateTime};
+        let stamp = DateTime::from_date_and_time(2026, 10, 18, 12, 0, 0).map_err(|e| err(&e))?;
+        let options = |method: CompressionMethod| SimpleFileOptions::default().compression_method(method).last_modified_time(stamp).unix_permissions(0o644);
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(fixtures.join("bundle.zip")).map_err(|e| err(&e))?);
+        zip.start_file("readme.md", options(CompressionMethod::Deflated)).map_err(|e| err(&e))?;
+        zip.write_all(readme).map_err(|e| err(&e))?;
+        zip.add_directory("data/", options(CompressionMethod::Stored)).map_err(|e| err(&e))?;
+        zip.start_file("data/table.csv", options(CompressionMethod::Bzip2)).map_err(|e| err(&e))?;
+        zip.write_all(&table).map_err(|e| err(&e))?;
+        zip.start_file("data/dot.png", options(CompressionMethod::Stored)).map_err(|e| err(&e))?;
+        zip.write_all(&dot).map_err(|e| err(&e))?;
+        zip.start_file("naïve.txt", options(CompressionMethod::Zstd)).map_err(|e| err(&e))?;
+        zip.write_all(naive).map_err(|e| err(&e))?;
+        zip.finish().map_err(|e| err(&e))?;
+        let mut escape = zip::ZipWriter::new(std::fs::File::create(fixtures.join("escape.zip")).map_err(|e| err(&e))?);
+        escape.start_file("../escape.txt", options(CompressionMethod::Stored)).map_err(|e| err(&e))?;
+        escape.write_all(b"out\n").map_err(|e| err(&e))?;
+        escape.start_file("ok.txt", options(CompressionMethod::Stored)).map_err(|e| err(&e))?;
+        escape.write_all(b"fine\n").map_err(|e| err(&e))?;
+        escape.finish().map_err(|e| err(&e))?;
+        println!("wrote {}", fixtures.join("bundle.zip").display());
+    }
+
+    // tar: the same entries, then the same bytes through each codec.
+    let tar_bytes = {
+        let mut builder = tar::Builder::new(Vec::new());
+        let header = |size: u64, dir: bool| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(size);
+            header.set_mtime(UNIX);
+            header.set_mode(if dir { 0o755 } else { 0o644 });
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_entry_type(if dir { tar::EntryType::Directory } else { tar::EntryType::Regular });
+            header
+        };
+        let mut h = header(readme.len() as u64, false);
+        builder.append_data(&mut h, "readme.md", readme).map_err(|e| err(&e))?;
+        let mut h = header(0, true);
+        builder.append_data(&mut h, "data/", std::io::empty()).map_err(|e| err(&e))?;
+        let mut h = header(table.len() as u64, false);
+        builder.append_data(&mut h, "data/table.csv", table.as_slice()).map_err(|e| err(&e))?;
+        let mut h = header(dot.len() as u64, false);
+        builder.append_data(&mut h, "data/dot.png", dot.as_slice()).map_err(|e| err(&e))?;
+        let mut h = header(naive.len() as u64, false);
+        builder.append_data(&mut h, "naïve.txt", naive).map_err(|e| err(&e))?;
+        builder.into_inner().map_err(|e| err(&e))?
+    };
+    std::fs::write(fixtures.join("bundle.tar"), &tar_bytes).map_err(|e| err(&e))?;
+    let gz = |bytes: &[u8], mtime: u32| -> Result<Vec<u8>, String> {
+        let mut encoder = flate2::GzBuilder::new().mtime(mtime).write(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).map_err(|e| err(&e))?;
+        encoder.finish().map_err(|e| err(&e))
+    };
+    let bz = |bytes: &[u8]| -> Result<Vec<u8>, String> {
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        encoder.write_all(bytes).map_err(|e| err(&e))?;
+        encoder.finish().map_err(|e| err(&e))
+    };
+    let xz = |bytes: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| err(&e))?;
+        Ok(out)
+    };
+    let lzma = |bytes: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        lzma_rs::lzma_compress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| err(&e))?;
+        Ok(out)
+    };
+    let zst = |bytes: &[u8]| -> Result<Vec<u8>, String> { zstd::stream::encode_all(std::io::Cursor::new(bytes), 3).map_err(|e| err(&e)) };
+    std::fs::write(fixtures.join("bundle.tar.gz"), gz(&tar_bytes, UNIX as u32)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("bundle.tgz"), gz(&tar_bytes, UNIX as u32)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("bundle.tar.bz2"), bz(&tar_bytes)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("bundle.tar.xz"), xz(&tar_bytes)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("bundle.tar.zst"), zst(&tar_bytes)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("note.txt.gz"), gz(note, UNIX as u32)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("note.txt.bz2"), bz(note)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("note.txt.xz"), xz(note)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("note.txt.lzma"), lzma(note)?).map_err(|e| err(&e))?;
+    std::fs::write(fixtures.join("note.txt.zst"), zst(note)?).map_err(|e| err(&e))?;
+    {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes) in [("../climb.txt", &b"out\n"[..]), ("ok.txt", &b"fine\n"[..])] {
+            let mut header = tar::Header::new_gnu();
+            // The tar crate refuses `..` in a path it sets itself: the name goes into the header bytes by hand.
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_size(bytes.len() as u64);
+            header.set_mtime(UNIX);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, bytes).map_err(|e| err(&e))?;
+        }
+        std::fs::write(fixtures.join("climb.tar"), builder.into_inner().map_err(|e| err(&e))?).map_err(|e| err(&e))?;
+    }
+    println!("wrote {} and the codec variants", fixtures.join("bundle.tar").display());
+    // A rar by signature alone, for the path through an installed 7-Zip (a stand-in in the tests).
+    std::fs::write(fixtures.join("fake.rar"), [b"Rar! ".as_slice(), &[0u8; 32]].concat()).map_err(|e| err(&e))?;
+
+    // 7z: LZMA2, one folder; the encrypted one kept once written (AES salts itself).
+    {
+        use sevenz_rust2::{ArchiveEntry, ArchiveWriter, EncoderConfiguration, EncoderMethod, NtTime};
+        let stamp = NtTime::new((UNIX + 11_644_473_600) * 10_000_000);
+        let entry = |name: &str, dir: bool| {
+            let mut entry = ArchiveEntry::new_file(name);
+            entry.is_directory = dir;
+            entry.has_stream = !dir;
+            entry.has_last_modified_date = true;
+            entry.last_modified_date = stamp;
+            entry
+        };
+        let mut writer = ArchiveWriter::create(fixtures.join("bundle.7z")).map_err(|e| err(&e))?;
+        writer.set_content_methods(vec![EncoderConfiguration::new(EncoderMethod::LZMA2)]);
+        writer.push_archive_entry(entry("readme.md", false), Some(readme)).map_err(|e| err(&e))?;
+        writer.push_archive_entry::<&[u8]>(entry("data", true), None).map_err(|e| err(&e))?;
+        writer.push_archive_entry(entry("data/table.csv", false), Some(table.as_slice())).map_err(|e| err(&e))?;
+        writer.push_archive_entry(entry("data/dot.png", false), Some(dot.as_slice())).map_err(|e| err(&e))?;
+        writer.push_archive_entry(entry("naïve.txt", false), Some(naive)).map_err(|e| err(&e))?;
+        writer.finish().map_err(|e| err(&e))?;
+        let secret = fixtures.join("secret.7z");
+        if !secret.exists() {
+            use sevenz_rust2::{Password, encoder_options::AesEncoderOptions};
+            let mut writer = ArchiveWriter::create(&secret).map_err(|e| err(&e))?;
+            writer.set_content_methods(vec![
+                EncoderConfiguration::from(AesEncoderOptions::new(Password::new("sfoglia"))),
+                EncoderConfiguration::new(EncoderMethod::LZMA2),
+            ]);
+            writer.push_archive_entry(entry("secret.txt", false), Some(&b"The password is sfoglia.\n"[..])).map_err(|e| err(&e))?;
+            writer.finish().map_err(|e| err(&e))?;
+            println!("wrote {}", secret.display());
+        }
+        println!("wrote {}", fixtures.join("bundle.7z").display());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,6 +1126,7 @@ fn fixtures(root: &Path) -> Result<(), String> {
     let pdf = root.join("tests").join("fixtures").join("three.pdf");
     std::fs::write(&pdf, three_pdf()).map_err(|e| format!("{}: {e}", pdf.display()))?;
     println!("wrote {}", pdf.display());
+    archives(root)?;
     let path = root.join("tests").join("fixtures").join("book2.xlsx");
     other.save(&path).map_err(err)?;
     println!("wrote {}", path.display());

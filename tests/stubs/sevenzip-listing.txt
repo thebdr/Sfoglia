@@ -1,0 +1,28 @@
+----------
+Path = docs\readme.md
+Folder = -
+Size = 20
+Packed Size = 18
+Modified = 2026-10-18 12:00:00
+Attributes = A
+CRC = 1A2B3C4D
+Method = RAR5:LZSS
+
+Path = docs
+Folder = +
+Size = 0
+Packed Size = 0
+Modified = 2026-10-18 12:00:00
+Attributes = D
+CRC =
+Method =
+
+Path = big.bin
+Folder = -
+Size = 1048576
+Packed Size = 1000
+Modified = 2026-10-18 12:00:00
+Attributes = A
+CRC = 00000000
+Method = RAR5:LZSS
+

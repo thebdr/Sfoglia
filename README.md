@@ -6,7 +6,8 @@
 
 Growing clause by clause. Sfoglia opens text and source files with highlighting rules, edits and saves them, shows
 images, structured data, Markdown, spreadsheets and delimited tables, PDF and XPS (through SumatraPDF on Windows or a
-page renderer), and the bytes of anything else; the window asks before closing modified tabs. [FORMATS.md](FORMATS.md)
+page renderer), the entries of archives (opened inside Sfoglia or extracted), and the bytes of anything else; the window
+asks before closing modified tabs. [FORMATS.md](FORMATS.md)
 is the checklist of every extension Sfoglia intends to read or write and how far each family has come.
 
 ## Open files
@@ -74,6 +75,26 @@ folders, then the search path. A PDF is a PDF by its header whatever its name; o
 while its tab is behind another or the closing dialog is up, and ends with the tab (Ctrl+W closes the active tab; the
 hosted window covers Sfoglia's own menus over the panel, the tab bar's included; keys typed into the document are
 SumatraPDF's, and a click anywhere in Sfoglia's window brings the keyboard back), or with Sfoglia however Sfoglia ends.
+
+## Archives
+
+An archive opens on the list of its entries: the name with its folder path, the size, the packed size, the date, the
+method and the CRC, with the folders as entries of their own. A click on the arrow in a column header sorts (descending
+first, then ascending, then the archive's order), Ctrl+Shift+F focuses the search field and what is typed there keeps
+the entries whose name contains it, any case; the arrows, Home and End move the selection. Enter or a double click on an
+entry opens it inside Sfoglia, read-only (a save says so), in the viewer its name and bytes call for, as a tab named
+`archive › path/inside`; the entry is kept in a folder of its own under the temporary folder, which goes when the tab
+closes. `Extract all` and `Extract selected` ask for a folder and write the entries with their paths inside it, never
+outside it (an entry whose path climbs out is skipped and named in the status row). The containers read here are zip
+(stored, deflate, bzip2, zstd and lzma entries), 7z (LZMA, LZMA2, BCJ, AES with a password), tar plain or through gzip,
+bzip2, xz, lzma or zstd (`tgz`, `tbz2`, `txz`, `tzst` and the rest of the spellings too), and a lone compressed file as a
+one-entry archive named after the file without its suffix; the container is told by the bytes first, so a `.zip` that
+holds a 7z opens as a 7z. An encrypted archive asks for the password in the tools row and says so after a wrong one,
+counting the tries. rar, cab, iso, rpm, deb, cpio, lha, arj, chm, xar, wim, dmg, vhd and the other containers no library
+here reads list and extract through an installed 7-Zip, found like the PDF tools (`SFOGLIA_7ZIP`, the install folder,
+the search path); with none installed the status row says what to install, with a `Look again` button, and the bytes
+show meanwhile. The status row names the container, the entry count and the packed and unpacked totals
+(`ZIP, 12 entries, 1.2 MB packed from 4.5 MB`) and, through 7-Zip, the tool with its version.
 
 ## Hex view
 

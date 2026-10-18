@@ -403,6 +403,13 @@ impl MarkdownView {
     }
 
     /// The raw text viewer (C-005, C-008).
+    /// The file may not be saved, for `reason` (an archive entry): the raw text says so.
+    pub fn set_read_only(&mut self, reason: String, cx: &mut Context<Self>) {
+        let text = self.text_view().clone();
+        text.update(cx, |text, cx| text.set_read_only(reason, cx));
+        cx.notify();
+    }
+
     pub fn text_view(&self) -> &Entity<TextView> {
         &self.text
     }

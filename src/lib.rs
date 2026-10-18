@@ -3,6 +3,7 @@
 //! The behaviour of this crate is governed by the contract in `.zen/contract.md`;
 //! each module names the clause it implements.
 
+pub mod archive;
 pub mod data;
 pub mod detect;
 pub mod generated;
