@@ -985,7 +985,13 @@ fn ctrl_w_closes_the_active_tab_wherever_the_focus_sits(cx: &mut TestAppContext)
         window.render_frame(cx);
         window.input("Q", cx);
         window.render_frame(cx);
-        assert!(panel.read(cx).is_dirty(cx));
+    })
+    .unwrap();
+    // The editor's change reaches the tab after the update: the edit counts once the window has parked.
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).panels(cx)[1].read(cx).is_dirty(cx), "the tab is modified");
         window.press("ctrl-w", cx);
         window.render_frame(cx);
     })
