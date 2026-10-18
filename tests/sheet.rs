@@ -606,6 +606,15 @@ fn a_large_delimited_text_opens_on_its_text(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(view.read(cx).raw_shown(), "still past the budget after the toggle");
         assert!(label(window, "sheet-message").contains("past the grid's 64 MB"));
+        // Cut below the budget in the text viewer: the next toggle brings the grid back, by tabs for a `.tsv`.
+        let text = view.read(cx).text_view().unwrap().clone();
+        let editor = text.read(cx).editor().clone();
+        editor.update(cx, |editor, cx| editor.replace_all("a\tb\n1\t2\n".to_string(), window, cx));
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown(), "under the budget again: the grid");
+        assert_eq!(label(window, "sheet-summary"), "TSV, 1 row, 2 columns, tab, UTF-8");
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "2"]));
     })
     .unwrap();
     std::fs::remove_file(&big).ok();
@@ -880,6 +889,28 @@ fn a_reload_follows_the_file_its_encoding_and_its_budget(cx: &mut TestAppContext
         assert!(view.read(cx).raw_shown(), "past the budget after a reload: the text shows");
         assert_eq!(label(window, "sheet-summary"), "CSV, past the grid's 64 MB");
         assert!(label(window, "sheet-message").contains("past the grid's 64 MB"));
+    })
+    .unwrap();
+    // Cut below the budget outside: Reload counts again (the text stays on screen), Ctrl+Shift+D shows the grid.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, "id,name\n1,x\n").unwrap();
+    cx.background_executor.advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("text-reload", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(view.read(cx).raw_shown(), "the text stays until asked");
+        assert_eq!(label(window, "sheet-summary"), "CSV, 1 row, 2 columns, comma, UTF-8", "counted again");
+        window.press("ctrl-shift-d", cx);
+        window.render_frame(cx);
+        assert!(!view.read(cx).raw_shown());
+        assert_eq!(dump(&view, cx).1[0], rows(&["1", "x"]));
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
