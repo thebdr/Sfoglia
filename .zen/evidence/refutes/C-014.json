@@ -1,0 +1,148 @@
+{
+  "clause": "C-014",
+  "verdict": "holds",
+  "ranAt": "2026-10-18T12:34:50.513Z",
+  "headCommit": "b35277df6bdcac54bd6fdcae3c46e0f3d899add6",
+  "tests": [
+    {
+      "name": "versions_are_read_from_banners_and_resources",
+      "file": "src/tools.rs",
+      "symbolSha": "b6351a4f86aec90612613dac1fe7b4275d239494d061a436caee4a63ef2c122d"
+    },
+    {
+      "name": "registered_commands_give_their_executable",
+      "file": "src/tools.rs",
+      "symbolSha": "b6351a4f86aec90612613dac1fe7b4275d239494d061a436caee4a63ef2c122d"
+    },
+    {
+      "name": "hints_name_the_tool_its_source_and_the_variable",
+      "file": "src/tools.rs",
+      "symbolSha": "b6351a4f86aec90612613dac1fe7b4275d239494d061a436caee4a63ef2c122d"
+    },
+    {
+      "name": "a_pinned_tool_is_found_or_not_by_its_path_and_the_cache_forgets_on_refresh",
+      "file": "src/tools.rs",
+      "symbolSha": "b6351a4f86aec90612613dac1fe7b4275d239494d061a436caee4a63ef2c122d"
+    },
+    {
+      "name": "the_search_order_is_the_variable_then_the_known_places_then_the_search_path",
+      "file": "src/tools.rs",
+      "symbolSha": "b6351a4f86aec90612613dac1fe7b4275d239494d061a436caee4a63ef2c122d"
+    },
+    {
+      "name": "mutool_page_lists_parse_with_their_boxes_and_rotations",
+      "file": "src/pdf_pages.rs",
+      "symbolSha": "7532dc9790f28c68ebb5444a0b729891f68d6961898a8cfa5bfdfed4e4a26e2e"
+    },
+    {
+      "name": "pdfinfo_output_parses_per_page_or_for_the_whole_document",
+      "file": "src/pdf_pages.rs",
+      "symbolSha": "7532dc9790f28c68ebb5444a0b729891f68d6961898a8cfa5bfdfed4e4a26e2e"
+    },
+    {
+      "name": "the_command_lines_name_the_tool_the_page_and_the_output",
+      "file": "src/pdf_pages.rs",
+      "symbolSha": "7532dc9790f28c68ebb5444a0b729891f68d6961898a8cfa5bfdfed4e4a26e2e"
+    },
+    {
+      "name": "the_command_line_and_the_dde_text_are_built_as_sumatra_reads_them",
+      "file": "src/pdf_host.rs",
+      "symbolSha": "7bae4a63f4bfdaec35876e3159f299c866c4908e24b33a624938ac836525dde3"
+    },
+    {
+      "name": "a_host_that_cannot_start_is_an_error_and_a_running_one_ends_when_dropped",
+      "file": "src/pdf_host.rs",
+      "symbolSha": "7bae4a63f4bfdaec35876e3159f299c866c4908e24b33a624938ac836525dde3"
+    },
+    {
+      "name": "the_frame_poll_never_gives_up_while_the_process_lives",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "the_pdf_extensions_map_to_their_family",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_pdf_opens_through_the_stub_renderer_as_a_page_column_with_zoom",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "without_a_tool_the_hint_names_each_tool_and_the_bytes_show_until_look_again",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_renderer_that_fails_reports_its_complaint",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_pdf_under_another_name_is_still_a_pdf",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_closed_tab_leaves_no_drawings_even_mid_flight",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_drawing_landing_after_its_pages_are_gone_removes_the_folder",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_tab_behind_another_tells_its_view_so_a_hosted_window_hides",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_hosted_window_hides_behind_the_closing_dialog_and_a_tab_closes_with_ctrl_w",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "ctrl_w_closes_the_active_tab_wherever_the_focus_sits",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "each_tab_group_shows_its_own_active_tab",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "drawings_follow_the_scroll_around_the_visible_pages",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_page_that_fails_to_draw_is_asked_again_only_after_a_zoom_change",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "a_complaint_stays_until_its_own_page_draws",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "the_sumatra_host_is_chosen_first_on_windows_and_waits_for_a_window",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    },
+    {
+      "name": "the_installed_sumatra_is_found_with_its_version",
+      "file": "tests/pdf.rs",
+      "symbolSha": "746c3449a1fb70fd009f2db3ef840ce83507fec03a1b1308b169d5acd793039c"
+    }
+  ]
+}
