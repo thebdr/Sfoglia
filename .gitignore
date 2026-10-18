@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 *.pdb
+
+# Logs the stand-in tools of the PDF tests write beside their drawings (never inside the repo when the stand-ins are right).
+calls.log

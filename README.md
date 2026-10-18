@@ -62,11 +62,12 @@ A PDF, XPS or OXPS opens through a tool outside Sfoglia. On Windows that is Suma
 inside the tab with its own toolbar (page, find, zoom, rotation, view modes), one SumatraPDF per tab, gone when the tab
 closes. Otherwise, and on Linux, an installed `mutool` (package mupdf-tools) or `pdftoppm` with `pdfinfo` (package
 poppler-utils) draws the pages into a scrollable column: fitted to the width, `+` and `-` zoom by a quarter, `0` fits
-again; the status row names the tool and its version, the page count, the page at the top and the zoom. With none of
-them installed the status row says what to install, with a `Look again` button for afterwards (offered on a failed listing too), and the bytes
-show meanwhile. Every tool is looked for the same way: an environment variable `SFOGLIA_SUMATRAPDF`, `SFOGLIA_MUTOOL`,
-`SFOGLIA_PDFTOPPM` or `SFOGLIA_PDFINFO` set to a path wins (a path to nothing switches the tool off), then the handler
-registered for the file class and the usual install folders, then the search path.
+again; the status row names the tool and its version, the page count, the page at the top and the zoom, and a tool's
+complaint when it has one. With none of them installed the status row says what to install, with a `Look again` button
+for afterwards (offered on a failed listing too), and the bytes show meanwhile. Every tool is looked for the same way:
+an environment variable `SFOGLIA_SUMATRAPDF`, `SFOGLIA_MUTOOL`, `SFOGLIA_PDFTOPPM` or `SFOGLIA_PDFINFO` set to a path
+wins (a path to nothing switches the tool off), then the handler registered for the file class and the usual install
+folders, then the search path.
 
 ## Hex view
 
