@@ -29,18 +29,25 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// The command that lists the pages.
-    pub fn pages_command(&self, pdf: &Path) -> Command {
+    /// The command that lists the pages; pdftoppm has none of its own, so without pdfinfo there is no listing
+    /// and nothing is run.
+    pub fn pages_command(&self, pdf: &Path) -> Result<Command, String> {
         match self.backend {
             Backend::MuTool => {
                 let mut command = Command::new(&self.exe);
                 command.arg("pages").arg(pdf);
-                command
+                Ok(command)
             }
             Backend::PdfToPpm => {
-                let mut command = Command::new(self.info_exe.as_deref().unwrap_or(&self.exe));
+                let info = self.info_exe.as_deref().ok_or_else(|| {
+                    format!(
+                        "pdftoppm needs pdfinfo from the same package to list the pages: {}",
+                        crate::tools::Tool::PdfInfo.install_hint()
+                    )
+                })?;
+                let mut command = Command::new(info);
                 command.args(["-f", "1", "-l", "1000000"]).arg(pdf);
-                command
+                Ok(command)
             }
         }
     }
@@ -67,7 +74,7 @@ impl Renderer {
 
     /// The pages of `pdf`, or the tool's own complaint.
     pub fn pages(&self, pdf: &Path) -> Result<Vec<PageSize>, String> {
-        let output = run(self.pages_command(pdf))?;
+        let output = run(self.pages_command(pdf)?)?;
         match self.backend {
             Backend::MuTool => parse_mutool_pages(&output),
             Backend::PdfToPpm => parse_pdfinfo(&output),
@@ -253,7 +260,7 @@ mod tests {
         let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["draw", "-F", "png", "-r", "150", "-o", &out.to_string_lossy(), "/d/x.pdf", "3"]);
         assert_eq!(out, Path::new("/tmp/p").join("page-3-150.png"));
-        let pages: Vec<String> = mutool.pages_command(Path::new("/d/x.pdf")).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let pages: Vec<String> = mutool.pages_command(Path::new("/d/x.pdf")).unwrap().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(pages, ["pages", "/d/x.pdf"]);
 
         let poppler = Renderer { backend: Backend::PdfToPpm, exe: PathBuf::from("/usr/bin/pdftoppm"), info_exe: Some(PathBuf::from("/usr/bin/pdfinfo")) };
@@ -261,9 +268,14 @@ mod tests {
         let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-png", "-r", "96", "-f", "2", "-l", "2", "-singlefile", "/d/x.pdf", &Path::new("/tmp/p").join("page-2-96").to_string_lossy()]);
         assert_eq!(out, Path::new("/tmp/p").join("page-2-96.png"));
-        let info = poppler.pages_command(Path::new("/d/x.pdf"));
+        let info = poppler.pages_command(Path::new("/d/x.pdf")).unwrap();
         assert_eq!(info.get_program(), "/usr/bin/pdfinfo");
         let args: Vec<String> = info.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-f", "1", "-l", "1000000", "/d/x.pdf"]);
+        // Without pdfinfo nothing lists the pages and nothing is run: the hint names the package.
+        let alone = Renderer { backend: Backend::PdfToPpm, exe: PathBuf::from("/nowhere/pdftoppm"), info_exe: None };
+        let expected = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
+        assert_eq!(alone.pages_command(Path::new("/d/x.pdf")).err().as_deref(), Some(expected));
+        assert_eq!(alone.pages(Path::new("/d/x.pdf")), Err(expected.to_string()), "the exe does not exist: had it run, the error would say so");
     }
 }

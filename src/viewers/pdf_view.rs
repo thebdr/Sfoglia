@@ -63,7 +63,10 @@ struct Pages {
     renderer: Arc<Renderer>,
     sizes: Vec<PageSize>,
     listing: bool,
+    /// The listing's complaint: no pages at all.
     failure: Option<String>,
+    /// The latest drawing's complaint, kept while a page stays undrawn.
+    draw_failure: Option<String>,
     /// The page's latest drawing and the dpi it was drawn at.
     images: HashMap<usize, (u32, Arc<RenderImage>)>,
     pending: HashSet<(usize, u32)>,
@@ -174,9 +177,6 @@ impl PdfView {
     fn start_pages(&mut self, tool: Tool, found: Found, cx: &mut Context<Self>) {
         let backend = if tool == Tool::MuTool { Backend::MuTool } else { Backend::PdfToPpm };
         let info_exe = (backend == Backend::PdfToPpm).then(|| self.tools.find(Tool::PdfInfo).map(|f| f.path)).flatten();
-        if backend == Backend::PdfToPpm && info_exe.is_none() {
-            self.message = format!("pdftoppm needs pdfinfo from the same package to list the pages: {}.", Tool::PdfInfo.install_hint());
-        }
         let renderer = Arc::new(Renderer { backend, exe: found.path, info_exe });
         let dir = std::env::temp_dir().join(format!("sfoglia-pdf-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed)));
         self.mode = Mode::Pages(Box::new(Pages {
@@ -184,6 +184,7 @@ impl PdfView {
             sizes: Vec::new(),
             listing: true,
             failure: None,
+            draw_failure: None,
             images: HashMap::new(),
             pending: HashSet::new(),
             failed: HashSet::new(),
@@ -291,6 +292,24 @@ impl PdfView {
         }
     }
 
+    /// The latest drawing's complaint, while a page stays undrawn.
+    pub fn draw_failure(&self) -> Option<&str> {
+        match &self.mode {
+            Mode::Pages(pages) => pages.draw_failure.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whether `Look again` is offered: no tool, or a listing that failed (a helper may be missing).
+    pub fn wants_look_again(&self) -> bool {
+        match &self.mode {
+            Mode::Missing => true,
+            Mode::Pages(pages) => pages.failure.is_some(),
+            #[cfg(windows)]
+            Mode::Host(_) => false,
+        }
+    }
+
     /// The zoom chosen, or none for fit-width.
     pub fn zoom(&self) -> Option<f32> {
         match &self.mode {
@@ -355,6 +374,7 @@ impl PdfView {
         if let Mode::Pages(pages) = &mut self.mode {
             pages.zoom = zoom;
             pages.failed.clear();
+            pages.draw_failure = None;
             cx.notify();
         }
     }
@@ -404,11 +424,16 @@ impl PdfView {
             Mode::Pages(pages) => {
                 let n = pages.sizes.len();
                 let noun = if n == 1 { "page" } else { "pages" };
-                format!(
+                let mut summary = format!(
                     "{kind}, {n} {noun} · page {} · {} %",
                     self.current_page().unwrap_or(1),
                     (self.effective_zoom() * 100.0).round() as i64
-                )
+                );
+                if let Some(complaint) = &pages.draw_failure {
+                    summary.push_str(" · ");
+                    summary.push_str(complaint);
+                }
+                summary
             }
             _ => kind,
         }
@@ -495,10 +520,14 @@ impl PdfView {
             match drawn {
                 Ok(picture) => {
                     pages.images.insert(page, (dpi, render_image(&picture, 0)));
+                    pages.failed.retain(|(p, _)| *p != page);
+                    if pages.failed.is_empty() {
+                        pages.draw_failure = None;
+                    }
                 }
                 Err(failure) => {
                     pages.failed.insert((page, dpi));
-                    pages.failure = Some(failure);
+                    pages.draw_failure = Some(failure);
                 }
             }
             cx.notify();
@@ -523,7 +552,7 @@ impl Render for PdfView {
         let summary = self.summary();
         let tool_label = self.tool_label();
         let message = self.message_text();
-        let missing = matches!(self.mode, Mode::Missing);
+        let look_again = self.wants_look_again();
         let status_row = h_flex()
             .id("pdf-status")
             .test_support()
@@ -539,11 +568,12 @@ impl Render for PdfView {
             .text_color(muted)
             .whitespace_nowrap()
             .overflow_hidden()
-            .child(div().id("pdf-summary").test_support().aria_label(summary.clone()).child(summary))
-            .child(div().id("pdf-tool").test_support().aria_label(tool_label.clone()).child(tool_label))
-            .when(missing, |row| {
+            // A long complaint in the summary gives way (an ellipsis) rather than pushing the tool and the button out.
+            .child(div().id("pdf-summary").test_support().aria_label(summary.clone()).min_w_0().overflow_hidden().text_ellipsis().child(summary))
+            .child(div().id("pdf-tool").test_support().aria_label(tool_label.clone()).flex_shrink_0().child(tool_label))
+            .when(look_again, |row| {
                 row.child(
-                    div().id("pdf-look-again").test_support().aria_label("Look again").child(
+                    div().id("pdf-look-again").test_support().aria_label("Look again").flex_shrink_0().child(
                         Button::new("pdf-look-again-button")
                             .label("Look again")
                             .xsmall()
@@ -551,7 +581,7 @@ impl Render for PdfView {
                     ),
                 )
             })
-            .child(div().id("pdf-message").test_support().aria_label(message.clone()).flex_1().overflow_hidden().child(message));
+            .child(div().id("pdf-message").test_support().aria_label(message.clone()).flex_1().min_w_0().overflow_hidden().text_ellipsis().child(message));
 
         let this = cx.entity().clone();
         let measure = canvas(

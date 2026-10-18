@@ -5,6 +5,7 @@
 //! give a `ToolSet` their own overrides so no machine's installs reach them.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -93,6 +94,10 @@ impl Tool {
     /// `/usr/local/bin` elsewhere.
     fn known_places(self) -> Vec<PathBuf> {
         let mut places = Vec::new();
+        // The handler registered for the file class comes before the install folders.
+        if self == Tool::SumatraPdf {
+            places.extend(registered_handler("SumatraPDF.pdf"));
+        }
         let roots = [
             std::env::var_os("ProgramFiles").map(PathBuf::from),
             std::env::var_os("ProgramFiles(x86)").map(PathBuf::from),
@@ -104,16 +109,13 @@ impl Tool {
             }
         };
         match self {
-            Tool::SumatraPdf => {
-                under_roots("SumatraPDF/SumatraPDF.exe");
-            }
+            Tool::SumatraPdf => under_roots("SumatraPDF/SumatraPDF.exe"),
             Tool::SevenZip => under_roots("7-Zip/7z.exe"),
             Tool::LibreOffice => under_roots("LibreOffice/program/soffice.exe"),
             Tool::Vlc => under_roots("VideoLAN/VLC/vlc.exe"),
             Tool::MuTool | Tool::PdfToPpm | Tool::PdfInfo => {}
         }
         if self == Tool::SumatraPdf {
-            places.extend(registered_handler("SumatraPDF.pdf"));
             places.extend(local.map(|l| l.join("SumatraPDF/SumatraPDF.exe")));
         }
         for name in self.executable_names().iter().filter(|n| !n.ends_with(".exe")) {
@@ -151,21 +153,67 @@ impl Found {
     }
 }
 
+/// What the search reads: the process's own environment, or one a test fixes.
+enum Environment {
+    Real,
+    Fixed { variables: HashMap<String, OsString>, search_path: Option<OsString>, places: HashMap<Tool, Vec<PathBuf>> },
+}
+
 /// The tools as this process sees them.
 pub struct ToolSet {
     overrides: HashMap<Tool, Option<PathBuf>>,
+    environment: Environment,
     cache: Mutex<HashMap<Tool, Option<Found>>>,
 }
 
 impl ToolSet {
     /// The machine's tools: the override variables, the known places, the search path.
     pub fn from_env() -> Self {
-        Self { overrides: HashMap::new(), cache: Mutex::new(HashMap::new()) }
+        Self { overrides: HashMap::new(), environment: Environment::Real, cache: Mutex::new(HashMap::new()) }
     }
 
     /// A tool set with the given tools pinned to a path or to nothing (tests), the rest as the machine has them.
     pub fn stubbed(overrides: impl IntoIterator<Item = (Tool, Option<PathBuf>)>) -> Self {
-        Self { overrides: overrides.into_iter().collect(), cache: Mutex::new(HashMap::new()) }
+        Self { overrides: overrides.into_iter().collect(), environment: Environment::Real, cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// A tool set searching a fixed environment (tests): these override variables, this search path and
+    /// these known places alone, nothing of the machine's.
+    pub fn in_environment(
+        variables: impl IntoIterator<Item = (String, OsString)>,
+        search_path: Option<OsString>,
+        places: impl IntoIterator<Item = (Tool, Vec<PathBuf>)>,
+    ) -> Self {
+        Self {
+            overrides: HashMap::new(),
+            environment: Environment::Fixed {
+                variables: variables.into_iter().collect(),
+                search_path,
+                places: places.into_iter().collect(),
+            },
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn variable(&self, name: &str) -> Option<OsString> {
+        match &self.environment {
+            Environment::Real => std::env::var_os(name),
+            Environment::Fixed { variables, .. } => variables.get(name).cloned(),
+        }
+    }
+
+    fn search_path(&self) -> Option<OsString> {
+        match &self.environment {
+            Environment::Real => std::env::var_os("PATH"),
+            Environment::Fixed { search_path, .. } => search_path.clone(),
+        }
+    }
+
+    fn places(&self, tool: Tool) -> Vec<PathBuf> {
+        match &self.environment {
+            Environment::Real => tool.known_places(),
+            Environment::Fixed { places, .. } => places.get(&tool).cloned().unwrap_or_default(),
+        }
     }
 
     /// Where the tool is, if it is installed: the override first (a path that is no file counts as not
@@ -201,18 +249,18 @@ impl ToolSet {
     fn search(&self, tool: Tool) -> Option<Found> {
         let pinned = match self.overrides.get(&tool) {
             Some(pinned) => Some(pinned.clone()),
-            None => std::env::var_os(tool.override_variable()).map(|value| Some(PathBuf::from(value))),
+            None => self.variable(tool.override_variable()).map(|value| Some(PathBuf::from(value))),
         };
         if let Some(pinned) = pinned {
             let path = pinned?;
             return path.is_file().then(|| Found { version: version_of(tool, &path), path });
         }
-        for place in tool.known_places() {
+        for place in self.places(tool) {
             if place.is_file() {
                 return Some(Found { version: version_of(tool, &place), path: place });
             }
         }
-        let search_path = std::env::var_os("PATH")?;
+        let search_path = self.search_path()?;
         for dir in std::env::split_paths(&search_path) {
             for name in tool.executable_names() {
                 let candidate = dir.join(name);
@@ -477,6 +525,65 @@ mod tests {
         assert!(set.find(Tool::MuTool).is_some());
         assert_eq!(set.refresh(Tool::MuTool), None);
         assert_eq!(Found { path: PathBuf::from("/x/y"), version: None }.describe(Tool::Vlc), "VLC at /x/y");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in tool at `path`: a script that prints a version.
+    fn stub_at(path: &Path, banner: &str) {
+        let body = if cfg!(windows) { format!("@echo off\r\necho {banner}\r\n") } else { format!("#!/bin/sh\necho {banner}\n") };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_search_order_is_the_variable_then_the_known_places_then_the_search_path() {
+        let dir = std::env::temp_dir().join("sfoglia-tools-order");
+        let _ = std::fs::remove_dir_all(&dir);
+        let name = if cfg!(windows) { "mutool.exe" } else { "mutool" };
+        let on_path = dir.join("bin").join(name);
+        let known = dir.join("known").join(name);
+        let pinned = dir.join("pinned").join(if cfg!(windows) { "any.cmd" } else { "any.sh" });
+        // On Windows a `.exe` stand-in has no version resource and is not run: the version comes out as none;
+        // the paths tell the places apart.
+        stub_at(&on_path, "mutool version 1.1");
+        stub_at(&known, "mutool version 2.2");
+        stub_at(&pinned, "mutool version 3.3");
+        let path_var = Some(OsString::from(dir.join("bin")));
+        let places = [(Tool::MuTool, vec![known.clone()])];
+
+        // The search path alone finds the tool there.
+        let set = ToolSet::in_environment([], path_var.clone(), []);
+        assert_eq!(set.find(Tool::MuTool).map(|f| f.path), Some(on_path.clone()));
+        // A known place wins over the search path.
+        let set = ToolSet::in_environment([], path_var.clone(), places.clone());
+        assert_eq!(set.find(Tool::MuTool).map(|f| f.path), Some(known.clone()));
+        // The variable wins over both.
+        let set = ToolSet::in_environment([("SFOGLIA_MUTOOL".to_string(), OsString::from(&pinned))], path_var.clone(), places.clone());
+        let found = set.find(Tool::MuTool).unwrap();
+        assert_eq!(found.path, pinned);
+        assert_eq!(found.version.as_deref(), Some("3.3"), "a script stand-in is run for its banner");
+        // The variable pointing at nothing switches the tool off, whatever the places and the path hold.
+        let set = ToolSet::in_environment([("SFOGLIA_MUTOOL".to_string(), OsString::from(dir.join("gone")))], path_var.clone(), places.clone());
+        assert_eq!(set.find(Tool::MuTool), None);
+        // A known place that is no file is skipped for the next one, then the path.
+        let set = ToolSet::in_environment([], path_var.clone(), [(Tool::MuTool, vec![dir.join("absent"), known.clone()])]);
+        assert_eq!(set.find(Tool::MuTool).map(|f| f.path), Some(known.clone()));
+        let set = ToolSet::in_environment([], path_var, [(Tool::MuTool, vec![dir.join("absent")])]);
+        assert_eq!(set.find(Tool::MuTool).map(|f| f.path), Some(on_path.clone()));
+        // Nothing anywhere: not installed, and the variable of another tool changes nothing.
+        let set = ToolSet::in_environment([("SFOGLIA_PDFTOPPM".to_string(), OsString::from(&pinned))], None, []);
+        assert_eq!(set.find(Tool::MuTool), None);
+        assert_eq!(set.find(Tool::PdfToPpm).map(|f| f.path), Some(pinned.clone()));
+        // The real machine's known places for SumatraPDF name the registered handler before the install folders.
+        let places = Tool::SumatraPdf.known_places();
+        if let Some(handler) = registered_handler("SumatraPDF.pdf") {
+            assert_eq!(places.first(), Some(&handler));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

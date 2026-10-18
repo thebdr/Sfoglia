@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui_kit::component::dock::{BasePanel as _, ClosePanel};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px};
 use sfoglia::detect::{Route, detect};
 use sfoglia::generated::families::Family;
 use sfoglia::pdf_pages::PageSize;
@@ -137,6 +137,14 @@ fn a_pdf_opens_through_the_stub_renderer_as_a_page_column_with_zoom(cx: &mut Tes
             assert_eq!(v.zoom(), None, "fit to the width by default");
             let fit = v.effective_zoom();
             assert!(fit > 0.05 && fit < 16.0, "{fit}");
+            // Fit to the width: the widest page (612 pt) fills the column but a 12 px gap each side.
+            let column = f32::from(window.find("pdf-scroll").bounds().size.width);
+            let expected_fit = (column - 24.0) / (612.0 * 96.0 / 72.0);
+            assert!((fit - expected_fit).abs() < 1e-4, "fit {fit} in a {column} px column, expected {expected_fit}");
+            let page_width = f32::from(window.find(("pdf-page", 1usize)).bounds().size.width);
+            assert!((page_width - (column - 24.0)).abs() < 0.5, "page 1 is {page_width} px wide in {column}");
+            let second = f32::from(window.find(("pdf-page", 2usize)).bounds().size.width);
+            assert!((second - 400.0 * 96.0 / 72.0 * fit).abs() < 0.5, "page 2 keeps its own width: {second}");
             assert_eq!(v.current_page(), Some(1));
             assert_eq!(label(window, "pdf-summary"), format!("PDF, 2 pages · page 1 · {} %", (fit * 100.0).round()));
             assert_eq!(label(window, "pdf-message"), "+ and - zoom, 0 fits the width");
@@ -163,8 +171,11 @@ fn a_pdf_opens_through_the_stub_renderer_as_a_page_column_with_zoom(cx: &mut Tes
             let dir = v.scratch_dir().expect("a folder for the drawings");
             assert!(dir.join(format!("page-1-{dpi}.png")).is_file(), "the stub's PNG for page 1");
             assert!(dir.join(format!("page-2-{dpi}.png")).is_file());
-            // A quarter in: the summary follows at once, the drawings at the new dpi come later.
-            view.update(cx, |v, cx| v.zoom_in(cx));
+            // A quarter in by the key: the summary follows at once, the drawings at the new dpi come later.
+            let focus = view.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            window.render_frame(cx);
+            window.press("+", cx);
             window.render_frame(cx);
             let v = view.read(cx);
             let zoom = v.zoom().expect("a chosen zoom");
@@ -179,18 +190,37 @@ fn a_pdf_opens_through_the_stub_renderer_as_a_page_column_with_zoom(cx: &mut Tes
         window.render_frame(cx);
         let dpi = (fit * 1.25 * 96.0 * scale).round() as u32;
         assert_eq!(view.read(cx).drawn_pages(), vec![(1, dpi), (2, dpi)]);
-        // The keys: a quarter out again, then fit.
-        let focus = view.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
+        // The keys: `=` is another quarter in, `-` twice brings the fit zoom back, `0` fits again.
+        window.press("=", cx);
         window.render_frame(cx);
+        let zoom = view.read(cx).zoom().expect("chosen");
+        assert!((zoom - fit * 1.25 * 1.25).abs() < 1e-5, "{zoom} vs {fit}");
+        window.press("-", cx);
         window.press("-", cx);
         window.render_frame(cx);
         let zoom = view.read(cx).zoom().expect("still chosen");
-        assert!((zoom - fit).abs() < 1e-5, "{zoom} vs {fit}");
+        assert!((zoom - fit).abs() < 1e-4, "{zoom} vs {fit}");
         window.press("0", cx);
         window.render_frame(cx);
         assert_eq!(view.read(cx).zoom(), None);
         assert_eq!(label(window, "pdf-summary"), format!("PDF, 2 pages · page 1 · {} %", (fit * 100.0).round()));
+        // The page at the top follows the scroll. The second page is short, so the column cannot scroll page 1
+        // out of view: at the very bottom page 1 is still the page at the top, by the column's own geometry
+        // (the eight-page test scrolls far enough for the page to change).
+        let page_1_height = 792.0 * 96.0 / 72.0 * fit;
+        let page_2_height = 200.0 * 96.0 / 72.0 * fit;
+        let viewport = f32::from(window.find("pdf-scroll").bounds().size.height);
+        let content = 12.0 + page_1_height + 12.0 + page_2_height + 12.0;
+        let scroll = view.read(cx).scroll_handle().unwrap().clone();
+        scroll.set_offset(point(px(0.0), px(-(content - viewport).max(0.0))));
+        window.render_frame(cx);
+        let top = -f32::from(scroll.offset().y);
+        let expected = if 12.0 + page_1_height > top + 1.0 { 1 } else { 2 };
+        assert_eq!(view.read(cx).current_page(), Some(expected), "top {top}, page 1 ends at {}", 12.0 + page_1_height);
+        assert_eq!(label(window, "pdf-summary"), format!("PDF, 2 pages · page {expected} · {} %", (fit * 100.0).round()));
+        scroll.set_offset(point(px(0.0), px(0.0)));
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).current_page(), Some(1));
     })
     .unwrap();
 }
@@ -311,7 +341,8 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
         assert_eq!(v.failure(), Some(expected_failure.as_str()));
         assert_eq!(v.page_sizes(), vec![]);
         assert_eq!(label(window, "pdf-summary"), format!("PDF, {expected_failure}"));
-        assert!(window.try_find("pdf-look-again").is_none(), "the tool is there; its complaint is the news");
+        assert!(window.try_find("pdf-look-again").is_some(), "a listing that failed offers to look again");
+        assert_eq!(view.read(cx).draw_failure(), None);
         assert!(window.try_find("hex-status").is_none());
     })
     .unwrap();
@@ -342,10 +373,7 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
             let on_oxps = cx.new(|cx| FilePanel::new(FileInfo::probe(&oxps), &rules, &nothing, window, cx));
             let view = no_info.read(cx).pdf_view().unwrap().read(cx);
             assert_eq!(view.mode_name(), "pages");
-            assert_eq!(
-                view.message(),
-                "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path."
-            );
+            assert_eq!(view.tool_label(), "pdftoppm 9.9", "the stub stands in for pdftoppm here, with its banner's version");
             let view = on_xps.read(cx).pdf_view().unwrap().read(cx);
             assert_eq!(view.kind(), "XPS");
             assert_eq!(view.tool_label(), "pdftoppm 9.9");
@@ -364,16 +392,210 @@ fn a_renderer_that_fails_reports_its_complaint(cx: &mut TestAppContext) {
         .unwrap();
     cx.run_until_parked();
     cx.update_window(handle, |_, _, cx| {
-        // The listing ran through the stub, which knows no `-f`: the complaint names the stub as run.
+        // Without pdfinfo nothing lists the pages and nothing is run: the hint is the complaint.
         let view = no_info.read(cx).pdf_view().unwrap().read(cx);
-        assert_eq!(view.failure(), Some("mutool: unknown command -f"));
-        assert_eq!(view.summary(), "PDF, mutool: unknown command -f");
+        let hint = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
+        assert_eq!(view.failure(), Some(hint));
+        assert_eq!(view.summary(), format!("PDF, {hint}"));
+        assert!(view.wants_look_again());
+        assert!(!view.scratch_dir().unwrap().join("calls.log").exists(), "the stub was never run");
+        // With a pdfinfo that knows no `-f` (the mutool stub), the complaint names the stub as run.
         let view = on_xps.read(cx).pdf_view().unwrap().read(cx);
         assert_eq!(view.failure(), Some("mutool: unknown command -f"));
         assert_eq!(on_oxps.read(cx).pdf_view().unwrap().read(cx).failure(), None);
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pages the stand-in drew, from the log it keeps beside the drawings.
+fn draw_calls(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default().lines().map(|l| l.trim().to_string()).collect()
+}
+
+/// The pages (from 1) whose box meets a viewport of `height` px scrolled to `top` px, in a column of
+/// `count` pages each `page_height` px tall with the 12 px gaps.
+fn pages_in_view(count: usize, page_height: f32, top: f32, height: f32) -> Vec<usize> {
+    let mut seen = Vec::new();
+    let mut y = 12.0f32;
+    for page in 1..=count {
+        if y + page_height >= top && y <= top + height {
+            seen.push(page);
+        }
+        y += page_height + 12.0;
+    }
+    seen
+}
+
+#[gpui_kit::test]
+fn drawings_follow_the_scroll_around_the_visible_pages(cx: &mut TestAppContext) {
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool-many"))), (Tool::PdfToPpm, None)]);
+    let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx)).unwrap();
+    cx.run_until_parked();
+    let (dir, page_height, height, at_top) = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let v = view.read(cx);
+            assert_eq!(v.page_sizes().len(), 8);
+            let fit = v.effective_zoom();
+            let page_height = 792.0 * 96.0 / 72.0 * fit;
+            let height = f32::from(window.find("pdf-scroll").bounds().size.height);
+            let visible = pages_in_view(8, page_height, 0.0, height);
+            let last = *visible.last().unwrap();
+            assert!(last < 7, "the viewport ({height} px) must not reach the last pages ({page_height} px each) for this test to mean anything");
+            let expected: Vec<usize> = (1..=last + 1).collect();
+            assert_eq!(v.drawn_pages().iter().map(|(p, _)| *p).collect::<Vec<_>>(), expected, "the visible pages and the next one");
+            let dir = v.scratch_dir().unwrap();
+            assert_eq!(draw_calls(&dir).len(), expected.len(), "one drawing each, nothing beyond: {:?}", draw_calls(&dir));
+            (dir, page_height, height, expected)
+        })
+        .unwrap();
+    // Scrolled to the end: the last pages and the one before them are drawn too; the first ones stay. The
+    // scroll lands during the next layout, and the frame after that asks for the drawings.
+    cx.update_window(handle, |_, window, cx| {
+        view.read(cx).scroll_handle().unwrap().scroll_to_bottom();
+        window.render_frame(cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        let total = 12.0 + 8.0 * (page_height + 12.0);
+        let bottom = pages_in_view(8, page_height, total - height, height);
+        let first = *bottom.first().unwrap();
+        let mut expected = at_top.clone();
+        expected.extend((first - 1)..=8);
+        expected.sort();
+        expected.dedup();
+        assert_eq!(v.drawn_pages().iter().map(|(p, _)| *p).collect::<Vec<_>>(), expected, "scrolled to the end");
+        assert_eq!(v.current_page(), Some(first));
+        assert_eq!(draw_calls(&dir).len(), expected.len());
+        assert_eq!(v.draw_failure(), None);
+        assert!(!v.wants_look_again());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_page_that_fails_to_draw_is_asked_again_only_after_a_zoom_change(cx: &mut TestAppContext) {
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool-page2"))), (Tool::PdfToPpm, None)]);
+    let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx)).unwrap();
+    cx.run_until_parked();
+    let complaint = "mutool-page2: error: cannot draw page 2";
+    let (dir, fit) = cx
+        .update_window(handle, |_, window, cx| {
+            // A few more frames: the failed page is not asked for again.
+            for _ in 0..3 {
+                window.render_frame(cx);
+            }
+            let v = view.read(cx);
+            let fit = v.effective_zoom();
+            let dpi = (fit * 96.0 * window.scale_factor()).round() as u32;
+            assert_eq!(v.page_sizes().len(), 2);
+            assert_eq!(v.drawn_pages(), vec![(1, dpi)], "page 1 drawn, page 2 not");
+            assert_eq!(v.failure(), None, "the listing itself went fine");
+            assert_eq!(v.draw_failure(), Some(complaint));
+            assert_eq!(label(window, "pdf-summary"), format!("PDF, 2 pages · page 1 · {} % · {complaint}", (fit * 100.0).round()));
+            assert!(window.try_find("pdf-look-again").is_none(), "the tool is there and listed the pages");
+            assert_eq!(label(window, ("pdf-page", 2usize)), "page 2: 612 × 792 pt");
+            let dir = v.scratch_dir().unwrap();
+            (dir, fit)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let calls = draw_calls(&dir);
+    assert_eq!(calls.iter().filter(|c| c.starts_with("draw 2 ")).count(), 1, "one try for page 2: {calls:?}");
+    assert_eq!(calls.len(), 2);
+    // A zoom change asks again at the new dpi; the complaint stays while the page stays undrawn.
+    cx.update_window(handle, |_, window, cx| {
+        let focus = view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("+", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).draw_failure(), None, "a zoom change wipes the old complaint until the drawing is tried again");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        let dpi = (fit * 1.25 * 96.0 * window.scale_factor()).round() as u32;
+        assert_eq!(v.drawn_pages(), vec![(1, dpi)]);
+        assert_eq!(v.draw_failure(), Some(complaint));
+    })
+    .unwrap();
+    let calls = draw_calls(&dir);
+    assert_eq!(calls.iter().filter(|c| c.starts_with("draw 2 ")).count(), 2, "page 2 tried once per zoom: {calls:?}");
+    assert_eq!(calls.len(), 4);
+}
+
+#[gpui_kit::test]
+fn pdftoppm_lists_pages_through_pdfinfo_and_look_again_finds_it_later(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-poppler");
+    let later = dir.join(if cfg!(windows) { "pdfinfo.cmd" } else { "pdfinfo.sh" });
+    let tools = ToolSet::stubbed([
+        (Tool::SumatraPdf, None),
+        (Tool::MuTool, None),
+        (Tool::PdfToPpm, Some(stub("pdftoppm"))),
+        (Tool::PdfInfo, Some(later.clone())),
+    ]);
+    let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    let hint = "pdftoppm needs pdfinfo from the same package to list the pages: install pdfinfo from the package poppler-utils, or set SFOGLIA_PDFINFO to its path";
+    let drawings = cx
+        .update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let v = view.read(cx);
+            assert_eq!(v.mode_name(), "pages");
+            assert_eq!(v.tool().map(|(t, f)| (t, f.path.clone())), Some((Tool::PdfToPpm, stub("pdftoppm"))));
+            assert_eq!(v.tool_label(), "pdftoppm 24.02.0", "the version from the banner on stderr");
+            assert_eq!(v.failure(), Some(hint));
+            assert_eq!(label(window, "pdf-summary"), format!("PDF, {hint}"));
+            assert!(window.try_find("pdf-look-again").is_some());
+            assert_eq!(v.page_sizes(), vec![]);
+            let drawings = v.scratch_dir().unwrap();
+            assert!(!drawings.join("calls.log").exists(), "pdftoppm was not run for a listing it cannot do");
+            drawings
+        })
+        .unwrap();
+    // pdfinfo arrives at its pinned path: Look again lists the pages, pdftoppm draws them.
+    install_wrapper(&later, &stub("pdfinfo"));
+    cx.update_window(handle, |_, window, cx| {
+        window.click("pdf-look-again-button", cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).is_listing());
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert_eq!(v.page_sizes(), pages(&[(612.0, 792.0), (792.0, 612.0)]), "the second page's quarter turn swaps its sides");
+        assert_eq!(v.failure(), None);
+        assert!(window.try_find("pdf-look-again").is_none());
+        assert!(label(window, "pdf-summary").starts_with("PDF, 2 pages · page 1 · "));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        let dpi = (v.effective_zoom() * 96.0 * window.scale_factor()).round() as u32;
+        assert_eq!(v.drawn_pages(), vec![(1, dpi), (2, dpi)]);
+        let drawings = v.scratch_dir().unwrap();
+        assert_eq!(drawings, drawings.clone());
+        let calls = draw_calls(&drawings);
+        assert_eq!(calls, vec![format!("draw 1 at {dpi}"), format!("draw 2 at {dpi}")].into_iter().filter(|c| calls.contains(c)).collect::<Vec<_>>(), "{calls:?}");
+        assert_eq!(calls.len(), 2);
+        assert!(drawings.join(format!("page-2-{dpi}.png")).is_file(), "pdftoppm's -singlefile output under the prefix");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = drawings;
 }
 
 #[cfg(windows)]
@@ -431,8 +653,7 @@ fn the_installed_sumatra_is_found_with_its_version() {
     match installed {
         Some(exe) => {
             let found = found.expect("SumatraPDF is installed under Program Files");
-            assert_eq!(found.path.file_name(), exe.file_name());
-            assert!(found.path.is_file());
+            assert_eq!(found.path.to_string_lossy().to_lowercase(), exe.to_string_lossy().to_lowercase());
             let version = found.version.clone().expect("the version resource");
             assert!(version.starts_with("3."), "{version}");
             assert_eq!(version.split('.').count(), 2, "3.6, not 3.6.0.0: {version}");
