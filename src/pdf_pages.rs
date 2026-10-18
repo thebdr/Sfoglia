@@ -188,6 +188,9 @@ pub fn parse_pdfinfo(text: &str) -> Result<Vec<PageSize>, String> {
         }
     }
     let count = count.ok_or_else(|| "pdfinfo gave no page count".to_string())?;
+    if count == 0 {
+        return Err("pdfinfo listed no pages".to_string());
+    }
     let mut pages = Vec::with_capacity(count);
     for n in 1..=count {
         let (w, h) = sizes
@@ -250,6 +253,12 @@ mod tests {
         assert_eq!(parse_pdfinfo(old).unwrap(), vec![PageSize { width_pt: 595.276, height_pt: 841.89 }; 2]);
         assert_eq!(parse_pdfinfo("Title: x\n"), Err("pdfinfo gave no page count".to_string()));
         assert_eq!(parse_pdfinfo("Pages: 1\n"), Err("pdfinfo gave no size for page 1".to_string()));
+        assert_eq!(parse_pdfinfo("Pages: 0\nPage size: 612 x 792 pts\n"), Err("pdfinfo listed no pages".to_string()), "no pages is no listing");
+        // A quarter turn the other way, or a negative one, swaps the sides as well.
+        assert_eq!(
+            parse_pdfinfo("Pages: 2\nPage    1 size: 612 x 792 pts\nPage    1 rot: 270\nPage    2 size: 612 x 792 pts\nPage    2 rot: -90\n").unwrap(),
+            vec![PageSize { width_pt: 792.0, height_pt: 612.0 }; 2]
+        );
     }
 
     #[test]

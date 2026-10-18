@@ -101,8 +101,8 @@ struct Pages {
     listing: bool,
     /// The listing's complaint: no pages at all.
     failure: Option<String>,
-    /// The latest drawing's complaint, kept while a page stays undrawn.
-    draw_failure: Option<String>,
+    /// The latest drawing's complaint with the page it is about, kept until that page draws.
+    draw_failure: Option<(usize, String)>,
     /// The page's latest drawing and the dpi it was drawn at.
     images: HashMap<usize, (u32, Arc<RenderImage>)>,
     pending: HashSet<(usize, u32)>,
@@ -222,9 +222,17 @@ impl PdfView {
                 }));
             }
             Err(error) => {
+                // A SumatraPDF that cannot start counts as absent: the renderers are tried next, with the reason
+                // kept in the status row.
                 self.host_state = HostState::Failed;
                 self.message = format!("SumatraPDF could not start: {error}.");
-                self.go_missing(window, cx);
+                match self.tools.first_found(&[Tool::MuTool, Tool::PdfToPpm]) {
+                    Some((tool, found)) => {
+                        self.tool = Some((tool, found.clone()));
+                        self.start_pages(tool, found, cx);
+                    }
+                    None => self.go_missing(window, cx),
+                }
             }
         }
     }
@@ -371,7 +379,7 @@ impl PdfView {
     /// The latest drawing's complaint, while a page stays undrawn.
     pub fn draw_failure(&self) -> Option<&str> {
         match &self.mode {
-            Mode::Pages(pages) => pages.draw_failure.as_deref(),
+            Mode::Pages(pages) => pages.draw_failure.as_ref().map(|(_, complaint)| complaint.as_str()),
             _ => None,
         }
     }
@@ -505,7 +513,7 @@ impl PdfView {
                     self.current_page().unwrap_or(1),
                     (self.effective_zoom() * 100.0).round() as i64
                 );
-                if let Some(complaint) = &pages.draw_failure {
+                if let Some((_, complaint)) = &pages.draw_failure {
                     summary.push_str(" · ");
                     summary.push_str(complaint);
                 }
@@ -592,13 +600,14 @@ impl PdfView {
                 Ok(picture) => {
                     pages.images.insert(page, (dpi, render_image(&picture, 0)));
                     pages.failed.retain(|(p, _)| *p != page);
-                    if pages.failed.is_empty() {
+                    // The complaint goes when the page it is about draws, not when another one does.
+                    if pages.draw_failure.as_ref().is_some_and(|(p, _)| *p == page) {
                         pages.draw_failure = None;
                     }
                 }
                 Err(failure) => {
                     pages.failed.insert((page, dpi));
-                    pages.draw_failure = Some(failure);
+                    pages.draw_failure = Some((page, failure));
                 }
             }
             cx.notify();
@@ -734,6 +743,11 @@ impl Render for PdfView {
                 div()
                     .id("pdf-scroll")
                     .test_support()
+                    .key_context(KEY_CONTEXT)
+                    .track_focus(&self.focus_handle)
+                    .on_action(cx.listener(Self::on_zoom_in))
+                    .on_action(cx.listener(Self::on_zoom_out))
+                    .on_action(cx.listener(Self::on_zoom_fit))
                     .relative()
                     .size_full()
                     .min_h_0()
@@ -764,13 +778,12 @@ impl Render for PdfView {
             }
         };
 
+        // The page column carries the view's focus and the zoom keys; the host and the hint (with the hex view
+        // and its fields) take the focus here, outside the zoom keys' context.
+        let in_pages = matches!(self.mode, Mode::Pages(_));
         v_flex()
             .id("pdf-view")
-            .key_context(KEY_CONTEXT)
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_zoom_in))
-            .on_action(cx.listener(Self::on_zoom_out))
-            .on_action(cx.listener(Self::on_zoom_fit))
+            .when(!in_pages, |view| view.track_focus(&self.focus_handle))
             .size_full()
             .bg(background)
             .text_color(foreground)

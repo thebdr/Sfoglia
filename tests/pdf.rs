@@ -300,6 +300,15 @@ fn without_a_tool_the_hint_names_each_tool_and_the_bytes_show_until_look_again(c
         assert!(row.starts_with("00000000  25 50 44 46 2d 31 2e 34"), "%PDF-1.4: {row}");
         assert!(panel.read(cx).pdf_view().is_some(), "the panel still shows the PDF view, which holds the bytes");
         assert!(window.try_find("pdf-scroll").is_none());
+        // The hex view's fields are the hex view's: digits and signs typed there are not the page column's zoom keys.
+        let goto = v.hex_view().unwrap().read(cx).goto_input().clone();
+        let focus = goto.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("0x10-2+0=", cx);
+        window.render_frame(cx);
+        assert_eq!(goto.read(cx).value().as_ref(), "0x10-2+0=", "every key reached the offset field");
+        assert_eq!(view.read(cx).zoom(), None);
     })
     .unwrap();
     // The tool arrives at the pinned path (a wrapper around the stand-in, which finds its fixtures next to
@@ -760,6 +769,53 @@ fn a_drawing_landing_after_its_pages_are_gone_removes_the_folder() {
     let failed = pdf_view::draw_page(&broken, &fixture("three.pdf"), 1, 96, &dir, &alive);
     assert_eq!(failed.err().as_deref(), Some("mutool-broken: error: cannot open document"));
     assert!(!dir.exists());
+}
+
+#[gpui_kit::test]
+fn a_complaint_stays_until_its_own_page_draws(cx: &mut TestAppContext) {
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool-many2"))), (Tool::PdfToPpm, None)]);
+    let (handle, _workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    cx.update_window(handle, |_, window, cx| window.render_frame(cx)).unwrap();
+    cx.run_until_parked();
+    let complaint = "mutool-many2: error: cannot draw page 2";
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert_eq!(v.page_sizes().len(), 8);
+        assert_eq!(v.draw_failure(), Some(complaint));
+        assert!(v.drawn_pages().iter().any(|(p, _)| *p == 1));
+        assert!(!v.drawn_pages().iter().any(|(p, _)| *p == 2));
+        // Scrolled to the end: other pages draw, the complaint about page 2 stays.
+        v.scroll_handle().unwrap().scroll_to_bottom();
+        window.render_frame(cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert!(v.drawn_pages().iter().any(|(p, _)| *p == 8), "the last page drew");
+        assert_eq!(v.draw_failure(), Some(complaint), "another page drawing does not clear it");
+        assert!(label(window, "pdf-summary").ends_with(&format!(" · {complaint}")));
+        // A zoom change with page 2 out of view: still not drawn, still the complaint.
+        let focus = v.focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("+", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let v = view.read(cx);
+        assert!(v.zoom().is_some());
+        assert!(!v.drawn_pages().iter().any(|(p, _)| *p == 2));
+        assert_eq!(v.draw_failure(), Some(complaint), "the complaint is about page 2, which never drew");
+        assert!(label(window, "pdf-summary").ends_with(&format!(" · {complaint}")));
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
