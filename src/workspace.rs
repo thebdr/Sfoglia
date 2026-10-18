@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeMode, WindowExt as _};
 use gpui_kit::component::dock::{
-    BasePanel, ClosePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
+    BasePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
     PanelEvent, PanelId, panel_handle,
 };
 use gpui_kit::prelude::*;
@@ -35,7 +35,7 @@ use crate::viewers::pdf_view::{self, PdfView};
 use crate::viewers::sheet_view;
 use crate::viewers::{DataView, HexView, ImageView, MarkdownView, RulesPanel, RulesStore, SheetView, TextView};
 
-actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs]);
+actions!(sfoglia, [OpenFiles, ToggleTheme, ToggleHighlightRules, ToggleHexView, SaveFile, SaveImageAs, CloseTab]);
 
 /// Key bindings and other once-per-application setup. Call after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
@@ -49,8 +49,8 @@ pub fn init(cx: &mut App) {
         // take the shift and stay reachable from inside its fields.
         KeyBinding::new("ctrl-shift-b", ToggleHexView, Some("Workspace")),
         // The active tab closes with Ctrl+W: a hosted window (C-014) hides the tab bar's own menu, so the
-        // chord is the way that always works.
-        KeyBinding::new("ctrl-w", ClosePanel, Some("Workspace")),
+        // chord is the way that always works, wherever the focus sits.
+        KeyBinding::new("ctrl-w", CloseTab, Some("Workspace")),
         KeyBinding::new("ctrl-s", SaveFile, Some("Workspace")),
         KeyBinding::new("ctrl-shift-s", SaveImageAs, Some("Workspace")),
         KeyBinding::new("+", ZoomIn, Some(image_view::KEY_CONTEXT)),
@@ -858,6 +858,28 @@ impl Workspace {
         .detach();
     }
 
+    /// Ctrl+W: the active tab closes, whatever has the focus (the kit's own close reaches only the group the
+    /// focus sits in, and nothing when the focus is on a tab no longer drawn). The tab to close is the shown
+    /// one the focus is in, else the active tab; the dock's own rules hold: a modified tab stays, and so
+    /// does the last tab.
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        let visible = self.visible_panels(cx);
+        let panels = self.panels(cx);
+        let focused = panels
+            .iter()
+            .find(|panel| {
+                visible.contains(&PanelId::from(panel.entity_id()))
+                    && panel.read(cx).focus_handle(cx).contains_focused(window, cx)
+            })
+            .cloned();
+        let Some(panel) = focused.or_else(|| self.active_panel(cx)) else { return };
+        if panels.len() <= 1 || !panel.read(cx).closable(cx) {
+            return;
+        }
+        self.dock_area.update(cx, |dock, cx| dock.remove_panel(panel.clone(), window, cx));
+        cx.notify();
+    }
+
     fn on_open_files(&mut self, _: &OpenFiles, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -876,7 +898,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A click anywhere in the window takes the keyboard back from a hosted window (C-014), so the chords
         // reach Sfoglia again after a click in a PDF.
         let reclaim = |_: &gpui_kit::MouseDownEvent, _window: &mut Window, _: &mut App| {
@@ -896,6 +918,22 @@ impl Render for Workspace {
             let shown = !dialog_up && visible.contains(&PanelId::from(file.panel.entity_id()));
             file.panel.update(cx, |panel, cx| panel.set_shown_by_dock(shown, cx));
         }
+        // The keyboard must sit on something drawn, or the chords reach nothing: a focus left on a tab that
+        // went behind (a text tab opened in front moves none), or left nowhere by a closed dialog, moves to
+        // the active tab.
+        if !dialog_up {
+            let stale = match window.focused(cx) {
+                None => true,
+                Some(_) => self.open.iter().any(|file| {
+                    !visible.contains(&PanelId::from(file.panel.entity_id()))
+                        && file.panel.read(cx).focus_handle(cx).contains_focused(window, cx)
+                }),
+            };
+            if stale && let Some(active) = self.active_panel(cx) {
+                let focus = active.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+        }
         let nothing_open = self.open.is_empty();
         div()
             .id("workspace")
@@ -909,6 +947,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_save_image_as))
             .on_action(cx.listener(Self::on_open_linked_file))
+            .on_action(cx.listener(Self::on_close_tab))
             .can_drop(|value, _, _| value.downcast_ref::<ExternalPaths>().is_some())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let paths = paths.paths().to_vec();

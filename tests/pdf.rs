@@ -128,6 +128,25 @@ fn the_frame_poll_never_gives_up_while_the_process_lives() {
     assert_eq!(pdf_view::poll_wait(50), Duration::from_millis(500), "after five seconds, every half second");
     assert_eq!(pdf_view::poll_wait(1_000), Duration::from_millis(500));
     assert_eq!(pdf_view::poll_wait(u32::MAX), Duration::from_millis(500), "there is no last try");
+    // The poll itself: a thousand looks that find nothing, then the frame; or the process gone at the seven
+    // hundredth look, with its reason.
+    let mut looks = 0u32;
+    let settled = futures::executor::block_on(pdf_view::poll_frame(|wait| {
+        looks += 1;
+        let outcome = if looks <= 1_000 { Ok(false) } else { Ok(true) };
+        assert_eq!(wait, pdf_view::poll_wait(looks - 1));
+        async move { outcome }
+    }));
+    assert_eq!(settled, Ok(()));
+    assert_eq!(looks, 1_001, "every look until the frame, none after");
+    let mut looks = 0u32;
+    let gone = futures::executor::block_on(pdf_view::poll_frame(|_| {
+        looks += 1;
+        let outcome = if looks < 700 { Ok(false) } else { Err("ended (exit code: 3)".to_string()) };
+        async move { outcome }
+    }));
+    assert_eq!(gone, Err("ended (exit code: 3)".to_string()));
+    assert_eq!(looks, 700, "a process gone ends the poll with its reason");
 }
 
 #[gpui_kit::test]
@@ -884,10 +903,9 @@ fn a_hosted_window_hides_behind_the_closing_dialog_and_a_tab_closes_with_ctrl_w(
         window.render_frame(cx);
         assert!(window.try_find("dialog").is_none());
         assert!(view.read(cx).shown(), "shown again once the dialog is gone");
-        // Ctrl+W closes the active tab, the one the hosted window belongs to.
-        let focus = view.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
-        window.render_frame(cx);
+        // Ctrl+W closes the active tab, the one the hosted window belongs to, with the focus wherever the
+        // cancelled dialog left it.
+        assert!(view.read(cx).focus_handle(cx).is_focused(window), "the dialog left the focus nowhere; the active tab took it back");
         window.press("ctrl-w", cx);
         window.render_frame(cx);
     })
@@ -897,6 +915,61 @@ fn a_hosted_window_hides_behind_the_closing_dialog_and_a_tab_closes_with_ctrl_w(
         window.render_frame(cx);
         let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
         assert_eq!(names, ["hello.txt"], "the PDF tab closed with Ctrl+W");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[gpui_kit::test]
+fn ctrl_w_closes_the_active_tab_wherever_the_focus_sits(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-ctrl-w");
+    let second = dir.join("second.pdf");
+    std::fs::copy(fixture("three.pdf"), &second).unwrap();
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool"))), (Tool::PdfToPpm, None)]);
+    let (handle, workspace, _panel, first) = open_pdf(cx, tools, fixture("three.pdf"));
+    let names = |workspace: &Entity<Workspace>, cx: &gpui_kit::App| -> Vec<String> {
+        workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect()
+    };
+    cx.update_window(handle, |_, window, cx| {
+        // A second PDF, then a text file in front: opening a text tab moves no focus, so the focus stays on the
+        // second PDF's view, a tab no longer drawn.
+        workspace.update(cx, |w, cx| w.open_paths(&[second.clone()], window, cx));
+        window.render_frame(cx);
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("hello.txt")], window, cx));
+        window.render_frame(cx);
+        assert_eq!(names(&workspace, cx), ["three.pdf", "second.pdf", "hello.txt"]);
+        assert_eq!(workspace.read(cx).active_file(cx).map(|f| f.name), Some("hello.txt".to_string()));
+        // The second PDF's view had the focus; the workspace moved it to the tab in front, so the chord lands.
+        let hidden = workspace.read(cx).panels(cx)[1].read(cx).pdf_view().unwrap().clone();
+        assert!(!hidden.read(cx).focus_handle(cx).is_focused(window), "a focus on a tab behind is moved along");
+        let front = workspace.read(cx).panels(cx)[2].read(cx).focus_handle(cx);
+        assert!(front.contains_focused(window, cx), "the tab in front holds it");
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&workspace, cx), ["three.pdf", "second.pdf"], "the active tab closed, not the focused one behind");
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&workspace, cx), ["three.pdf"], "and the next active tab");
+        assert!(first.read(cx).shown());
+        // The last tab of the only group stays, as the dock has it.
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&workspace, cx), ["three.pdf"]);
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&dir);

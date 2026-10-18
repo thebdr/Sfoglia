@@ -36,6 +36,26 @@ const PRELOAD: usize = 1;
 /// The dots per inch a page is drawn at are kept within reason.
 const DPI_RANGE: (f32, f32) = (24.0, 600.0);
 
+/// The frame poll: `look` waits as told, then looks for the frame; the poll goes on until a look says settled
+/// (`Ok(true)`) or reports the process gone (`Err`), never giving up on its own. The reason of a gone process
+/// is handed back.
+pub async fn poll_frame<L, F>(mut look: L) -> Result<(), String>
+where
+    L: FnMut(Duration) -> F,
+    F: std::future::Future<Output = Result<bool, String>>,
+{
+    let mut tries = 0u32;
+    loop {
+        let wait = poll_wait(tries);
+        tries = tries.saturating_add(1);
+        match look(wait).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => continue,
+            Err(reason) => return Err(reason),
+        }
+    }
+}
+
 /// How long the frame poll waits before its next look: a tenth of a second for the first five seconds, then
 /// half a second, for as long as the process lives (the poll never gives up on its own).
 pub fn poll_wait(tries: u32) -> Duration {
@@ -211,23 +231,27 @@ impl PdfView {
                 // every half second for as long as the process lives (a cold start can take longer). The frame
                 // found is hidden at once when the tab is hidden, and a repaint places it when it shows.
                 self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-                    let mut tries = 0u32;
-                    loop {
-                        let wait = poll_wait(tries);
-                        tries += 1;
-                        cx.background_executor().timer(wait).await;
-                        match this.update_in(cx, |view, window, cx| {
-                            let settled = view.settle_host();
-                            if let Err(reason) = &settled {
-                                view.host_failed(reason.clone(), window, cx);
-                            }
-                            cx.notify();
-                            settled
-                        }) {
-                            Ok(Ok(false)) => continue,
-                            _ => break,
+                    let executor = cx.background_executor().clone();
+                    let looks = cx.clone();
+                    let _ = poll_frame(move |wait| {
+                        let executor = executor.clone();
+                        let mut cx = looks.clone();
+                        let this = this.clone();
+                        async move {
+                            executor.timer(wait).await;
+                            // A view gone meanwhile (the tab closed) is nothing to wait for.
+                            this.update_in(&mut cx, |view, window, cx| {
+                                let settled = view.settle_host();
+                                if let Err(reason) = &settled {
+                                    view.host_failed(reason.clone(), window, cx);
+                                }
+                                cx.notify();
+                                settled
+                            })
+                            .unwrap_or(Ok(true))
                         }
-                    }
+                    })
+                    .await;
                 }));
             }
             Err(error) => self.host_failed(format!("SumatraPDF could not start: {error}."), window, cx),
