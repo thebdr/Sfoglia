@@ -1511,7 +1511,7 @@ mod tests {
     #[test]
     fn compress_streams_decode_natively_as_lone_files_and_tars() {
         // `note.txt.Z` and `bundle.tar.Z` come from xtask's own LZW writer (the real 7-Zip reads both back to the
-        // same bytes); `hand.txt.Z` was written by hand by another writer and read back the same by 7-Zip.
+        // same bytes); the other streams come from a second writer, see below.
         let note = fixture("note.txt.Z");
         let listing = list(&note, None, None).unwrap();
         assert_eq!(listing.container, Container::Lone(Codec::Compress));
@@ -1522,7 +1522,17 @@ mod tests {
         );
         assert_eq!(read_entry(&note, &listing, 0, None, None).unwrap(), b"A note, compressed alone.\n");
         assert_eq!(listing.describe("note.txt.Z", Some(33)), "Z, 1 entry, 33 B packed from 26 B");
-        assert_eq!(uncompress(&std::fs::read(fixture("hand.txt.Z")).unwrap()).unwrap(), b"A note, compressed alone.\n");
+        // Streams from a second writer (`scripts/compress-streams.pl`), read back by gzip and 7-Zip to the same bytes:
+        // a 12-bit one with three clear codes after a full table, an old-format one without block mode, and a
+        // 16-bit one that runs on with codes of every width.
+        for (stream, raw) in [("clear12.Z", "clear12.raw"), ("plain.Z", "plain.raw"), ("sixteen.Z", "sixteen.raw")] {
+            let decoded = uncompress(&std::fs::read(fixture(stream)).unwrap()).unwrap();
+            assert_eq!(decoded.len(), std::fs::read(fixture(raw)).unwrap().len(), "{stream}");
+            assert!(decoded == std::fs::read(fixture(raw)).unwrap(), "{stream} decodes to its raw bytes");
+        }
+        let plain = list(&fixture("plain.Z"), None, None).unwrap();
+        assert_eq!(plain.container, Container::Lone(Codec::Compress), "the old format by its signature");
+        assert_eq!((plain.entries[0].name.as_str(), plain.entries[0].size), ("plain", 6000));
         let tar = fixture("bundle.tar.Z");
         let listing = list(&tar, None, None).unwrap();
         assert_eq!(listing.container, Container::Tar(Some(Codec::Compress)));
