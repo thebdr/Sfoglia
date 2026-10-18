@@ -972,6 +972,32 @@ fn ctrl_w_closes_the_active_tab_wherever_the_focus_sits(cx: &mut TestAppContext)
         assert_eq!(names(&workspace, cx), ["three.pdf"]);
     })
     .unwrap();
+    // A modified tab stays: Ctrl+W throws no edit away, and opens no dialog either.
+    let draft = dir.join("draft.txt");
+    std::fs::copy(fixture("hello.txt"), &draft).unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[draft.clone()], window, cx));
+        window.render_frame(cx);
+        let panel = workspace.read(cx).panels(cx)[1].clone();
+        let text = panel.read(cx).text_view().expect("a text tab").clone();
+        let focus = text.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("Q", cx);
+        window.render_frame(cx);
+        assert!(panel.read(cx).is_dirty(cx));
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(names(&workspace, cx), ["three.pdf", "draft.txt"], "a modified tab stays open");
+        assert!(workspace.read(cx).panels(cx)[1].read(cx).is_dirty(cx), "its edit is kept");
+        assert!(window.try_find("dialog").is_none(), "and no dialog asks");
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
