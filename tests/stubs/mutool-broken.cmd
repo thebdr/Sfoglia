@@ -5,4 +5,5 @@ if "%~1"=="-v" (
   exit /b 0
 )
 echo error: cannot open document 1>&2
+echo error: a second line the status row never shows 1>&2
 exit /b 1

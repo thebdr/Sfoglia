@@ -16,8 +16,10 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetWindowThreadProcessId, MoveWindow, SW_HIDE, SW_SHOW, SendMessageW, ShowWindow, WM_COPYDATA,
+    FindWindowExW, GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
+    MoveWindow, SW_HIDE, SW_SHOW, SendMessageW, ShowWindow, WM_COPYDATA,
 };
 
 /// The class of SumatraPDF's top window, a child of ours in plugin mode.
@@ -130,6 +132,7 @@ impl SumatraHost {
                 if let Some(command) = command_on_found(self.shown) {
                     // SAFETY: a window handle this process found under its own parent.
                     unsafe { ShowWindow(found, command) };
+                    reclaim_focus(self.parent);
                 }
                 return self.frame;
             }
@@ -164,6 +167,10 @@ impl SumatraHost {
         if let Some(frame) = self.find_frame() {
             // SAFETY: as above.
             unsafe { ShowWindow(frame, if shown { SW_SHOW } else { SW_HIDE }) };
+            if !shown {
+                // A hidden window must not keep the keyboard: the chords would go to it unseen.
+                reclaim_focus(self.parent);
+            }
         }
     }
 
@@ -233,6 +240,39 @@ fn join_job(child: &Child) {
     }
 }
 
+/// The window that holds the keyboard focus right now, whichever thread owns it.
+fn focus_window() -> HWND {
+    // SAFETY: a zeroed GUITHREADINFO with its size set, as the call requires; thread 0 is the foreground one.
+    unsafe {
+        let mut info: GUITHREADINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        if GetGUIThreadInfo(0, &mut info) == 0 { std::ptr::null_mut() } else { info.hwndFocus }
+    }
+}
+
+/// Bring the keyboard back to Sfoglia's window when a window hosted under it holds the focus (SumatraPDF
+/// takes it as it starts and keeps it after a click in the document): Sfoglia's chords work again.
+pub fn reclaim_focus(parent: HWND) {
+    // Only while Sfoglia's window is the one in front: the keyboard is never taken from another application.
+    // SAFETY: window handles only passed back to the system; SetFocus targets this process's own window.
+    unsafe {
+        if GetForegroundWindow() != parent {
+            return;
+        }
+        let focus = focus_window();
+        if !focus.is_null() && focus != parent && GetAncestor(focus, GA_ROOT) == parent {
+            SetFocus(parent);
+        }
+    }
+}
+
+/// `reclaim_focus` for the GPUI window (a click anywhere in it).
+pub fn reclaim_keyboard(window: &gpui_kit::Window) {
+    if let Some(parent) = handle_of(window) {
+        reclaim_focus(parent as HWND);
+    }
+}
+
 /// The parent window's handle as the command line needs it.
 pub fn handle_of(window: &gpui_kit::Window) -> Option<usize> {
     use raw_window_handle::RawWindowHandle;
@@ -251,6 +291,32 @@ pub fn parent_in(arguments: &[OsString]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    /// Whether a process of this id is still listed.
+    fn alive(pid: u32) -> bool {
+        let listed = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().expect("tasklist runs");
+        String::from_utf8_lossy(&listed.stdout).contains(&pid.to_string())
+    }
+
+    #[test]
+    fn a_host_that_cannot_start_is_an_error_and_a_running_one_ends_when_dropped() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pdf = root.join("tests").join("fixtures").join("three.pdf");
+        // A file that is no program: the start fails, which the view turns into "could not start".
+        let text = root.join("tests").join("fixtures").join("hello.txt");
+        assert!(SumatraHost::start(&text, &pdf, 0).is_err(), "a text file cannot start");
+        // A stand-in that runs until ended: dropping the host ends it.
+        let sleeper = root.join("tests").join("stubs").join("sleeper.cmd");
+        let mut host = SumatraHost::start(&sleeper, &pdf, 0).expect("the stand-in starts");
+        let pid = host.pid();
+        assert!(host.is_running());
+        assert!(alive(pid), "the process is listed while the host lives");
+        assert_eq!(host.exit_status(), None);
+        assert!(!host.is_embedded(), "no frame: a stand-in makes no window");
+        drop(host);
+        assert!(!alive(pid), "dropped: the process is gone");
+    }
 
     #[test]
     fn the_command_line_and_the_dde_text_are_built_as_sumatra_reads_them() {

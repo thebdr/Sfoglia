@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use gpui_kit::component::Placement;
 use gpui_kit::component::dock::{BasePanel as _, ClosePanel, DockPlacement, InsertTarget, NodeId, PaneNode, PaneRef, PanelId};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, point, px};
 use sfoglia::detect::{Route, detect};
 use sfoglia::generated::families::Family;
 use sfoglia::pdf_pages::{Backend, PageSize, Renderer};
@@ -118,6 +118,16 @@ fn the_pdf_extensions_map_to_their_family() {
     assert_eq!(pdf_view::article_for("PDF"), "A");
     assert_eq!(pdf_view::article_for("XPS"), "An");
     assert_eq!(pdf_view::article_for("OXPS"), "An");
+}
+
+#[test]
+fn the_frame_poll_never_gives_up_while_the_process_lives() {
+    use std::time::Duration;
+    assert_eq!(pdf_view::poll_wait(0), Duration::from_millis(100));
+    assert_eq!(pdf_view::poll_wait(49), Duration::from_millis(100));
+    assert_eq!(pdf_view::poll_wait(50), Duration::from_millis(500), "after five seconds, every half second");
+    assert_eq!(pdf_view::poll_wait(1_000), Duration::from_millis(500));
+    assert_eq!(pdf_view::poll_wait(u32::MAX), Duration::from_millis(500), "there is no last try");
 }
 
 #[gpui_kit::test]
@@ -832,6 +842,64 @@ fn a_complaint_stays_until_its_own_page_draws(cx: &mut TestAppContext) {
         assert!(label(window, "pdf-summary").ends_with(&format!(" · {complaint}")));
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_hosted_window_hides_behind_the_closing_dialog_and_a_tab_closes_with_ctrl_w(cx: &mut TestAppContext) {
+    let dir = scratch_dir("pdf-dialog");
+    let hello = dir.join("hello.txt");
+    std::fs::copy(fixture("hello.txt"), &hello).unwrap();
+    let tools = ToolSet::stubbed([(Tool::SumatraPdf, None), (Tool::MuTool, Some(stub("mutool"))), (Tool::PdfToPpm, None)]);
+    let (handle, workspace, _panel, view) = open_pdf(cx, tools, fixture("three.pdf"));
+    // A modified text tab behind, so the window asks before closing; the PDF tab in front.
+    cx.update_window(handle, |_, window, cx| {
+        workspace.update(cx, |w, cx| w.open_paths(&[hello.clone()], window, cx));
+        window.render_frame(cx);
+        let text = workspace.read(cx).panels(cx)[1].read(cx).text_view().expect("a text tab").clone();
+        let focus = text.read(cx).editor().read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.input("Q", cx);
+        window.render_frame(cx);
+        workspace.update(cx, |w, cx| w.open_paths(&[fixture("three.pdf")], window, cx));
+        window.render_frame(cx);
+        assert!(view.read(cx).shown(), "the PDF tab is in front");
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    assert!(!vcx.simulate_close(), "a modified tab holds the window: the dialog opens");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_some(), "the closing dialog shows");
+        assert!(!view.read(cx).shown(), "a hosted window would cover the dialog: it hides while the dialog is up");
+        window.click("close-cancel", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("dialog").is_none());
+        assert!(view.read(cx).shown(), "shown again once the dialog is gone");
+        // Ctrl+W closes the active tab, the one the hosted window belongs to.
+        let focus = view.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press("ctrl-w", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let names: Vec<String> = workspace.read(cx).open_files(cx).into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["hello.txt"], "the PDF tab closed with Ctrl+W");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[gpui_kit::test]

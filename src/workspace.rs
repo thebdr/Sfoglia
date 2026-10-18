@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeMode, WindowExt as _};
 use gpui_kit::component::dock::{
-    BasePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
+    BasePanel, ClosePanel, DockArea, DockPlacement, DockSkin, PaneNode, PaneRef, Panel as KitPanel,
     PanelEvent, PanelId, panel_handle,
 };
 use gpui_kit::prelude::*;
@@ -48,6 +48,9 @@ pub fn init(cx: &mut App) {
         // The kit's inputs bind ctrl-f, ctrl-g and ctrl-h themselves, so the hex chords
         // take the shift and stay reachable from inside its fields.
         KeyBinding::new("ctrl-shift-b", ToggleHexView, Some("Workspace")),
+        // The active tab closes with Ctrl+W: a hosted window (C-014) hides the tab bar's own menu, so the
+        // chord is the way that always works.
+        KeyBinding::new("ctrl-w", ClosePanel, Some("Workspace")),
         KeyBinding::new("ctrl-s", SaveFile, Some("Workspace")),
         KeyBinding::new("ctrl-shift-s", SaveImageAs, Some("Workspace")),
         KeyBinding::new("+", ZoomIn, Some(image_view::KEY_CONTEXT)),
@@ -874,15 +877,23 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A click anywhere in the window takes the keyboard back from a hosted window (C-014), so the chords
+        // reach Sfoglia again after a click in a PDF.
+        let reclaim = |_: &gpui_kit::MouseDownEvent, _window: &mut Window, _: &mut App| {
+            #[cfg(windows)]
+            crate::pdf_host::reclaim_keyboard(_window);
+        };
         // A tab the dock closed is forgotten here too, so its panel and what it hosts (a SumatraPDF process,
         // a folder of drawings, C-014) go with it rather than at the next open.
         let dock = self.dock_area.clone();
         self.open.retain(|f| dock.read(cx).panel(PanelId::from(f.panel.entity_id())).is_some());
         // Each panel hears whether the dock shows it (the active tab of its group), so a hosted window hides
-        // behind another tab even when it appears only after the tab went behind.
+        // behind another tab even when it appears only after the tab went behind; and behind the closing
+        // dialog (C-012), which a hosted window would otherwise cover.
         let visible = self.visible_panels(cx);
+        let dialog_up = self.closing.is_some();
         for file in &self.open {
-            let shown = visible.contains(&PanelId::from(file.panel.entity_id()));
+            let shown = !dialog_up && visible.contains(&PanelId::from(file.panel.entity_id()));
             file.panel.update(cx, |panel, cx| panel.set_shown_by_dock(shown, cx));
         }
         let nothing_open = self.open.is_empty();
@@ -890,6 +901,7 @@ impl Render for Workspace {
             .id("workspace")
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
+            .capture_any_mouse_down(reclaim)
             .on_action(cx.listener(Self::on_open_files))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_toggle_rules))

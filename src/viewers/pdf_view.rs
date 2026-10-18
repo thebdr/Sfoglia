@@ -36,6 +36,12 @@ const PRELOAD: usize = 1;
 /// The dots per inch a page is drawn at are kept within reason.
 const DPI_RANGE: (f32, f32) = (24.0, 600.0);
 
+/// How long the frame poll waits before its next look: a tenth of a second for the first five seconds, then
+/// half a second, for as long as the process lives (the poll never gives up on its own).
+pub fn poll_wait(tries: u32) -> Duration {
+    Duration::from_millis(if tries < 50 { 100 } else { 500 })
+}
+
 /// Draw one page through the renderer and decode it. When the pages that asked are gone by the time the
 /// drawing lands (`alive` false: the tab closed meanwhile), the folder it wrote into goes with it.
 pub fn draw_page(
@@ -207,9 +213,9 @@ impl PdfView {
                 self._tasks.push(cx.spawn_in(window, async move |this, cx| {
                     let mut tries = 0u32;
                     loop {
-                        let wait = if tries < 50 { 100 } else { 500 };
+                        let wait = poll_wait(tries);
                         tries += 1;
-                        cx.background_executor().timer(Duration::from_millis(wait)).await;
+                        cx.background_executor().timer(wait).await;
                         match this.update_in(cx, |view, window, cx| {
                             let settled = view.settle_host();
                             if let Err(reason) = &settled {

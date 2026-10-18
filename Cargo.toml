@@ -42,7 +42,7 @@ csv = "1.4.0"
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_JobObjects", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
 
 [dev-dependencies]
 gpui-kit = { version = "0.7.3", features = ["tree-sitter-languages", "test-support"] }
